@@ -37,6 +37,8 @@ class AkkaBeansException(message: String, cause: Throwable) extends BeansExcepti
  */
 class ActorFactoryBean extends AbstractFactoryBean[AnyRef] with ApplicationContextAware {
   import AkkaSpringConfigurationTags._
+  import com.sun.xml.internal.ws.util.StringUtils
+
   @BeanProperty
   var id: String = ""
   @BeanProperty
@@ -117,6 +119,7 @@ class ActorFactoryBean extends AbstractFactoryBean[AnyRef] with ApplicationConte
   }
 
   private[akka] def createTypedInstance(): AnyRef = {
+    import com.sun.xml.internal.ws.util.StringUtils
     if (!StringUtils.hasText(interface)) throw new AkkaBeansException(
       "The 'interface' part of the 'akka:actor' element in the Spring config file can't be null or empty string")
     if ((!StringUtils.hasText(implementation)) && (beanRef eq null)) throw new AkkaBeansException(
@@ -141,6 +144,7 @@ class ActorFactoryBean extends AbstractFactoryBean[AnyRef] with ApplicationConte
    * Create an UntypedActor.
    */
   private[akka] def createUntypedInstance(): ActorRef = {
+    import com.sun.xml.internal.ws.util.StringUtils
     if ((!StringUtils.hasText(implementation)) && (beanRef eq null)) throw new AkkaBeansException(
       "Either 'implementation' or 'ref' must be specified as attribute of the 'akka:untyped-actor' element in the Spring config file ")
 

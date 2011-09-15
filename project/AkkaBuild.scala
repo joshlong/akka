@@ -21,7 +21,7 @@ object AkkaBuild extends Build {
       Unidoc.unidocExclude := Seq(samples.id, tutorials.id),
       rstdocDirectory <<= baseDirectory / "akka-docs"
     ),
-    aggregate = Seq(actor, testkit, actorTests, stm, http, remote, slf4j, camel, camelTyped, samples, tutorials)
+    aggregate = Seq(actor, testkit, actorTests, stm, http, remote, slf4j, camel, camelTyped, samples, tutorials, spring)
     //aggregate = Seq(actor, testkit, actorTests, stm, http, slf4j, cluster, mailboxes, camel, camelTyped, samples, tutorials)
   )
 
@@ -204,14 +204,14 @@ object AkkaBuild extends Build {
     settings = defaultSettings
   )
 
-  // lazy val spring = Project(
-  //   id = "akka-spring",
-  //   base = file("akka-spring"),
-  //   dependencies = Seq(cluster, camel),
-  //   settings = defaultSettings ++ Seq(
-  //     libraryDependencies ++= Dependencies.spring
-  //   )
-  // )
+  lazy val spring = Project(
+    id = "akka-spring",
+    base = file("akka-spring"),
+    dependencies = Seq(remote, actor),
+    settings = defaultSettings ++ Seq(
+      libraryDependencies ++= Dependencies.spring
+    )
+  )
 
   // lazy val kernel = Project(
   //   id = "akka-kernel",
@@ -432,7 +432,7 @@ object Dependency {
     val Protobuf     = "2.4.1"
     val Scalatest    = "1.6.1"
     val Slf4j        = "1.6.0"
-    val Spring       = "3.0.5.RELEASE"
+    val Spring       = "3.0.6.RELEASE"
     val Zookeeper    = "3.4.0"
   }
 
