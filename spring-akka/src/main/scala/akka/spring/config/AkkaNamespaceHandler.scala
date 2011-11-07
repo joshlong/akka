@@ -1,8 +1,8 @@
+package akka.spring.config
+
 /**
  *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
  */
-package akka.spring
-
 import org.springframework.beans.factory.xml.NamespaceHandlerSupport
 
 
