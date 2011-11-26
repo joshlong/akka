@@ -7,7 +7,9 @@ package akka.testkit
 import akka.actor._
 import akka.util._
 import com.eaio.uuid.UUID
-import akka.AkkaApplication
+import akka.actor.ActorSystem
+import akka.event.EventStream
+import akka.dispatch.{ DispatcherPrerequisites, Mailbox }
 
 /**
  * This is a specialised form of the TestActorRef with support for querying and
@@ -34,8 +36,13 @@ import akka.AkkaApplication
  * @author Roland Kuhn
  * @since 1.2
  */
-class TestFSMRef[S, D, T <: Actor](app: AkkaApplication, props: Props, supervisor: ActorRef, address: String)(implicit ev: T <:< FSM[S, D])
-  extends TestActorRef(app, props, supervisor, address) {
+class TestFSMRef[S, D, T <: Actor](
+  system: ActorSystemImpl,
+  _prerequisites: DispatcherPrerequisites,
+  props: Props,
+  supervisor: ActorRef,
+  name: String)(implicit ev: T <:< FSM[S, D])
+  extends TestActorRef(system, _prerequisites, props, supervisor, name) {
 
   private def fsm: T = underlyingActor
 
@@ -80,9 +87,13 @@ class TestFSMRef[S, D, T <: Actor](app: AkkaApplication, props: Props, superviso
 
 object TestFSMRef {
 
-  def apply[S, D, T <: Actor](factory: ⇒ T)(implicit ev: T <:< FSM[S, D], app: AkkaApplication): TestFSMRef[S, D, T] =
-    new TestFSMRef(app, Props(creator = () ⇒ factory), app.guardian, Props.randomAddress)
+  def apply[S, D, T <: Actor](factory: ⇒ T)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, system.dispatcherFactory.prerequisites, Props(creator = () ⇒ factory), impl.guardian, TestActorRef.randomName)
+  }
 
-  def apply[S, D, T <: Actor](factory: ⇒ T, address: String)(implicit ev: T <:< FSM[S, D], app: AkkaApplication): TestFSMRef[S, D, T] =
-    new TestFSMRef(app, Props(creator = () ⇒ factory), app.guardian, address)
+  def apply[S, D, T <: Actor](factory: ⇒ T, name: String)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl]
+    new TestFSMRef(impl, system.dispatcherFactory.prerequisites, Props(creator = () ⇒ factory), impl.guardian, name)
+  }
 }

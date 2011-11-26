@@ -5,19 +5,22 @@
 package akka.dispatch
 
 import java.util.concurrent._
-import java.util.concurrent.atomic.AtomicLong
-import akka.event.EventHandler
-import akka.config.Configuration
+import akka.event.Logging.Error
 import akka.util.{ Duration, Switch, ReentrantGuard }
+import atomic.{ AtomicInteger, AtomicLong }
 import java.util.concurrent.ThreadPoolExecutor.{ AbortPolicy, CallerRunsPolicy, DiscardOldestPolicy, DiscardPolicy }
 import akka.actor._
-import akka.AkkaApplication
+import akka.actor.ActorSystem
+import locks.ReentrantLock
 import scala.annotation.tailrec
+import akka.event.EventStream
+import akka.actor.ActorSystem.Settings
+import com.typesafe.config.Config
 
 /**
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-final case class Envelope(val message: Any, val channel: UntypedChannel) {
+final case class Envelope(val message: Any, val sender: ActorRef) {
   if (message.isInstanceOf[AnyRef] && (message.asInstanceOf[AnyRef] eq null)) throw new InvalidMessageException("Message is null")
 }
 
@@ -58,15 +61,15 @@ case class Suspend() extends SystemMessage // sent to self from ActorCell.suspen
 case class Resume() extends SystemMessage // sent to self from ActorCell.resume
 case class Terminate() extends SystemMessage // sent to self from ActorCell.stop
 case class Supervise(child: ActorRef) extends SystemMessage // sent to supervisor ActorRef from ActorCell.start
-case class Link(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.startsMonitoring
-case class Unlink(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.stopsMonitoring
+case class Link(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.startsWatching
+case class Unlink(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.stopsWatching
 
-final case class TaskInvocation(app: AkkaApplication, function: () ⇒ Unit, cleanup: () ⇒ Unit) extends Runnable {
+final case class TaskInvocation(eventStream: EventStream, function: () ⇒ Unit, cleanup: () ⇒ Unit) extends Runnable {
   def run() {
     try {
       function()
     } catch {
-      case e ⇒ app.eventHandler.error(e, this, e.getMessage)
+      case e ⇒ eventStream.publish(Error(e, "TaskInvocation", e.getMessage))
     } finally {
       cleanup()
     }
@@ -74,47 +77,26 @@ final case class TaskInvocation(app: AkkaApplication, function: () ⇒ Unit, cle
 }
 
 object MessageDispatcher {
-  val UNSCHEDULED = 0
+  val UNSCHEDULED = 0 //WARNING DO NOT CHANGE THE VALUE OF THIS: It relies on the faster init of 0 in AbstractMessageDispatcher
   val SCHEDULED = 1
   val RESCHEDULED = 2
 
-  implicit def defaultDispatcher(implicit app: AkkaApplication) = app.dispatcher
+  implicit def defaultDispatcher(implicit system: ActorSystem) = system.dispatcher
 }
 
 /**
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable {
+abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) extends AbstractMessageDispatcher with Serializable {
+
   import MessageDispatcher._
-
-  protected val _tasks = new AtomicLong(0L)
-  protected val _actors = new AtomicLong(0L)
-  protected val guard = new ReentrantGuard
-  protected val active = new Switch(false)
-
-  private var shutdownSchedule = UNSCHEDULED //This can be non-volatile since it is protected by guard withGuard
+  import AbstractMessageDispatcher.{ inhabitantsUpdater, shutdownScheduleUpdater }
+  import prerequisites._
 
   /**
    *  Creates and returns a mailbox for the given actor.
    */
   protected[akka] def createMailbox(actor: ActorCell): Mailbox
-
-  /**
-   * Create a blackhole mailbox for the purpose of replacing the real one upon actor termination
-   */
-  protected[akka] val deadLetterMailbox: Mailbox = DeadLetterMailbox
-
-  object DeadLetterMailbox extends Mailbox(null) {
-    becomeClosed()
-    override def dispatcher = null //MessageDispatcher.this
-    override def enqueue(envelope: Envelope) { envelope.channel sendException new ActorKilledException("Actor has been stopped") }
-    override def dequeue() = null
-    override def systemEnqueue(handle: SystemMessage): Unit = ()
-    override def systemDrain(): SystemMessage = null
-    override def hasMessages = false
-    override def hasSystemMessages = false
-    override def numberOfMessages = 0
-  }
 
   /**
    * Name of this dispatcher.
@@ -124,93 +106,68 @@ abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable 
   /**
    * Attaches the specified actor instance to this dispatcher
    */
-  final def attach(actor: ActorCell) {
-    guard.lock.lock()
-    try {
-      startIfUnstarted()
-      register(actor)
-    } finally {
-      guard.lock.unlock()
-    }
-  }
+  final def attach(actor: ActorCell): Unit = register(actor)
 
   /**
    * Detaches the specified actor instance from this dispatcher
    */
-  final def detach(actor: ActorCell) {
-    guard.lock.lock()
-    try {
-      unregister(actor)
-      if (_tasks.get == 0 && _actors.get == 0) {
-        shutdownSchedule match {
-          case UNSCHEDULED ⇒
-            shutdownSchedule = SCHEDULED
-            app.scheduler.scheduleOnce(shutdownAction, timeoutMs, TimeUnit.MILLISECONDS)
-          case SCHEDULED ⇒
-            shutdownSchedule = RESCHEDULED
-          case RESCHEDULED ⇒ //Already marked for reschedule
-        }
-      }
-    } finally { guard.lock.unlock() }
-  }
-
-  protected final def startIfUnstarted() {
-    if (active.isOff) {
-      guard.lock.lock()
-      try { active.switchOn { start() } }
-      finally { guard.lock.unlock() }
-    }
+  final def detach(actor: ActorCell): Unit = try {
+    unregister(actor)
+  } finally {
+    ifSensibleToDoSoThenScheduleShutdown()
   }
 
   protected[akka] final def dispatchTask(block: () ⇒ Unit) {
-    _tasks.getAndIncrement()
+    val invocation = TaskInvocation(eventStream, block, taskCleanup)
+    inhabitantsUpdater.incrementAndGet(this)
     try {
-      startIfUnstarted()
-      executeTask(TaskInvocation(app, block, taskCleanup))
+      executeTask(invocation)
     } catch {
       case e ⇒
-        _tasks.decrementAndGet
+        inhabitantsUpdater.decrementAndGet(this)
         throw e
     }
   }
 
-  private val taskCleanup: () ⇒ Unit =
-    () ⇒ if (_tasks.decrementAndGet() == 0) {
-      guard.lock.lock()
-      try {
-        if (_tasks.get == 0 && _actors.get == 0) {
-          shutdownSchedule match {
-            case UNSCHEDULED ⇒
-              shutdownSchedule = SCHEDULED
-              app.scheduler.scheduleOnce(shutdownAction, timeoutMs, TimeUnit.MILLISECONDS)
-            case SCHEDULED ⇒
-              shutdownSchedule = RESCHEDULED
-            case RESCHEDULED ⇒ //Already marked for reschedule
-          }
-        }
-      } finally { guard.lock.unlock() }
-    }
+  @tailrec
+  private final def ifSensibleToDoSoThenScheduleShutdown(): Unit = inhabitantsUpdater.get(this) match {
+    case 0 ⇒
+      shutdownScheduleUpdater.get(this) match {
+        case UNSCHEDULED ⇒
+          if (shutdownScheduleUpdater.compareAndSet(this, UNSCHEDULED, SCHEDULED)) {
+            scheduler.scheduleOnce(shutdownAction, Duration(shutdownTimeout.toMillis, TimeUnit.MILLISECONDS))
+            ()
+          } else ifSensibleToDoSoThenScheduleShutdown()
+        case SCHEDULED ⇒
+          if (shutdownScheduleUpdater.compareAndSet(this, SCHEDULED, RESCHEDULED)) ()
+          else ifSensibleToDoSoThenScheduleShutdown()
+        case RESCHEDULED ⇒ ()
+      }
+    case _ ⇒ ()
+  }
+
+  private final val taskCleanup: () ⇒ Unit =
+    () ⇒ if (inhabitantsUpdater.decrementAndGet(this) == 0) ifSensibleToDoSoThenScheduleShutdown()
 
   /**
-   * Only "private[akka] for the sake of intercepting calls, DO NOT CALL THIS OUTSIDE OF THE DISPATCHER,
-   * and only call it under the dispatcher-guard, see "attach" for the only invocation
+   * If you override it, you must call it. But only ever once. See "attach" for only invocation
    */
   protected[akka] def register(actor: ActorCell) {
-    _actors.incrementAndGet()
+    inhabitantsUpdater.incrementAndGet(this)
     // ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
     systemDispatch(actor, Create()) //FIXME should this be here or moved into ActorCell.start perhaps?
   }
 
   /**
-   * Only "private[akka] for the sake of intercepting calls, DO NOT CALL THIS OUTSIDE OF THE DISPATCHER,
-   * and only call it under the dispatcher-guard, see "detach" for the only invocation
+   * If you override it, you must call it. But only ever once. See "detach" for the only invocation
    */
   protected[akka] def unregister(actor: ActorCell) {
-    _actors.decrementAndGet()
+    inhabitantsUpdater.decrementAndGet(this)
     val mailBox = actor.mailbox
-    mailBox.becomeClosed()
-    actor.mailbox = deadLetterMailbox //FIXME getAndSet would be preferrable here
+    mailBox.becomeClosed() // FIXME reschedule in tell if possible race with cleanUp is detected in order to properly clean up
+    actor.mailbox = deadLetterMailbox
     cleanUpMailboxFor(actor, mailBox)
+    mailBox.cleanUp()
   }
 
   /**
@@ -222,46 +179,49 @@ abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable 
     if (mailBox.hasSystemMessages) {
       var message = mailBox.systemDrain()
       while (message ne null) {
-        deadLetterMailbox.systemEnqueue(message)
-        message = message.next
+        // message must be “virgin” before being able to systemEnqueue again
+        val next = message.next
+        message.next = null
+        deadLetterMailbox.systemEnqueue(actor.self, message)
+        message = next
       }
     }
 
     if (mailBox.hasMessages) {
       var envelope = mailBox.dequeue
       while (envelope ne null) {
-        deadLetterMailbox.enqueue(envelope)
+        deadLetterMailbox.enqueue(actor.self, envelope)
         envelope = mailBox.dequeue
       }
     }
   }
 
   private val shutdownAction = new Runnable {
-    def run() {
-      guard.lock.lock()
-      try {
-        shutdownSchedule match {
-          case RESCHEDULED ⇒
-            shutdownSchedule = SCHEDULED
-            app.scheduler.scheduleOnce(this, timeoutMs, TimeUnit.MILLISECONDS)
-          case SCHEDULED ⇒
-            if (_tasks.get == 0) {
-              active switchOff {
-                shutdown() // shut down in the dispatcher's references is zero
-              }
-            }
-            shutdownSchedule = UNSCHEDULED
-          case UNSCHEDULED ⇒ //Do nothing
-        }
-      } finally { guard.lock.unlock() }
+    @tailrec
+    final def run() {
+      shutdownScheduleUpdater.get(MessageDispatcher.this) match {
+        case UNSCHEDULED ⇒ ()
+        case SCHEDULED ⇒
+          try {
+            if (inhabitantsUpdater.get(MessageDispatcher.this) == 0) //Warning, racy
+              shutdown()
+          } finally {
+            shutdownScheduleUpdater.getAndSet(MessageDispatcher.this, UNSCHEDULED) //TODO perhaps check if it was modified since we checked?
+          }
+        case RESCHEDULED ⇒
+          if (shutdownScheduleUpdater.compareAndSet(MessageDispatcher.this, RESCHEDULED, SCHEDULED))
+            scheduler.scheduleOnce(this, Duration(shutdownTimeout.toMillis, TimeUnit.MILLISECONDS))
+          else run()
+      }
     }
   }
 
   /**
-   * When the dispatcher no longer has any actors registered, how long will it wait until it shuts itself down, in Ms
-   * defaulting to your akka configs "akka.actor.dispatcher-shutdown-timeout" or otherwise, 1 Second
+   * When the dispatcher no longer has any actors registered, how long will it wait until it shuts itself down,
+   * defaulting to your akka configs "akka.actor.dispatcher-shutdown-timeout" or default specified in
+   * akka-actor-reference.conf
    */
-  protected[akka] def timeoutMs: Long
+  protected[akka] def shutdownTimeout: Duration
 
   /**
    * After the call to this method, the dispatcher mustn't begin any new message processing for the specified reference
@@ -277,10 +237,8 @@ abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable 
    */
   def resume(actor: ActorCell): Unit = {
     val mbox = actor.mailbox
-    if (mbox.dispatcher eq this) {
-      mbox.becomeOpen()
+    if ((mbox.dispatcher eq this) && mbox.becomeOpen())
       registerForExecution(mbox, false, false)
-    }
   }
 
   /**
@@ -300,22 +258,18 @@ abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable 
 
   // TODO check whether this should not actually be a property of the mailbox
   protected[akka] def throughput: Int
-  protected[akka] def throughputDeadlineTime: Int
+  protected[akka] def throughputDeadlineTime: Duration
 
   @inline
-  protected[akka] final val isThroughputDeadlineTimeDefined = throughputDeadlineTime > 0
+  protected[akka] final val isThroughputDeadlineTimeDefined = throughputDeadlineTime.toMillis > 0
   @inline
   protected[akka] final val isThroughputDefined = throughput > 1
 
   protected[akka] def executeTask(invocation: TaskInvocation)
 
   /**
-   * Called one time every time an actor is attached to this dispatcher and this dispatcher was previously shutdown
-   */
-  protected[akka] def start(): Unit
-
-  /**
    * Called one time every time an actor is detached from this dispatcher and this dispatcher has no actors left attached
+   * Must be idempotent
    */
   protected[akka] def shutdown(): Unit
 
@@ -328,58 +282,46 @@ abstract class MessageDispatcher(val app: AkkaApplication) extends Serializable 
    * Returns the "current" emptiness status of the mailbox for the specified actor
    */
   def mailboxIsEmpty(actor: ActorCell): Boolean = !actor.mailbox.hasMessages
-
-  /**
-   * Returns the amount of tasks queued for execution
-   */
-  def tasks: Long = _tasks.get
 }
 
 /**
  * Trait to be used for hooking in new dispatchers into Dispatchers.fromConfig
  */
-abstract class MessageDispatcherConfigurator(val app: AkkaApplication) {
+abstract class MessageDispatcherConfigurator() {
   /**
    * Returns an instance of MessageDispatcher given a Configuration
    */
-  def configure(config: Configuration): MessageDispatcher
+  def configure(config: Config, settings: Settings, prerequisites: DispatcherPrerequisites): MessageDispatcher
 
-  def mailboxType(config: Configuration): MailboxType = {
-    val capacity = config.getInt("mailbox-capacity", app.AkkaConfig.MailboxCapacity)
+  def mailboxType(config: Config, settings: Settings): MailboxType = {
+    val capacity = config.getInt("mailbox-capacity")
     if (capacity < 1) UnboundedMailbox()
     else {
-      val duration = Duration(
-        config.getInt("mailbox-push-timeout-time", app.AkkaConfig.MailboxPushTimeout.toMillis.toInt),
-        app.AkkaConfig.DefaultTimeUnit)
+      val duration = Duration(config.getNanoseconds("mailbox-push-timeout-time"), TimeUnit.NANOSECONDS)
       BoundedMailbox(capacity, duration)
     }
   }
 
-  def configureThreadPool(config: Configuration, createDispatcher: ⇒ (ThreadPoolConfig) ⇒ MessageDispatcher): ThreadPoolConfigDispatcherBuilder = {
+  def configureThreadPool(config: Config,
+                          settings: Settings,
+                          createDispatcher: ⇒ (ThreadPoolConfig) ⇒ MessageDispatcher): ThreadPoolConfigDispatcherBuilder = {
     import ThreadPoolConfigDispatcherBuilder.conf_?
 
     //Apply the following options to the config if they are present in the config
-    ThreadPoolConfigDispatcherBuilder(createDispatcher, ThreadPoolConfig(app)).configure(
-      conf_?(config getInt "keep-alive-time")(time ⇒ _.setKeepAliveTime(Duration(time, app.AkkaConfig.DefaultTimeUnit))),
-      conf_?(config getDouble "core-pool-size-factor")(factor ⇒ _.setCorePoolSizeFromFactor(factor)),
-      conf_?(config getDouble "max-pool-size-factor")(factor ⇒ _.setMaxPoolSizeFromFactor(factor)),
-      conf_?(config getInt "executor-bounds")(bounds ⇒ _.setExecutorBounds(bounds)),
-      conf_?(config getBool "allow-core-timeout")(allow ⇒ _.setAllowCoreThreadTimeout(allow)),
-      conf_?(config getInt "task-queue-size" flatMap {
+
+    ThreadPoolConfigDispatcherBuilder(createDispatcher, ThreadPoolConfig()).configure(
+      conf_?(Some(config getMilliseconds "keep-alive-time"))(time ⇒ _.setKeepAliveTime(Duration(time, TimeUnit.MILLISECONDS))),
+      conf_?(Some(config getDouble "core-pool-size-factor"))(factor ⇒ _.setCorePoolSizeFromFactor(factor)),
+      conf_?(Some(config getDouble "max-pool-size-factor"))(factor ⇒ _.setMaxPoolSizeFromFactor(factor)),
+      conf_?(Some(config getBoolean "allow-core-timeout"))(allow ⇒ _.setAllowCoreThreadTimeout(allow)),
+      conf_?(Some(config getInt "task-queue-size") flatMap {
         case size if size > 0 ⇒
-          config getString "task-queue-type" map {
+          Some(config getString "task-queue-type") map {
             case "array"       ⇒ ThreadPoolConfig.arrayBlockingQueue(size, false) //TODO config fairness?
             case "" | "linked" ⇒ ThreadPoolConfig.linkedBlockingQueue(size)
             case x             ⇒ throw new IllegalArgumentException("[%s] is not a valid task-queue-type [array|linked]!" format x)
           }
         case _ ⇒ None
-      })(queueFactory ⇒ _.setQueueFactory(queueFactory)),
-      conf_?(config getString "rejection-policy" map {
-        case "abort"          ⇒ new AbortPolicy()
-        case "caller-runs"    ⇒ new CallerRunsPolicy()
-        case "discard-oldest" ⇒ new DiscardOldestPolicy()
-        case "discard"        ⇒ new DiscardPolicy()
-        case x                ⇒ throw new IllegalArgumentException("[%s] is not a valid rejectionPolicy [abort|caller-runs|discard-oldest|discard]!" format x)
-      })(policy ⇒ _.setRejectionPolicy(policy)))
+      })(queueFactory ⇒ _.setQueueFactory(queueFactory)))
   }
 }

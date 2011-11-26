@@ -4,7 +4,7 @@
 
 package akka.agent
 
-import akka.AkkaApplication
+import akka.actor.ActorSystem
 import akka.actor._
 import akka.stm._
 import akka.japi.{ Function ⇒ JFunc, Procedure ⇒ JProc }
@@ -20,7 +20,7 @@ private[akka] case object Get
  * Factory method for creating an Agent.
  */
 object Agent {
-  def apply[T](initialValue: T)(implicit app: AkkaApplication) = new Agent(initialValue, app)
+  def apply[T](initialValue: T)(implicit system: ActorSystem) = new Agent(initialValue, system)
 }
 
 /**
@@ -93,9 +93,9 @@ object Agent {
  * agent4.close
  * }}}
  */
-class Agent[T](initialValue: T, app: AkkaApplication) {
+class Agent[T](initialValue: T, system: ActorSystem) {
   private[akka] val ref = Ref(initialValue)
-  private[akka] val updater = app.actorOf(Props(new AgentUpdater(this))).asInstanceOf[LocalActorRef] //TODO can we avoid this somehow?
+  private[akka] val updater = system.actorOf(Props(new AgentUpdater(this))).asInstanceOf[LocalActorRef] //TODO can we avoid this somehow?
 
   /**
    * Read the internal state of the agent.
@@ -123,11 +123,9 @@ class Agent[T](initialValue: T, app: AkkaApplication) {
   def alter(f: T ⇒ T)(timeout: Timeout): Future[T] = {
     def dispatch = updater.?(Update(f), timeout).asInstanceOf[Future[T]]
     if (Stm.activeTransaction) {
-      val result = new DefaultPromise[T](timeout)(app.dispatcher)
+      val result = new DefaultPromise[T](timeout)(system.dispatcher)
       get //Join xa
-      deferred {
-        result completeWith dispatch
-      } //Attach deferred-block to current transaction
+      deferred { result completeWith dispatch } //Attach deferred-block to current transaction
       result
     } else dispatch
   }
@@ -153,8 +151,8 @@ class Agent[T](initialValue: T, app: AkkaApplication) {
   def sendOff(f: T ⇒ T): Unit = {
     send((value: T) ⇒ {
       suspend()
-      val pinnedDispatcher = new PinnedDispatcher(app, null, "agent-send-off", UnboundedMailbox(), app.AkkaConfig.ActorTimeoutMillis)
-      val threadBased = app.actorOf(Props(new ThreadBasedAgentUpdater(this)).withDispatcher(pinnedDispatcher))
+      val pinnedDispatcher = new PinnedDispatcher(system.dispatcherFactory.prerequisites, null, "agent-send-off", UnboundedMailbox(), system.settings.ActorTimeout.duration)
+      val threadBased = system.actorOf(Props(new ThreadBasedAgentUpdater(this)).withDispatcher(pinnedDispatcher))
       threadBased ! Update(f)
       value
     })
@@ -168,11 +166,11 @@ class Agent[T](initialValue: T, app: AkkaApplication) {
    * still be executed in order.
    */
   def alterOff(f: T ⇒ T)(timeout: Timeout): Future[T] = {
-    val result = new DefaultPromise[T](timeout)(app.dispatcher)
+    val result = new DefaultPromise[T](timeout)(system.dispatcher)
     send((value: T) ⇒ {
       suspend()
-      val pinnedDispatcher = new PinnedDispatcher(app, null, "agent-alter-off", UnboundedMailbox(), app.AkkaConfig.ActorTimeoutMillis)
-      val threadBased = app.actorOf(Props(new ThreadBasedAgentUpdater(this)).withDispatcher(pinnedDispatcher))
+      val pinnedDispatcher = new PinnedDispatcher(system.dispatcherFactory.prerequisites, null, "agent-alter-off", UnboundedMailbox(), system.settings.ActorTimeout.duration)
+      val threadBased = system.actorOf(Props(new ThreadBasedAgentUpdater(this)).withDispatcher(pinnedDispatcher))
       result completeWith threadBased.?(Update(f), timeout).asInstanceOf[Future[T]]
       value
     })
@@ -194,7 +192,7 @@ class Agent[T](initialValue: T, app: AkkaApplication) {
    * Map this agent to a new agent, applying the function to the internal state.
    * Does not change the value of this agent.
    */
-  def map[B](f: T ⇒ B): Agent[B] = Agent(f(get))(app)
+  def map[B](f: T ⇒ B): Agent[B] = Agent(f(get))(system)
 
   /**
    * Flatmap this agent to a new agent, applying the function to the internal state.
@@ -264,7 +262,7 @@ class Agent[T](initialValue: T, app: AkkaApplication) {
    * Map this agent to a new agent, applying the function to the internal state.
    * Does not change the value of this agent.
    */
-  def map[B](f: JFunc[T, B]): Agent[B] = Agent(f(get))(app)
+  def map[B](f: JFunc[T, B]): Agent[B] = Agent(f(get))(system)
 
   /**
    * Java API:
@@ -287,10 +285,9 @@ class AgentUpdater[T](agent: Agent[T]) extends Actor {
   val txFactory = TransactionFactory(familyName = "AgentUpdater", readonly = false)
 
   def receive = {
-    case update: Update[_] ⇒
-      channel.tryTell(atomic(txFactory) { agent.ref alter update.function.asInstanceOf[T ⇒ T] })
-    case Get ⇒ channel ! agent.get
-    case _   ⇒ ()
+    case update: Update[_] ⇒ sender.tell(atomic(txFactory) { agent.ref alter update.function.asInstanceOf[T ⇒ T] })
+    case Get               ⇒ sender.tell(agent.get)
+    case _                 ⇒
   }
 }
 
@@ -302,7 +299,7 @@ class ThreadBasedAgentUpdater[T](agent: Agent[T]) extends Actor {
 
   def receive = {
     case update: Update[_] ⇒ try {
-      channel.tryTell(atomic(txFactory) { agent.ref alter update.function.asInstanceOf[T ⇒ T] })
+      sender.tell(atomic(txFactory) { agent.ref alter update.function.asInstanceOf[T ⇒ T] })
     } finally {
       agent.resume()
       self.stop()

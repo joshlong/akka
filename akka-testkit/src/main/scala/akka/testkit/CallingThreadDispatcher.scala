@@ -3,16 +3,19 @@
  */
 package akka.testkit
 
-import akka.event.EventHandler
+import akka.event.Logging.{ Warning, Error }
 import java.util.concurrent.locks.ReentrantLock
 import java.util.LinkedList
 import java.util.concurrent.RejectedExecutionException
 import akka.util.Switch
 import java.lang.ref.WeakReference
 import scala.annotation.tailrec
-import akka.actor.ActorCell
+import akka.actor.{ ActorCell, ActorRef, ActorSystem }
 import akka.dispatch._
-import akka.AkkaApplication
+import akka.actor.Scheduler
+import akka.event.EventStream
+import akka.util.Duration
+import java.util.concurrent.TimeUnit
 
 /*
  * Locking rules:
@@ -104,41 +107,44 @@ private[testkit] object CallingThreadDispatcher {
  * @author Roland Kuhn
  * @since 1.1
  */
-class CallingThreadDispatcher(_app: AkkaApplication, val name: String = "calling-thread", val warnings: Boolean = true) extends MessageDispatcher(_app) {
+class CallingThreadDispatcher(
+  _prerequisites: DispatcherPrerequisites,
+  val name: String = "calling-thread") extends MessageDispatcher(_prerequisites) {
   import CallingThreadDispatcher._
 
-  protected[akka] override def createMailbox(actor: ActorCell) = new CallingThreadMailbox(this, actor)
+  val log = akka.event.Logging(prerequisites.eventStream, "CallingThreadDispatcher")
+
+  protected[akka] override def createMailbox(actor: ActorCell) = new CallingThreadMailbox(actor)
 
   private def getMailbox(actor: ActorCell): Option[CallingThreadMailbox] = actor.mailbox match {
     case m: CallingThreadMailbox ⇒ Some(m)
     case _                       ⇒ None
   }
 
-  protected[akka] override def start() {}
-
   protected[akka] override def shutdown() {}
 
   protected[akka] override def throughput = 0
-  protected[akka] override def throughputDeadlineTime = 0
+  protected[akka] override def throughputDeadlineTime = Duration.Zero
   protected[akka] override def registerForExecution(mbox: Mailbox, hasMessageHint: Boolean, hasSystemMessageHint: Boolean): Boolean = false
 
-  protected[akka] override def timeoutMs = 100L
+  protected[akka] override def shutdownTimeout = Duration(100L, TimeUnit.MILLISECONDS)
 
   override def suspend(actor: ActorCell) {
     getMailbox(actor) foreach (_.suspendSwitch.switchOn)
   }
 
   override def resume(actor: ActorCell) {
-    val mboxopt = getMailbox(actor)
-    if (mboxopt.isEmpty) return
-    val mbox = mboxopt.get
-    val queue = mbox.queue
-    val wasActive = queue.isActive
-    val switched = mbox.suspendSwitch.switchOff {
-      gatherFromAllOtherQueues(mbox, queue)
-    }
-    if (switched && !wasActive) {
-      runQueue(mbox, queue)
+    actor.mailbox match {
+      case mbox: CallingThreadMailbox ⇒
+        val queue = mbox.queue
+        val wasActive = queue.isActive
+        val switched = mbox.suspendSwitch.switchOff {
+          gatherFromAllOtherQueues(mbox, queue)
+        }
+        if (switched && !wasActive) {
+          runQueue(mbox, queue)
+        }
+      case m ⇒ m.systemEnqueue(actor.self, Resume())
     }
   }
 
@@ -147,41 +153,37 @@ class CallingThreadDispatcher(_app: AkkaApplication, val name: String = "calling
   override def mailboxIsEmpty(actor: ActorCell): Boolean = getMailbox(actor) map (_.queue.isEmpty) getOrElse true
 
   protected[akka] override def systemDispatch(receiver: ActorCell, message: SystemMessage) {
-    val mboxopt = getMailbox(receiver)
-    if (mboxopt.isEmpty) return
-    val mbox = mboxopt.get
-    mbox.systemEnqueue(message)
-    val queue = mbox.queue
-    if (!queue.isActive) {
-      queue.enter
-      runQueue(mbox, queue)
+    receiver.mailbox match {
+      case mbox: CallingThreadMailbox ⇒
+        mbox.systemEnqueue(receiver.self, message)
+        val queue = mbox.queue
+        if (!queue.isActive) {
+          queue.enter
+          runQueue(mbox, queue)
+        }
+      case m ⇒ m.systemEnqueue(receiver.self, message)
     }
   }
 
   protected[akka] override def dispatch(receiver: ActorCell, handle: Envelope) {
-    val mboxopt = getMailbox(receiver)
-    if (mboxopt.isEmpty) return
-    val mbox = mboxopt.get
-    val queue = mbox.queue
-    val execute = mbox.suspendSwitch.fold {
-      queue.push(handle)
-      if (warnings && handle.channel.isInstanceOf[Promise[_]]) {
-        app.eventHandler.warning(this, "suspendSwitch, creating Future could deadlock; target: %s" format receiver)
-      }
-      false
-    } {
-      queue.push(handle)
-      if (queue.isActive) {
-        if (warnings && handle.channel.isInstanceOf[Promise[_]]) {
-          app.eventHandler.warning(this, "blocked on this thread, creating Future could deadlock; target: %s" format receiver)
+    receiver.mailbox match {
+      case mbox: CallingThreadMailbox ⇒
+        val queue = mbox.queue
+        val execute = mbox.suspendSwitch.fold {
+          queue.push(handle)
+          false
+        } {
+          queue.push(handle)
+          if (queue.isActive)
+            false
+          else {
+            queue.enter
+            true
+          }
         }
-        false
-      } else {
-        queue.enter
-        true
-      }
+        if (execute) runQueue(mbox, queue)
+      case m ⇒ m.enqueue(receiver.self, handle)
     }
-    if (execute) runQueue(mbox, queue)
   }
 
   protected[akka] override def executeTask(invocation: TaskInvocation) { invocation.run }
@@ -212,22 +214,17 @@ class CallingThreadDispatcher(_app: AkkaApplication, val name: String = "calling
       }
       if (handle ne null) {
         try {
-          if (Mailbox.debug) println(mbox.actor + " processing message " + handle)
+          if (Mailbox.debug) println(mbox.actor.self + " processing message " + handle)
           mbox.actor.invoke(handle)
-          if (warnings) handle.channel match {
-            case f: ActorPromise if !f.isCompleted ⇒
-              app.eventHandler.warning(this, "calling %s with message %s did not reply as expected, might deadlock" format (mbox.actor, handle.message))
-            case _ ⇒
-          }
           true
         } catch {
           case ie: InterruptedException ⇒
-            app.eventHandler.error(this, ie)
+            log.error(ie, "Interrupted during message processing")
             Thread.currentThread().interrupt()
             intex = ie
             true
           case e ⇒
-            app.eventHandler.error(this, e)
+            log.error(e, "Error during message processing")
             queue.leave
             false
         }
@@ -266,7 +263,7 @@ class NestingQueue {
   def isActive = active
 }
 
-class CallingThreadMailbox(val dispatcher: MessageDispatcher, _receiver: ActorCell) extends Mailbox(_receiver) with DefaultSystemMessageQueue {
+class CallingThreadMailbox(_receiver: ActorCell) extends Mailbox(_receiver) with DefaultSystemMessageQueue {
 
   private val q = new ThreadLocal[NestingQueue]() {
     override def initialValue = {
@@ -281,7 +278,7 @@ class CallingThreadMailbox(val dispatcher: MessageDispatcher, _receiver: ActorCe
   val lock = new ReentrantLock
   val suspendSwitch = new Switch
 
-  override def enqueue(msg: Envelope) {}
+  override def enqueue(receiver: ActorRef, msg: Envelope) {}
   override def dequeue() = null
   override def hasMessages = true
   override def numberOfMessages = 0

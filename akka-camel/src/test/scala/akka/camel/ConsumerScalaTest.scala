@@ -138,15 +138,15 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
 
   "An non auto-acknowledging consumer" when {
     "started" must {
-      "must support acknowledgements on app level" in {
+      "must support acknowledgements on system level" in {
 
         var consumer: ActorRef = null
 
         service.awaitEndpointActivation(1) {
-          consumer = actorOf(new TestAckConsumer("direct:app-ack-test"))
+          consumer = actorOf(new TestAckConsumer("direct:system-ack-test"))
         } must be(true)
 
-        val endpoint = mandatoryContext.getEndpoint("direct:app-ack-test", classOf[DirectEndpoint])
+        val endpoint = mandatoryContext.getEndpoint("direct:system-ack-test", classOf[DirectEndpoint])
         val producer = endpoint.createProducer.asInstanceOf[AsyncProcessor]
         val exchange = endpoint.createExchange
 
@@ -211,7 +211,7 @@ object ConsumerScalaTest {
   class TestConsumer(uri: String) extends Actor with Consumer {
     def endpointUri = uri
     protected def receive = {
-      case msg: Message ⇒ channel ! "received %s" format msg.body
+      case msg: Message ⇒ sender ! "received %s" format msg.body
     }
   }
 
@@ -226,7 +226,7 @@ object ConsumerScalaTest {
     def endpointUri = uri
     override def autoack = false
     protected def receive = {
-      case msg: Message ⇒ channel ! Ack
+      case msg: Message ⇒ sender ! Ack
     }
   }
 
@@ -247,15 +247,15 @@ object ConsumerScalaTest {
 
     protected def receive = {
       case "fail"    ⇒ { throw new Exception("test") }
-      case "succeed" ⇒ channel ! "ok"
+      case "succeed" ⇒ sender ! "ok"
     }
 
     override def preRestart(reason: scala.Throwable, msg: Option[Any]) {
-      channel.tryTell("pr")
+      sender.tell("pr")
     }
 
     override def postStop {
-      channel.tryTell("ps")
+      sender.tell("ps")
     }
   }
 
@@ -288,7 +288,7 @@ object ConsumerScalaTest {
     }
 
     private def respondTo(msg: Message) =
-      if (valid) channel ! ("accepted: %s" format msg.body)
+      if (valid) sender ! ("accepted: %s" format msg.body)
       else throw new Exception("rejected: %s" format msg.body)
 
   }

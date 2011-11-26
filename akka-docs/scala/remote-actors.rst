@@ -182,8 +182,8 @@ The messages that it prevents are all that extends 'LifeCycleMessage':
 It also prevents the client from invoking any life-cycle and side-effecting methods, such as:
 * start
 * stop
-* startsMonitoring
-* stopsMonitoring
+* startsWatching
+* stopsWatching
 * etc.
 
 Using secure cookie for remote client authentication
@@ -666,7 +666,6 @@ Message Serialization
 
 All messages that are sent to remote actors needs to be serialized to binary format to be able to travel over the wire to the remote node. This is done by letting your messages extend one of the traits in the 'akka.serialization.Serializable' object. If the messages don't implement any specific serialization trait then the runtime will try to use standard Java serialization.
 
-Here are some examples, but full documentation can be found in the :ref:`serialization-scala`.
 
 Scala JSON
 ^^^^^^^^^^

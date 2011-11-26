@@ -6,23 +6,21 @@ package akka.event.slf4j
 
 import org.slf4j.{ Logger ⇒ SLFLogger, LoggerFactory ⇒ SLFLoggerFactory }
 
-import akka.event.EventHandler
+import akka.event.Logging._
 import akka.actor._
-import Actor._
 
 /**
  * Base trait for all classes that wants to be able use the SLF4J logging infrastructure.
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-trait Logging {
+trait SLF4JLogging {
   @transient
   lazy val log = Logger(this.getClass.getName)
 }
 
 object Logger {
   def apply(logger: String): SLFLogger = SLFLoggerFactory getLogger logger
-  def apply(clazz: Class[_]): SLFLogger = apply(clazz.getName)
   def root: SLFLogger = apply(SLFLogger.ROOT_LOGGER_NAME)
 }
 
@@ -31,32 +29,29 @@ object Logger {
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-class Slf4jEventHandler extends Actor with Logging {
-  import EventHandler._
+class Slf4jEventHandler extends Actor with SLF4JLogging {
 
   def receive = {
-    case event @ Error(cause, instance, message) ⇒
-      logger(instance).error("[{}] [{}] [{}]",
+    case event @ Error(cause, logSource, message) ⇒
+      Logger(logSource).error("[{}] [{}] [{}]",
         Array[AnyRef](event.thread.getName, message.asInstanceOf[AnyRef], stackTraceFor(cause)))
 
-    case event @ Warning(instance, message) ⇒
-      logger(instance).warn("[{}] [{}]",
+    case event @ Warning(logSource, message) ⇒
+      Logger(logSource).warn("[{}] [{}]",
         event.thread.getName, message.asInstanceOf[AnyRef])
 
-    case event @ Info(instance, message) ⇒
-      logger(instance).info("[{}] [{}]",
+    case event @ Info(logSource, message) ⇒
+      Logger(logSource).info("[{}] [{}]",
         event.thread.getName, message.asInstanceOf[AnyRef])
 
-    case event @ Debug(instance, message) ⇒
-      logger(instance).debug("[{}] [{}]",
+    case event @ Debug(logSource, message) ⇒
+      Logger(logSource).debug("[{}] [{}]",
         event.thread.getName, message.asInstanceOf[AnyRef])
 
-    case event ⇒ log.debug("[{}]", event.toString)
+    case InitializeLogger(_) ⇒
+      log.info("Slf4jEventHandler started")
+      sender ! LoggerInitialized
   }
 
-  def logger(instance: AnyRef): SLFLogger = instance match {
-    case a: ActorRef ⇒ Logger(a.address)
-    case _           ⇒ Logger(instance.getClass)
-  }
 }
 

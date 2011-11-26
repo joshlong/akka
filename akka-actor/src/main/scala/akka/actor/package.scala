@@ -19,16 +19,19 @@ package object actor {
   def simpleName(obj: AnyRef): String = {
     val n = obj.getClass.getName
     val i = n.lastIndexOf('.')
-    n.substring(i + 1).replaceAll("\\$+", ".")
+    n.substring(i + 1)
+  }
+
+  def simpleName(clazz: Class[_]): String = {
+    val n = clazz.getName
+    val i = n.lastIndexOf('.')
+    n.substring(i + 1)
   }
 
   implicit def future2actor[T](f: akka.dispatch.Future[T]) = new {
-    def pipeTo(channel: Channel[T]): this.type = {
-      if (f.isCompleted) {
-        f.value.get.fold(channel.sendException(_), channel.tryTell(_))
-      } else {
-        f onComplete { _.value.get.fold(channel.sendException(_), channel.tryTell(_)) }
-      }
+    def pipeTo(actor: ActorRef): this.type = {
+      def send(f: akka.dispatch.Future[T]) { f.value.get.fold(f ⇒ actor ! Status.Failure(f), r ⇒ actor ! r) }
+      if (f.isCompleted) send(f) else f onComplete send
       this
     }
   }

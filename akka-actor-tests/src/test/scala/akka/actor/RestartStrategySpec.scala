@@ -15,12 +15,8 @@ import akka.testkit.AkkaSpec
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class RestartStrategySpec extends AkkaSpec {
 
-  override def atStartup() {
-    app.eventHandler.notify(Mute(EventFilter[Exception]("Crashing...")))
-  }
-
-  override def atTermination() {
-    app.eventHandler.notify(UnMuteAll)
+  override def atStartup {
+    system.eventStream.publish(Mute(EventFilter[Exception]("Crashing...")))
   }
 
   object Ping
@@ -93,7 +89,7 @@ class RestartStrategySpec extends AkkaSpec {
 
       (1 to 100) foreach { _ ⇒ slave ! Crash }
       assert(countDownLatch.await(120, TimeUnit.SECONDS))
-      assert(!slave.isShutdown)
+      assert(!slave.isTerminated)
     }
 
     "ensure that slave restarts after number of crashes not within time range" in {
@@ -150,7 +146,7 @@ class RestartStrategySpec extends AkkaSpec {
 
       assert(thirdRestartLatch.tryAwait(1, TimeUnit.SECONDS))
 
-      assert(!slave.isShutdown)
+      assert(!slave.isTerminated)
     }
 
     "ensure that slave is not restarted after max retries" in {
@@ -187,7 +183,7 @@ class RestartStrategySpec extends AkkaSpec {
       // test restart and post restart ping
       assert(restartLatch.tryAwait(10, TimeUnit.SECONDS))
 
-      assert(!slave.isShutdown)
+      assert(!slave.isTerminated)
 
       // now crash again... should not restart
       slave ! Crash
@@ -201,7 +197,7 @@ class RestartStrategySpec extends AkkaSpec {
       slave ! Crash
       assert(stopLatch.tryAwait(10, TimeUnit.SECONDS))
       sleep(500L)
-      assert(slave.isShutdown)
+      assert(slave.isTerminated)
     }
 
     "ensure that slave is not restarted within time range" in {
@@ -210,7 +206,7 @@ class RestartStrategySpec extends AkkaSpec {
 
       val boss = actorOf(Props(new Actor {
         def receive = {
-          case p: Props      ⇒ channel ! context.actorOf(p)
+          case p: Props      ⇒ sender ! context.actorOf(p)
           case t: Terminated ⇒ maxNoOfRestartsLatch.open
         }
       }).withFaultHandler(OneForOneStrategy(List(classOf[Throwable]), None, Some(1000))))
@@ -232,7 +228,7 @@ class RestartStrategySpec extends AkkaSpec {
       })
       val slave = (boss ? slaveProps).as[ActorRef].get
 
-      boss startsMonitoring slave
+      boss startsWatching slave
 
       slave ! Ping
       slave ! Crash
@@ -241,7 +237,7 @@ class RestartStrategySpec extends AkkaSpec {
       // test restart and post restart ping
       assert(restartLatch.tryAwait(10, TimeUnit.SECONDS))
 
-      assert(!slave.isShutdown)
+      assert(!slave.isTerminated)
 
       // now crash again... should not restart
       slave ! Crash
@@ -257,7 +253,7 @@ class RestartStrategySpec extends AkkaSpec {
 
       assert(maxNoOfRestartsLatch.tryAwait(10, TimeUnit.SECONDS))
       sleep(500L)
-      assert(slave.isShutdown)
+      assert(slave.isTerminated)
     }
   }
 }

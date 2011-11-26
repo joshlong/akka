@@ -4,43 +4,44 @@
 
 package akka.remote
 
-import akka.AkkaApplication
+import akka.actor.ActorSystem
 import akka.actor._
-import akka.event.EventHandler
-import akka.dispatch.{ Dispatchers, Future, PinnedDispatcher }
+import akka.event.Logging
 import akka.actor.Status._
 import akka.util._
 import akka.util.duration._
 import akka.util.Helpers._
 import akka.actor.DeploymentConfig._
-import akka.serialization.{ Serialization, Serializer, ActorSerialization, Compression }
 import akka.serialization.Compression.LZF
 import akka.remote.RemoteProtocol._
 import akka.remote.RemoteProtocol.RemoteSystemDaemonMessageType._
-
 import java.net.InetSocketAddress
-
 import com.eaio.uuid.UUID
+import akka.serialization.{ JavaSerializer, Serialization, Serializer, Compression }
+import akka.dispatch.{ Terminate, Dispatchers, Future, PinnedDispatcher }
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit.MILLISECONDS
+import akka.serialization.SerializationExtension
 
 /**
  * Remote module - contains remote client and server config, remote server instance, remote daemon, remote dispatchers etc.
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-class Remote(val app: AkkaApplication) extends RemoteService {
+class Remote(val system: ActorSystemImpl, val nodename: String) {
 
-  import app._
-  import app.config
-  import app.AkkaConfig._
+  val log = Logging(system, "Remote")
 
-  // TODO move to AkkaConfig?
-  val shouldCompressData = config.getBool("akka.remote.use-compression", false)
-  val remoteSystemDaemonAckTimeout = Duration(config.getInt("akka.remote.remote-daemon-ack-timeout", 30), DefaultTimeUnit).toMillis.toInt
+  import system._
+  import settings._
 
-  val hostname = app.hostname
-  val port = app.port
+  private[remote] val remoteExtension = RemoteExtension(system)
+  private[remote] val serialization = SerializationExtension(system)
+  private[remote] val remoteAddress = {
+    RemoteAddress(remoteExtension.serverSettings.Hostname, remoteExtension.serverSettings.Port)
+  }
 
-  val failureDetector = new AccrualFailureDetector(FailureDetectorThreshold, FailureDetectorMaxSampleSize)
+  val failureDetector = new AccrualFailureDetector(system)
 
   //  val gossiper = new Gossiper(this)
 
@@ -49,53 +50,44 @@ class Remote(val app: AkkaApplication) extends RemoteService {
   // FIXME configure computeGridDispatcher to what?
   val computeGridDispatcher = dispatcherFactory.newDispatcher("akka:compute-grid").build
 
-  private[remote] lazy val remoteDaemonSupervisor = app.actorOf(Props(
-    OneForOneStrategy(List(classOf[Exception]), None, None))) // is infinite restart what we want?
+  // FIXME it is probably better to create another supervisor for handling the children created by handle_*
+  private[remote] lazy val remoteDaemonSupervisor = system.actorOf(Props(
+    OneForOneStrategy(List(classOf[Exception]), None, None)), "akka-system-remote-supervisor") // is infinite restart what we want?
 
   private[remote] lazy val remoteDaemon =
-    new LocalActorRef(
-      app,
-      Props(new RemoteSystemDaemon(this))
-        .withDispatcher(dispatcherFactory.newPinnedDispatcher(remoteDaemonServiceName)),
+    system.provider.actorOf(system,
+      Props(new RemoteSystemDaemon(this)).withDispatcher(dispatcherFactory.newPinnedDispatcher(remoteDaemonServiceName)),
       remoteDaemonSupervisor,
       remoteDaemonServiceName,
       systemService = true)
 
-  private[remote] lazy val remoteClientLifeCycleHandler = app.actorOf(Props(new Actor {
+  private[remote] lazy val remoteClientLifeCycleHandler = system.actorOf(Props(new Actor {
     def receive = {
-      case RemoteClientError(cause, client, address) ⇒ client.shutdownClientModule()
-      case RemoteClientDisconnected(client, address) ⇒ client.shutdownClientModule()
+      case RemoteClientError(cause, remote, address) ⇒ remote.shutdownClientConnection(address)
+      case RemoteClientDisconnected(remote, address) ⇒ remote.shutdownClientConnection(address)
       case _                                         ⇒ //ignore other
     }
   }), "akka.remote.RemoteClientLifeCycleListener")
 
-  lazy val eventStream = new NetworkEventStream(app)
+  lazy val eventStream = new NetworkEventStream(system)
 
   lazy val server: RemoteSupport = {
-    val remote = new akka.remote.netty.NettyRemoteSupport(app)
-    remote.start(hostname, port)
-    remote.register(remoteDaemonServiceName, remoteDaemon)
-    app.eventHandler.addListener(eventStream.channel)
-    app.eventHandler.addListener(remoteClientLifeCycleHandler)
-    // TODO actually register this provider in app in remote mode
+    val remote = new akka.remote.netty.NettyRemoteSupport(system)
+    remote.start() //TODO FIXME Any application loader here?
+
+    system.eventStream.subscribe(eventStream.sender, classOf[RemoteLifeCycleEvent])
+    system.eventStream.subscribe(remoteClientLifeCycleHandler, classOf[RemoteLifeCycleEvent])
+
+    // TODO actually register this provider in system in remote mode
     //provider.register(ActorRefProvider.RemoteProvider, new RemoteActorRefProvider)
     remote
   }
 
-  lazy val address = server.address
-
-  def start() {
-    val triggerLazyServerVal = address.toString
-    eventHandler.info(this, "Starting remote server on [%s]".format(triggerLazyServerVal))
+  def start(): Unit = {
+    val serverAddress = server.system.asInstanceOf[ActorSystemImpl].provider.rootPath.remoteAddress //Force init of server
+    val daemonAddress = remoteDaemon.address //Force init of daemon
+    log.info("Starting remote server on [{}] and starting remoteDaemon with address [{}]", serverAddress, daemonAddress)
   }
-
-  def uuidProtocolToUuid(uuid: UuidProtocol): UUID = new UUID(uuid.getHigh, uuid.getLow)
-
-  def uuidToUuidProtocol(uuid: UUID): UuidProtocol =
-    UuidProtocol.newBuilder
-      .setHigh(uuid.getTime)
-      .setLow(uuid.getClockSeqAndNode)
-      .build
 }
 
 /**
@@ -108,16 +100,15 @@ class Remote(val app: AkkaApplication) extends RemoteService {
 class RemoteSystemDaemon(remote: Remote) extends Actor {
 
   import remote._
-  import remote.app._
+  import remote.{ system ⇒ systemImpl }
 
   override def preRestart(reason: Throwable, msg: Option[Any]) {
-    eventHandler.debug(this, "RemoteSystemDaemon failed due to [%s] - restarting...".format(reason))
+    log.debug("RemoteSystemDaemon failed due to [{}] - restarting...", reason)
   }
 
   def receive: Actor.Receive = {
     case message: RemoteSystemDaemonMessageProtocol ⇒
-      eventHandler.debug(this,
-        "Received command [\n%s] to RemoteSystemDaemon on [%s]".format(message, nodename))
+      log.debug("Received command [\n{}] to RemoteSystemDaemon on [{}]", message.getMessageType, nodename)
 
       message.getMessageType match {
         case USE                    ⇒ handleUse(message)
@@ -135,16 +126,15 @@ class RemoteSystemDaemon(remote: Remote) extends Actor {
         //TODO: should we not deal with unrecognized message types?
       }
 
-    case unknown ⇒ eventHandler.warning(this, "Unknown message to RemoteSystemDaemon [%s]".format(unknown))
+    case unknown ⇒ log.warning("Unknown message to RemoteSystemDaemon [{}]", unknown)
   }
 
   def handleUse(message: RemoteSystemDaemonMessageProtocol) {
     try {
-      if (message.hasActorAddress) {
+      if (message.hasActorPath) {
 
         val actorFactoryBytes =
-          if (shouldCompressData) LZF.uncompress(message.getPayload.toByteArray)
-          else message.getPayload.toByteArray
+          if (remoteExtension.ShouldCompressData) LZF.uncompress(message.getPayload.toByteArray) else message.getPayload.toByteArray
 
         val actorFactory =
           serialization.deserialize(actorFactoryBytes, classOf[() ⇒ Actor], None) match {
@@ -152,21 +142,26 @@ class RemoteSystemDaemon(remote: Remote) extends Actor {
             case Right(instance) ⇒ instance.asInstanceOf[() ⇒ Actor]
           }
 
-        val actorAddress = message.getActorAddress
-        val newActorRef = app.actorOf(Props(creator = actorFactory), actorAddress)
+        val actorPath = ActorPath(systemImpl, message.getActorPath)
+        val parent = system.actorFor(actorPath.parent)
 
-        server.register(actorAddress, newActorRef)
+        if (parent.isDefined) {
+          systemImpl.provider.actorOf(systemImpl, Props(creator = actorFactory), parent.get, actorPath.name)
+        } else {
+          log.error("Parent actor does not exist, ignoring remote system daemon command [{}]", message)
+        }
 
       } else {
-        eventHandler.error(this, "Actor 'address' for actor to instantiate is not defined, ignoring remote system daemon command [%s]".format(message))
+        log.error("Actor 'address' for actor to instantiate is not defined, ignoring remote system daemon command [{}]", message)
       }
 
-      channel ! Success(address.toString)
+      sender ! Success(remoteAddress)
     } catch {
-      case error: Throwable ⇒
-        channel ! Failure(error)
+      case error: Throwable ⇒ //FIXME doesn't seem sensible
+        sender ! Failure(error)
         throw error
     }
+
   }
 
   // FIXME implement handleRelease
@@ -182,48 +177,55 @@ class RemoteSystemDaemon(remote: Remote) extends Actor {
 
     //   gossiper tell gossip
 
-    //   channel ! Success(address.toString)
+    //   sender ! Success(address.toString)
     // } catch {
     //   case error: Throwable ⇒
-    //     channel ! Failure(error)
+    //     sender ! Failure(error)
     //     throw error
     // }
   }
 
+  /*
+   * generate name for temporary actor refs
+   */
+  private val tempNumber = new AtomicLong
+  def tempName = "$_" + Helpers.base64(tempNumber.getAndIncrement())
+  def tempPath = remoteDaemon.path / tempName
+
   // FIXME: handle real remote supervision
   def handle_fun0_unit(message: RemoteSystemDaemonMessageProtocol) {
-    new LocalActorRef(app,
+    new LocalActorRef(systemImpl,
       Props(
         context ⇒ {
           case f: Function0[_] ⇒ try { f() } finally { context.self.stop() }
-        }).copy(dispatcher = computeGridDispatcher), app.guardian, Props.randomAddress, systemService = true) ! payloadFor(message, classOf[Function0[Unit]])
+        }).copy(dispatcher = computeGridDispatcher), remoteDaemon, tempPath, systemService = true) ! payloadFor(message, classOf[Function0[Unit]])
   }
 
   // FIXME: handle real remote supervision
   def handle_fun0_any(message: RemoteSystemDaemonMessageProtocol) {
-    new LocalActorRef(app,
+    new LocalActorRef(systemImpl,
       Props(
         context ⇒ {
-          case f: Function0[_] ⇒ try { channel ! f() } finally { context.self.stop() }
-        }).copy(dispatcher = computeGridDispatcher), app.guardian, Props.randomAddress, systemService = true) forward payloadFor(message, classOf[Function0[Any]])
+          case f: Function0[_] ⇒ try { sender ! f() } finally { context.self.stop() }
+        }).copy(dispatcher = computeGridDispatcher), remoteDaemon, tempPath, systemService = true) forward payloadFor(message, classOf[Function0[Any]])
   }
 
   // FIXME: handle real remote supervision
   def handle_fun1_arg_unit(message: RemoteSystemDaemonMessageProtocol) {
-    new LocalActorRef(app,
+    new LocalActorRef(systemImpl,
       Props(
         context ⇒ {
           case (fun: Function[_, _], param: Any) ⇒ try { fun.asInstanceOf[Any ⇒ Unit].apply(param) } finally { context.self.stop() }
-        }).copy(dispatcher = computeGridDispatcher), app.guardian, Props.randomAddress, systemService = true) ! payloadFor(message, classOf[Tuple2[Function1[Any, Unit], Any]])
+        }).copy(dispatcher = computeGridDispatcher), remoteDaemon, tempPath, systemService = true) ! payloadFor(message, classOf[Tuple2[Function1[Any, Unit], Any]])
   }
 
   // FIXME: handle real remote supervision
   def handle_fun1_arg_any(message: RemoteSystemDaemonMessageProtocol) {
-    new LocalActorRef(app,
+    new LocalActorRef(systemImpl,
       Props(
         context ⇒ {
-          case (fun: Function[_, _], param: Any) ⇒ try { channel ! fun.asInstanceOf[Any ⇒ Any](param) } finally { context.self.stop() }
-        }).copy(dispatcher = computeGridDispatcher), app.guardian, Props.randomAddress, systemService = true) forward payloadFor(message, classOf[Tuple2[Function1[Any, Any], Any]])
+          case (fun: Function[_, _], param: Any) ⇒ try { sender ! fun.asInstanceOf[Any ⇒ Any](param) } finally { context.self.stop() }
+        }).copy(dispatcher = computeGridDispatcher), remoteDaemon, tempPath, systemService = true) forward payloadFor(message, classOf[Tuple2[Function1[Any, Any], Any]])
   }
 
   def handleFailover(message: RemoteSystemDaemonMessageProtocol) {
@@ -235,6 +237,104 @@ class RemoteSystemDaemon(remote: Remote) extends Actor {
     serialization.deserialize(message.getPayload.toByteArray, clazz, None) match {
       case Left(error)     ⇒ throw error
       case Right(instance) ⇒ instance.asInstanceOf[T]
+    }
+  }
+}
+
+class RemoteMessage(input: RemoteMessageProtocol, remote: RemoteSupport, classLoader: Option[ClassLoader] = None) {
+
+  val provider = remote.system.asInstanceOf[ActorSystemImpl].provider
+
+  lazy val sender: ActorRef =
+    if (input.hasSender)
+      provider.deserialize(
+        SerializedActorRef(input.getSender.getHost, input.getSender.getPort, input.getSender.getPath)).getOrElse(throw new IllegalStateException("OHNOES"))
+    else
+      remote.system.deadLetters
+
+  lazy val recipient: ActorRef = remote.system.actorFor(input.getRecipient.getPath).getOrElse(remote.system.deadLetters)
+
+  lazy val payload: Either[Throwable, AnyRef] =
+    if (input.hasException) Left(parseException())
+    else Right(MessageSerializer.deserialize(remote.system, input.getMessage, classLoader))
+
+  protected def parseException(): Throwable = {
+    val exception = input.getException
+    val classname = exception.getClassname
+    try {
+      val exceptionClass =
+        if (classLoader.isDefined) classLoader.get.loadClass(classname) else Class.forName(classname)
+      exceptionClass
+        .getConstructor(Array[Class[_]](classOf[String]): _*)
+        .newInstance(exception.getMessage).asInstanceOf[Throwable]
+    } catch {
+      case problem: Exception ⇒
+        remote.system.eventStream.publish(Logging.Error(problem, "RemoteMessage", problem.getMessage))
+        CannotInstantiateRemoteExceptionDueToRemoteProtocolParsingErrorException(problem, classname, exception.getMessage)
+    }
+  }
+
+  override def toString = "RemoteMessage: " + recipient + "(" + input.getRecipient.getPath + ") from " + sender
+}
+
+trait RemoteMarshallingOps {
+
+  def system: ActorSystem
+
+  protected def useUntrustedMode: Boolean
+
+  def createMessageSendEnvelope(rmp: RemoteMessageProtocol): AkkaRemoteProtocol = {
+    val arp = AkkaRemoteProtocol.newBuilder
+    arp.setMessage(rmp)
+    arp.build
+  }
+
+  def createControlEnvelope(rcp: RemoteControlProtocol): AkkaRemoteProtocol = {
+    val arp = AkkaRemoteProtocol.newBuilder
+    arp.setInstruction(rcp)
+    arp.build
+  }
+
+  /**
+   * Serializes the ActorRef instance into a Protocol Buffers (protobuf) Message.
+   */
+  def toRemoteActorRefProtocol(actor: ActorRef): ActorRefProtocol = {
+    val rep = system.asInstanceOf[ActorSystemImpl].provider.serialize(actor)
+    ActorRefProtocol.newBuilder.setHost(rep.hostname).setPort(rep.port).setPath(rep.path).build
+  }
+
+  def createRemoteMessageProtocolBuilder(
+    recipient: Either[ActorRef, ActorRefProtocol],
+    message: Either[Throwable, Any],
+    senderOption: Option[ActorRef]): RemoteMessageProtocol.Builder = {
+
+    val messageBuilder = RemoteMessageProtocol.newBuilder.setRecipient(recipient.fold(toRemoteActorRefProtocol _, identity))
+
+    message match {
+      case Right(message) ⇒
+        messageBuilder.setMessage(MessageSerializer.serialize(system, message.asInstanceOf[AnyRef]))
+      case Left(exception) ⇒
+        messageBuilder.setException(ExceptionProtocol.newBuilder
+          .setClassname(exception.getClass.getName)
+          .setMessage(Option(exception.getMessage).getOrElse(""))
+          .build)
+    }
+
+    if (senderOption.isDefined) messageBuilder.setSender(toRemoteActorRefProtocol(senderOption.get))
+
+    messageBuilder
+  }
+
+  def receiveMessage(remoteMessage: RemoteMessage) {
+    val recipient = remoteMessage.recipient
+
+    remoteMessage.payload match {
+      case Left(t) ⇒ throw t
+      case Right(r) ⇒ r match {
+        case _: Terminate ⇒ if (useUntrustedMode) throw new SecurityException("RemoteModule server is operating is untrusted mode, can not stop the actor") else recipient.stop()
+        case _: AutoReceivedMessage if (useUntrustedMode) ⇒ throw new SecurityException("RemoteModule server is operating is untrusted mode, can not pass on a AutoReceivedMessage to the remote actor")
+        case m ⇒ recipient.!(m)(remoteMessage.sender)
+      }
     }
   }
 }

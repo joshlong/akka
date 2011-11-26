@@ -4,16 +4,17 @@
 
 package akka.remote
 
-import akka.AkkaApplication
 import akka.actor._
 import akka.actor.Status._
+import akka.event.Logging
 import akka.util.duration._
+import akka.util.Duration
 import akka.remote.RemoteProtocol._
 import akka.remote.RemoteProtocol.RemoteSystemDaemonMessageType._
+import akka.config.ConfigurationException
+import akka.serialization.SerializationExtension
 
-import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.TimeUnit
 import java.security.SecureRandom
 import System.{ currentTimeMillis ⇒ newTimestamp }
 
@@ -26,8 +27,8 @@ import com.google.protobuf.ByteString
  * Interface for node membership change listener.
  */
 trait NodeMembershipChangeListener {
-  def nodeConnected(node: InetSocketAddress)
-  def nodeDisconnected(node: InetSocketAddress)
+  def nodeConnected(node: RemoteAddress)
+  def nodeDisconnected(node: RemoteAddress)
 }
 
 /**
@@ -35,23 +36,22 @@ trait NodeMembershipChangeListener {
  */
 case class Gossip(
   version: VectorClock,
-  node: InetSocketAddress,
-  availableNodes: Set[InetSocketAddress] = Set.empty[InetSocketAddress],
-  unavailableNodes: Set[InetSocketAddress] = Set.empty[InetSocketAddress])
+  node: RemoteAddress,
+  availableNodes: Set[RemoteAddress] = Set.empty[RemoteAddress],
+  unavailableNodes: Set[RemoteAddress] = Set.empty[RemoteAddress])
 
+// ====== START - NEW GOSSIP IMPLEMENTATION ======
 /*
-  // ====== NEW GOSSIP IMPLEMENTATION ======
-
   case class Gossip(
     version: VectorClock,
-    node: InetSocketAddress,
-    leader: InetSocketAddress, // FIXME leader is always head of 'members', so we probably don't need this field
+    node: RemoteAddress,
+    leader: RemoteAddress, // FIXME leader is always head of 'members', so we probably don't need this field
     members: SortedSet[Member] = SortetSet.empty[Member](Ordering.fromLessThan[String](_ > _)), // sorted set of members with their status, sorted by name
     seen: Map[Member, VectorClock] = Map.empty[Member, VectorClock],                            // for ring convergence
     pendingChanges: Option[Vector[PendingPartitioningChange]] = None,                           // for handoff
     meta: Option[Map[String, Array[Byte]]] = None)                                              // misc meta-data
 
-  case class Member(address: InetSocketAddress, status: MemberStatus)
+  case class Member(address: RemoteAddress, status: MemberStatus)
 
   sealed trait MemberStatus
   object MemberStatus {
@@ -72,11 +72,12 @@ case class Gossip(
   type VNodeMod = AnyRef
 
   case class PendingPartitioningChange(
-    owner: InetSocketAddress,
-    nextOwner: InetSocketAddress,
+    owner: RemoteAddress,
+    nextOwner: RemoteAddress,
     changes: Vector[VNodeMod],
     status: PendingPartitioningStatus)
 */
+// ====== END - NEW GOSSIP IMPLEMENTATION ======
 
 /**
  * This module is responsible for Gossiping cluster information. The abstraction maintains the list of live
@@ -103,13 +104,21 @@ class Gossiper(remote: Remote) {
     currentGossip: Gossip,
     nodeMembershipChangeListeners: Set[NodeMembershipChangeListener] = Set.empty[NodeMembershipChangeListener])
 
-  private val app = remote.app
+  private val system = remote.system
+  private val remoteExtension = RemoteExtension(system)
+  private val serialization = SerializationExtension(system)
+  private val log = Logging(system, "Gossiper")
   private val failureDetector = remote.failureDetector
-  private val connectionManager = new RemoteConnectionManager(app, remote, Map.empty[InetSocketAddress, ActorRef])
-  private val seeds = Set(address) // FIXME read in list of seeds from config
-  private val scheduler = new DefaultScheduler
+  private val connectionManager = new RemoteConnectionManager(system, remote, Map.empty[RemoteAddress, ActorRef])
 
-  private val address = new InetSocketAddress(app.hostname, app.port)
+  private val seeds = {
+    val seeds = remoteExtension.SeedNodes
+    if (seeds.isEmpty) throw new ConfigurationException(
+      "At least one seed node must be defined in the configuration [akka.cluster.seed-nodes]")
+    else seeds
+  }
+
+  private val address = system.asInstanceOf[ActorSystemImpl].provider.rootPath.remoteAddress
   private val nodeFingerprint = address.##
 
   private val random = SecureRandom.getInstance("SHA1PRNG")
@@ -124,8 +133,8 @@ class Gossiper(remote: Remote) {
 
   {
     // start periodic gossip and cluster scrutinization - default is run them every second with 1/2 second in between
-    scheduler schedule (() ⇒ initateGossip(), initalDelayForGossip.toSeconds, gossipFrequency.toSeconds, timeUnit)
-    scheduler schedule (() ⇒ scrutinize(), initalDelayForGossip.toSeconds, gossipFrequency.toSeconds, timeUnit)
+    system.scheduler schedule (() ⇒ initateGossip(), Duration(initalDelayForGossip.toSeconds, timeUnit), Duration(gossipFrequency.toSeconds, timeUnit))
+    system.scheduler schedule (() ⇒ scrutinize(), Duration(initalDelayForGossip.toSeconds, timeUnit), Duration(gossipFrequency.toSeconds, timeUnit))
   }
 
   /**
@@ -155,7 +164,7 @@ class Gossiper(remote: Remote) {
           node ← oldAvailableNodes
           if connectionManager.connectionFor(node).isEmpty
         } {
-          val connectionFactory = () ⇒ RemoteActorRef(remote.server, gossipingNode, remote.remoteDaemonServiceName, None)
+          val connectionFactory = () ⇒ RemoteActorRef(remote.system.provider, remote.server, gossipingNode, remote.remoteDaemon.path, None)
           connectionManager.putIfAbsent(node, connectionFactory) // create a new remote connection to the new node
           oldState.nodeMembershipChangeListeners foreach (_ nodeConnected node) // notify listeners about the new nodes
         }
@@ -229,7 +238,7 @@ class Gossiper(remote: Remote) {
   /**
    * Gossips set of nodes passed in as argument. Returns 'true' if it gossiped to a "seed" node.
    */
-  private def gossipTo(nodes: Set[InetSocketAddress]): Boolean = {
+  private def gossipTo(nodes: Set[RemoteAddress]): Boolean = {
     val peers = nodes filter (_ != address) // filter out myself
     val peer = selectRandomNode(peers)
     val oldState = state.get
@@ -239,20 +248,20 @@ class Gossiper(remote: Remote) {
       throw new IllegalStateException("Connection for [" + peer + "] is not set up"))
 
     try {
-      (connection ? (toRemoteMessage(newGossip), remote.remoteSystemDaemonAckTimeout)).as[Status] match {
+      (connection ? (toRemoteMessage(newGossip), remoteExtension.RemoteSystemDaemonAckTimeout)).as[Status] match {
         case Some(Success(receiver)) ⇒
-          app.eventHandler.debug(this, "Gossip sent to [%s] was successfully received".format(receiver))
+          log.debug("Gossip sent to [{}] was successfully received", receiver)
 
         case Some(Failure(cause)) ⇒
-          app.eventHandler.error(cause, this, cause.toString)
+          log.error(cause, cause.toString)
 
         case None ⇒
           val error = new RemoteException("Gossip to [%s] timed out".format(connection.address))
-          app.eventHandler.error(error, this, error.toString)
+          log.error(error, error.toString)
       }
     } catch {
       case e: Exception ⇒
-        app.eventHandler.error(e, this, "Could not gossip to [%s] due to: %s".format(connection.address, e.toString))
+        log.error(e, "Could not gossip to [{}] due to: {}", connection.address, e.toString)
     }
 
     seeds exists (peer == _)
@@ -301,14 +310,14 @@ class Gossiper(remote: Remote) {
   }
 
   private def toRemoteMessage(gossip: Gossip): RemoteProtocol.RemoteSystemDaemonMessageProtocol = {
-    val gossipAsBytes = app.serialization.serialize(gossip) match {
+    val gossipAsBytes = serialization.serialize(gossip) match {
       case Left(error)  ⇒ throw error
       case Right(bytes) ⇒ bytes
     }
 
     RemoteSystemDaemonMessageProtocol.newBuilder
       .setMessageType(GOSSIP)
-      .setActorAddress(remote.remoteDaemonServiceName)
+      .setActorPath(remote.remoteDaemon.path.toString)
       .setPayload(ByteString.copyFrom(gossipAsBytes))
       .build()
   }
@@ -321,7 +330,7 @@ class Gossiper(remote: Remote) {
     }
   }
 
-  private def selectRandomNode(nodes: Set[InetSocketAddress]): InetSocketAddress = {
+  private def selectRandomNode(nodes: Set[RemoteAddress]): RemoteAddress = {
     nodes.toList(random.nextInt(nodes.size))
   }
 }

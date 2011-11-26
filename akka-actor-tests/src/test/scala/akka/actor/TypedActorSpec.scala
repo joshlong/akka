@@ -13,6 +13,7 @@ import akka.serialization.Serialization
 import java.util.concurrent.atomic.AtomicReference
 import annotation.tailrec
 import akka.testkit.{ EventFilter, filterEvents, AkkaSpec }
+import akka.serialization.SerializationExtension
 
 object TypedActorSpec {
 
@@ -147,18 +148,18 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     newFooBar(Props().withTimeout(Timeout(d)))
 
   def newFooBar(props: Props): Foo =
-    app.typedActorOf(classOf[Foo], classOf[Bar], props)
+    system.typedActorOf(classOf[Foo], classOf[Bar], props)
 
   def newStacked(props: Props = Props().withTimeout(Timeout(2000))): Stacked =
-    app.typedActorOf(classOf[Stacked], classOf[StackedImpl], props)
+    system.typedActorOf(classOf[Stacked], classOf[StackedImpl], props)
 
-  def mustStop(typedActor: AnyRef) = app.typedActor.stop(typedActor) must be(true)
+  def mustStop(typedActor: AnyRef) = system.typedActor.stop(typedActor) must be(true)
 
   "TypedActors" must {
 
     "be able to instantiate" in {
       val t = newFooBar
-      app.typedActor.isTypedActor(t) must be(true)
+      system.typedActor.isTypedActor(t) must be(true)
       mustStop(t)
     }
 
@@ -168,7 +169,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     }
 
     "not stop non-started ones" in {
-      app.typedActor.stop(null) must be(false)
+      system.typedActor.stop(null) must be(false)
     }
 
     "throw an IllegalStateExcpetion when TypedActor.self is called in the wrong scope" in {
@@ -187,7 +188,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
 
     "be able to call toString" in {
       val t = newFooBar
-      t.toString must be(app.typedActor.getActorRefFor(t).toString)
+      t.toString must be(system.typedActor.getActorRefFor(t).toString)
       mustStop(t)
     }
 
@@ -200,7 +201,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
 
     "be able to call hashCode" in {
       val t = newFooBar
-      t.hashCode must be(app.typedActor.getActorRefFor(t).hashCode)
+      t.hashCode must be(system.typedActor.getActorRefFor(t).hashCode)
       mustStop(t)
     }
 
@@ -263,7 +264,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     "be able to handle exceptions when calling methods" in {
       filterEvents(EventFilter[IllegalStateException]("expected")) {
         val boss = actorOf(Props(context ⇒ {
-          case p: Props ⇒ context.channel ! context.typedActorOf(classOf[Foo], classOf[Bar], p)
+          case p: Props ⇒ context.sender ! context.typedActorOf(classOf[Foo], classOf[Bar], p)
         }).withFaultHandler(OneForOneStrategy {
           case e: IllegalStateException if e.getMessage == "expected" ⇒ FaultHandlingStrategy.Resume
         }))
@@ -276,14 +277,10 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
         t.failingFuturePigdog.await.exception.get.getMessage must be("expected")
         t.read() must be(1) //Make sure state is not reset after failure
 
-        (intercept[IllegalStateException] {
-          t.failingJOptionPigdog
-        }).getMessage must be("expected")
+        (intercept[IllegalStateException] { t.failingJOptionPigdog }).getMessage must be("expected")
         t.read() must be(1) //Make sure state is not reset after failure
 
-        (intercept[IllegalStateException] {
-          t.failingOptionPigdog
-        }).getMessage must be("expected")
+        (intercept[IllegalStateException] { t.failingOptionPigdog }).getMessage must be("expected")
 
         t.read() must be(1) //Make sure state is not reset after failure
 
@@ -299,7 +296,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     }
 
     "be able to support implementation only typed actors" in {
-      val t = app.typedActorOf[Foo, Bar](Props())
+      val t = system.typedActorOf[Foo, Bar](Props())
       val f = t.futurePigdog(200)
       val f2 = t.futurePigdog(0)
       f2.isCompleted must be(false)
@@ -309,7 +306,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     }
 
     "be able to support implementation only typed actors with complex interfaces" in {
-      val t = app.typedActorOf[Stackable1 with Stackable2, StackedImpl]()
+      val t = system.typedActorOf[Stackable1 with Stackable2, StackedImpl]()
       t.stackable1 must be("foo")
       t.stackable2 must be("bar")
       mustStop(t)
@@ -318,7 +315,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     "be able to use work-stealing dispatcher" in {
       val props = Props(
         timeout = Timeout(6600),
-        dispatcher = app.dispatcherFactory.newBalancingDispatcher("pooled-dispatcher")
+        dispatcher = system.dispatcherFactory.newBalancingDispatcher("pooled-dispatcher")
           .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
           .setCorePoolSize(60)
           .setMaxPoolSize(60)
@@ -336,7 +333,8 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
 
     "be able to serialize and deserialize invocations" in {
       import java.io._
-      val m = TypedActor.MethodCall(app, classOf[Foo].getDeclaredMethod("pigdog"), Array[AnyRef]())
+      val serialization = SerializationExtension(system)
+      val m = TypedActor.MethodCall(serialization, classOf[Foo].getDeclaredMethod("pigdog"), Array[AnyRef]())
       val baos = new ByteArrayOutputStream(8192 * 4)
       val out = new ObjectOutputStream(baos)
 
@@ -345,7 +343,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
 
       val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
 
-      Serialization.app.withValue(app) {
+      Serialization.currentSystem.withValue(system.asInstanceOf[ActorSystemImpl]) {
         val mNew = in.readObject().asInstanceOf[TypedActor.MethodCall]
 
         mNew.method must be(m.method)
@@ -355,7 +353,8 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
     "be able to serialize and deserialize invocations' parameters" in {
       import java.io._
       val someFoo: Foo = new Bar
-      val m = TypedActor.MethodCall(app, classOf[Foo].getDeclaredMethod("testMethodCallSerialization", Array[Class[_]](classOf[Foo], classOf[String], classOf[Int]): _*), Array[AnyRef](someFoo, null, 1.asInstanceOf[AnyRef]))
+      val serialization = SerializationExtension(system)
+      val m = TypedActor.MethodCall(serialization, classOf[Foo].getDeclaredMethod("testMethodCallSerialization", Array[Class[_]](classOf[Foo], classOf[String], classOf[Int]): _*), Array[AnyRef](someFoo, null, 1.asInstanceOf[AnyRef]))
       val baos = new ByteArrayOutputStream(8192 * 4)
       val out = new ObjectOutputStream(baos)
 
@@ -364,7 +363,7 @@ class TypedActorSpec extends AkkaSpec with BeforeAndAfterEach with BeforeAndAfte
 
       val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
 
-      Serialization.app.withValue(app) {
+      Serialization.currentSystem.withValue(system.asInstanceOf[ActorSystemImpl]) {
         val mNew = in.readObject().asInstanceOf[TypedActor.MethodCall]
 
         mNew.method must be(m.method)

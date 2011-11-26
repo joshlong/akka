@@ -6,7 +6,6 @@ package akka.actor
 
 import akka.testkit._
 import org.scalatest.BeforeAndAfterEach
-import akka.testkit.Testing.sleepFor
 import akka.util.duration._
 import akka.dispatch.Dispatchers
 
@@ -15,9 +14,9 @@ object ActorFireForgetRequestReplySpec {
   class ReplyActor extends Actor {
     def receive = {
       case "Send" ⇒
-        channel ! "Reply"
+        sender ! "Reply"
       case "SendImplicit" ⇒
-        channel ! "ReplyImplicit"
+        sender ! "ReplyImplicit"
     }
   }
 
@@ -78,14 +77,14 @@ class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach {
     }
 
     "should shutdown crashed temporary actor" in {
-      filterEvents(EventFilter[Exception]("Expected")) {
+      filterEvents(EventFilter[Exception]("Expected exception")) {
         val supervisor = actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(0))))
         val actor = (supervisor ? Props[CrashingActor]).as[ActorRef].get
-        actor.isShutdown must be(false)
+        actor.isTerminated must be(false)
         actor ! "Die"
         state.finished.await
-        sleepFor(1 second)
-        actor.isShutdown must be(true)
+        1.second.dilated.sleep()
+        actor.isTerminated must be(true)
         supervisor.stop()
       }
     }

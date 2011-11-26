@@ -4,11 +4,14 @@
 
 package akka.dispatch
 
-import akka.event.EventHandler
+import akka.event.Logging.Warning
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{ TimeUnit, ExecutorService, RejectedExecutionException, ConcurrentLinkedQueue }
 import akka.actor.{ ActorCell, ActorKilledException }
-import akka.AkkaApplication
+import akka.actor.ActorSystem
+import akka.event.EventStream
+import akka.actor.Scheduler
+import akka.util.Duration
 
 /**
  * Default settings are:
@@ -33,8 +36,7 @@ import akka.AkkaApplication
  *     .withNewThreadPoolWithBoundedBlockingQueue(100)
  *     .setCorePoolSize(16)
  *     .setMaxPoolSize(128)
- *     .setKeepAliveTimeInMillis(60000)
- *     .setRejectionPolicy(new CallerRunsPolicy)
+ *     .setKeepAliveTime(60 seconds)
  *     .buildThreadPool
  * </pre>
  * <p/>
@@ -48,8 +50,7 @@ import akka.AkkaApplication
  *     .withNewThreadPoolWithBoundedBlockingQueue(100)
  *     .setCorePoolSize(16)
  *     .setMaxPoolSize(128)
- *     .setKeepAliveTimeInMillis(60000)
- *     .setRejectionPolicy(new CallerRunsPolicy())
+ *     .setKeepAliveTime(60 seconds)
  *     .buildThreadPool();
  * </pre>
  * <p/>
@@ -64,29 +65,29 @@ import akka.AkkaApplication
  *                   Larger values (or zero or negative) increase throughput, smaller values increase fairness
  */
 class Dispatcher(
-  _app: AkkaApplication,
-  _name: String,
+  _prerequisites: DispatcherPrerequisites,
+  val name: String,
   val throughput: Int,
-  val throughputDeadlineTime: Int,
+  val throughputDeadlineTime: Duration,
   val mailboxType: MailboxType,
   executorServiceFactoryProvider: ExecutorServiceFactoryProvider,
-  val timeoutMs: Long)
-  extends MessageDispatcher(_app) {
-
-  val name = "akka:event-driven:dispatcher:" + _name
+  val shutdownTimeout: Duration)
+  extends MessageDispatcher(_prerequisites) {
 
   protected[akka] val executorServiceFactory = executorServiceFactoryProvider.createExecutorServiceFactory(name)
-  protected[akka] val executorService = new AtomicReference[ExecutorService](new LazyExecutorServiceWrapper(executorServiceFactory.createExecutorService))
+  protected[akka] val executorService = new AtomicReference[ExecutorService](new ExecutorServiceDelegate {
+    lazy val executor = executorServiceFactory.createExecutorService
+  })
 
   protected[akka] def dispatch(receiver: ActorCell, invocation: Envelope) = {
     val mbox = receiver.mailbox
-    mbox enqueue invocation
+    mbox.enqueue(receiver.self, invocation)
     registerForExecution(mbox, true, false)
   }
 
   protected[akka] def systemDispatch(receiver: ActorCell, invocation: SystemMessage) = {
     val mbox = receiver.mailbox
-    mbox systemEnqueue invocation
+    mbox.systemEnqueue(receiver.self, invocation)
     registerForExecution(mbox, false, true)
   }
 
@@ -95,26 +96,28 @@ class Dispatcher(
       executorService.get() execute invocation
     } catch {
       case e: RejectedExecutionException ⇒
-        app.eventHandler.warning(this, e.toString)
-        throw e
+        try {
+          executorService.get() execute invocation
+        } catch {
+          case e2: RejectedExecutionException ⇒
+            prerequisites.eventStream.publish(Warning("Dispatcher", e2.toString))
+            throw e2
+        }
     }
   }
 
-  protected[akka] def createMailbox(actor: ActorCell): Mailbox = mailboxType.create(this, actor)
+  protected[akka] def createMailbox(actor: ActorCell): Mailbox = mailboxType.create(actor)
 
-  protected[akka] def start {}
-
-  protected[akka] def shutdown {
-    val old = executorService.getAndSet(new LazyExecutorServiceWrapper(executorServiceFactory.createExecutorService))
-    if (old ne null)
-      old.shutdown()
-  }
+  protected[akka] def shutdown: Unit =
+    Option(executorService.getAndSet(new ExecutorServiceDelegate {
+      lazy val executor = executorServiceFactory.createExecutorService
+    })) foreach { _.shutdown() }
 
   /**
    * Returns if it was registered
    */
   protected[akka] override def registerForExecution(mbox: Mailbox, hasMessageHint: Boolean, hasSystemMessageHint: Boolean): Boolean = {
-    if (mbox.shouldBeRegisteredForExecution(hasMessageHint, hasSystemMessageHint)) { //This needs to be here to ensure thread safety and no races
+    if (mbox.canBeScheduledForExecution(hasMessageHint, hasSystemMessageHint)) { //This needs to be here to ensure thread safety and no races
       if (mbox.setAsScheduled()) {
         try {
           executorService.get() execute mbox
@@ -122,11 +125,11 @@ class Dispatcher(
         } catch {
           case e: RejectedExecutionException ⇒
             try {
-              app.eventHandler.warning(this, e.toString)
-            } finally {
-              mbox.setAsIdle()
+              executorService.get() execute mbox
+              true
+            } catch { //Retry once
+              case e: RejectedExecutionException ⇒ mbox.setAsIdle(); throw e
             }
-            throw e
         }
       } else false
     } else false

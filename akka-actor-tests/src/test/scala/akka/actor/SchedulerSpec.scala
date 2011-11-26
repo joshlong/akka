@@ -1,28 +1,23 @@
 package akka.actor
 
 import org.scalatest.BeforeAndAfterEach
-import akka.testkit.TestEvent._
-import akka.testkit.EventFilter
 import org.multiverse.api.latches.StandardLatch
-import java.util.concurrent.{ ScheduledFuture, ConcurrentLinkedQueue, CountDownLatch, TimeUnit }
 import akka.testkit.AkkaSpec
+import akka.testkit.EventFilter
+import akka.util.duration._
+import java.util.concurrent.{ CountDownLatch, ConcurrentLinkedQueue, TimeUnit }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach {
-  private val futures = new ConcurrentLinkedQueue[ScheduledFuture[AnyRef]]()
+  private val cancellables = new ConcurrentLinkedQueue[Cancellable]()
 
-  def collectFuture(f: ⇒ ScheduledFuture[AnyRef]): ScheduledFuture[AnyRef] = {
-    val future = f
-    futures.add(future)
-    future
-  }
-
-  override def beforeEach {
-    app.eventHandler.notify(Mute(EventFilter[Exception]("CRASH")))
+  def collectCancellable(c: Cancellable): Cancellable = {
+    cancellables.add(c)
+    c
   }
 
   override def afterEach {
-    while (futures.peek() ne null) { Option(futures.poll()).foreach(_.cancel(true)) }
+    while (cancellables.peek() ne null) { Option(cancellables.poll()).foreach(_.cancel()) }
   }
 
   "A Scheduler" must {
@@ -33,18 +28,28 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach {
       val tickActor = actorOf(new Actor {
         def receive = { case Tick ⇒ countDownLatch.countDown() }
       })
-      // run every 50 millisec
-      collectFuture(app.scheduler.schedule(tickActor, Tick, 0, 50, TimeUnit.MILLISECONDS))
+      // run every 50 milliseconds
+      collectCancellable(system.scheduler.schedule(tickActor, Tick, 0 milliseconds, 50 milliseconds))
 
       // after max 1 second it should be executed at least the 3 times already
       assert(countDownLatch.await(1, TimeUnit.SECONDS))
 
       val countDownLatch2 = new CountDownLatch(3)
 
-      collectFuture(app.scheduler.schedule(() ⇒ countDownLatch2.countDown(), 0, 50, TimeUnit.MILLISECONDS))
+      collectCancellable(system.scheduler.schedule(() ⇒ countDownLatch2.countDown(), 0 milliseconds, 50 milliseconds))
 
       // after max 1 second it should be executed at least the 3 times already
       assert(countDownLatch2.await(2, TimeUnit.SECONDS))
+    }
+
+    "should stop continuous scheduling if the receiving actor has been terminated" in {
+      // run immediately and then every 100 milliseconds
+      collectCancellable(system.scheduler.schedule(testActor, "msg", 0 milliseconds, 100 milliseconds))
+
+      // stop the actor and, hence, the continuous messaging from happening
+      testActor ! PoisonPill
+
+      expectNoMsg(500 milliseconds)
     }
 
     "schedule once" in {
@@ -53,31 +58,16 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach {
       val tickActor = actorOf(new Actor {
         def receive = { case Tick ⇒ countDownLatch.countDown() }
       })
+
       // run every 50 millisec
-      collectFuture(app.scheduler.scheduleOnce(tickActor, Tick, 50, TimeUnit.MILLISECONDS))
-      collectFuture(app.scheduler.scheduleOnce(() ⇒ countDownLatch.countDown(), 50, TimeUnit.MILLISECONDS))
+      collectCancellable(system.scheduler.scheduleOnce(tickActor, Tick, 50 milliseconds))
+      collectCancellable(system.scheduler.scheduleOnce(() ⇒ countDownLatch.countDown(), 50 milliseconds))
 
       // after 1 second the wait should fail
       assert(countDownLatch.await(2, TimeUnit.SECONDS) == false)
       // should still be 1 left
       assert(countDownLatch.getCount == 1)
     }
-
-    /**
-     * ticket #372
-     * FIXME rewrite the test so that registry is not used
-     */
-    // "not create actors" in {
-    //   object Ping
-    //   val ticks = new CountDownLatch(1000)
-    //   val actor = actorOf(new Actor {
-    //     def receive = { case Ping ⇒ ticks.countDown }
-    //   })
-    //   val numActors = app.registry.local.actors.length
-    //   (1 to 1000).foreach(_ ⇒ collectFuture(Scheduler.scheduleOnce(actor, Ping, 1, TimeUnit.MILLISECONDS)))
-    //   assert(ticks.await(10, TimeUnit.SECONDS))
-    //   assert(app.registry.local.actors.length === numActors)
-    // }
 
     /**
      * ticket #372
@@ -91,9 +81,10 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach {
       })
 
       (1 to 10).foreach { i ⇒
-        val future = collectFuture(app.scheduler.scheduleOnce(actor, Ping, 1, TimeUnit.SECONDS))
-        future.cancel(true)
+        val timeout = collectCancellable(system.scheduler.scheduleOnce(actor, Ping, 1 second))
+        timeout.cancel()
       }
+
       assert(ticks.await(3, TimeUnit.SECONDS) == false) //No counting down should've been made
     }
 
@@ -118,13 +109,59 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach {
       })
       val actor = (supervisor ? props).as[ActorRef].get
 
-      collectFuture(app.scheduler.schedule(actor, Ping, 500, 500, TimeUnit.MILLISECONDS))
+      collectCancellable(system.scheduler.schedule(actor, Ping, 500 milliseconds, 500 milliseconds))
       // appx 2 pings before crash
-      collectFuture(app.scheduler.scheduleOnce(actor, Crash, 1000, TimeUnit.MILLISECONDS))
+      EventFilter[Exception]("CRASH", occurrences = 1) intercept {
+        collectCancellable(system.scheduler.scheduleOnce(actor, Crash, 1000 milliseconds))
+      }
 
       assert(restartLatch.tryAwait(2, TimeUnit.SECONDS))
       // should be enough time for the ping countdown to recover and reach 6 pings
       assert(pingLatch.await(4, TimeUnit.SECONDS))
+    }
+
+    "never fire prematurely" in {
+      val ticks = new CountDownLatch(300)
+
+      case class Msg(ts: Long)
+
+      val actor = actorOf(new Actor {
+        def receive = {
+          case Msg(ts) ⇒
+            val now = System.nanoTime
+            // Make sure that no message has been dispatched before the scheduled time (10ms = 10000000ns) has occurred
+            if (now - ts < 10000000) throw new RuntimeException("Interval is too small: " + (now - ts))
+            ticks.countDown()
+        }
+      })
+
+      (1 to 300).foreach { i ⇒
+        collectCancellable(system.scheduler.scheduleOnce(actor, Msg(System.nanoTime), 10 milliseconds))
+        Thread.sleep(5)
+      }
+
+      assert(ticks.await(3, TimeUnit.SECONDS) == true)
+    }
+
+    "schedule with different initial delay and frequency" in {
+      val ticks = new CountDownLatch(3)
+
+      case object Msg
+
+      val actor = actorOf(new Actor {
+        def receive = {
+          case Msg ⇒ ticks.countDown()
+        }
+      })
+
+      val startTime = System.nanoTime()
+      val cancellable = system.scheduler.schedule(actor, Msg, 1 second, 100 milliseconds)
+      ticks.await(3, TimeUnit.SECONDS)
+      val elapsedTimeMs = (System.nanoTime() - startTime) / 1000000
+
+      assert(elapsedTimeMs > 1200)
+      assert(elapsedTimeMs < 1500) // the precision is not ms exact
+      cancellable.cancel()
     }
   }
 }

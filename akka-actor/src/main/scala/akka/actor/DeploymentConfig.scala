@@ -4,10 +4,9 @@
 
 package akka.actor
 
-import akka.AkkaApplication
 import akka.util.Duration
-import akka.routing.{ RouterType, FailureDetectorType }
-import akka.routing.FailureDetectorType._
+import akka.routing.RouterType
+import akka.remote.RemoteAddress
 
 object DeploymentConfig {
 
@@ -15,11 +14,10 @@ object DeploymentConfig {
   // --- Deploy
   // --------------------------------
   case class Deploy(
-    address: String,
+    path: String,
     recipe: Option[ActorRecipe],
     routing: Routing = Direct,
     nrOfInstances: NrOfInstances = ZeroNrOfInstances,
-    failureDetector: FailureDetector = NoOpFailureDetector,
     scope: Scope = LocalScope)
 
   // --------------------------------
@@ -52,21 +50,6 @@ object DeploymentConfig {
   case object LeastMessages extends Routing
 
   // --------------------------------
-  // --- FailureDetector
-  // --------------------------------
-  sealed trait FailureDetector
-  case class BannagePeriodFailureDetector(timeToBan: Duration) extends FailureDetector
-  case class CustomFailureDetector(className: String) extends FailureDetector
-
-  // For Java API
-  case class NoOpFailureDetector() extends FailureDetector
-  case class RemoveConnectionOnFirstFailureFailureDetector() extends FailureDetector
-
-  // For Scala API
-  case object NoOpFailureDetector extends FailureDetector
-  case object RemoveConnectionOnFirstFailureFailureDetector extends FailureDetector
-
-  // --------------------------------
   // --- Scope
   // --------------------------------
   sealed trait Scope
@@ -78,8 +61,6 @@ object DeploymentConfig {
   case object LocalScope extends Scope
 
   case class RemoteScope(nodes: Iterable[RemoteAddress]) extends Scope
-
-  case class RemoteAddress(hostname: String, port: Int)
 
   // --------------------------------
   // --- Home
@@ -94,10 +75,11 @@ object DeploymentConfig {
   // --------------------------------
 
   class NrOfInstances(val factor: Int) extends Serializable {
-    if (factor < 0) throw new IllegalArgumentException("nr-of-instances can not be negative")
+    // note that -1 is used for AutoNrOfInstances
+    if (factor < -1) throw new IllegalArgumentException("nr-of-instances can not be negative")
     override def hashCode = 0 + factor.##
     override def equals(other: Any) = NrOfInstances.unapply(this) == NrOfInstances.unapply(other)
-    override def toString = "NrOfInstances(" + factor + ")"
+    override def toString = if (factor == -1) "NrOfInstances(auto)" else "NrOfInstances(" + factor + ")"
   }
 
   object NrOfInstances {
@@ -116,7 +98,7 @@ object DeploymentConfig {
   // For Java API
   class AutoNrOfInstances extends NrOfInstances(-1)
   class ZeroNrOfInstances extends NrOfInstances(0)
-  class OneNrOfInstances extends NrOfInstances(0)
+  class OneNrOfInstances extends NrOfInstances(1)
 
   // For Scala API
   case object AutoNrOfInstances extends AutoNrOfInstances
@@ -174,16 +156,6 @@ object DeploymentConfig {
     //    case IP("127.0.0.1")   ⇒ Config.nodename
     //    case Host(hostname)    ⇒ throw new UnsupportedOperationException("Specifying preferred node name by 'hostname' is not yet supported. Use the node name like: preferred-nodes = [\"node:node1\"]")
     //    case IP(address)       ⇒ throw new UnsupportedOperationException("Specifying preferred node name by 'IP address' is not yet supported. Use the node name like: preferred-nodes = [\"node:node1\"]")
-  }
-
-  def failureDetectorTypeFor(failureDetector: FailureDetector): FailureDetectorType = failureDetector match {
-    case NoOpFailureDetector                             ⇒ FailureDetectorType.NoOp
-    case NoOpFailureDetector()                           ⇒ FailureDetectorType.NoOp
-    case BannagePeriodFailureDetector(timeToBan)         ⇒ FailureDetectorType.BannagePeriod(timeToBan)
-    case RemoveConnectionOnFirstFailureFailureDetector   ⇒ FailureDetectorType.RemoveConnectionOnFirstFailure
-    case RemoveConnectionOnFirstFailureFailureDetector() ⇒ FailureDetectorType.RemoveConnectionOnFirstFailure
-    case CustomFailureDetector(implClass)                ⇒ FailureDetectorType.Custom(implClass)
-    case unknown                                         ⇒ throw new UnsupportedOperationException("Unknown FailureDetector [" + unknown + "]")
   }
 
   def routerTypeFor(routing: Routing): RouterType = routing match {
@@ -246,16 +218,16 @@ object DeploymentConfig {
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-class DeploymentConfig(val app: AkkaApplication) {
+class DeploymentConfig(val nodename: String) {
 
   import DeploymentConfig._
 
-  case class ClusterScope(preferredNodes: Iterable[Home] = Vector(Node(app.nodename)), replication: ReplicationScheme = Transient) extends Scope
+  case class ClusterScope(preferredNodes: Iterable[Home] = Vector(Node(nodename)), replication: ReplicationScheme = Transient) extends Scope
 
-  def isHomeNode(homes: Iterable[Home]): Boolean = homes exists (home ⇒ nodeNameFor(home) == app.nodename)
+  def isHomeNode(homes: Iterable[Home]): Boolean = homes exists (home ⇒ nodeNameFor(home) == nodename)
 
   def replicationSchemeFor(deployment: Deploy): Option[ReplicationScheme] = deployment match {
-    case Deploy(_, _, _, _, _, ClusterScope(_, replicationScheme)) ⇒ Some(replicationScheme)
+    case Deploy(_, _, _, _, ClusterScope(_, replicationScheme)) ⇒ Some(replicationScheme)
     case _ ⇒ None
   }
 

@@ -18,11 +18,11 @@ class Future2ActorSpec extends AkkaSpec {
       expectMsgAllOf(1 second, 42, 42)
     }
 
-    "support reply via channel" in {
-      val actor = app.actorOf(Props(new Actor {
+    "support reply via sender" in {
+      val actor = system.actorOf(Props(new Actor {
         def receive = {
-          case "do" ⇒ Future(31) pipeTo context.channel
-          case "ex" ⇒ Future(throw new AssertionError) pipeTo context.channel
+          case "do" ⇒ Future(31) pipeTo context.sender
+          case "ex" ⇒ Future(throw new AssertionError) pipeTo context.sender
         }
       }))
       (actor ? "do").as[Int] must be(Some(31))

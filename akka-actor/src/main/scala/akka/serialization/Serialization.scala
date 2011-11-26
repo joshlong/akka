@@ -6,17 +6,59 @@ package akka.serialization
 
 import akka.AkkaException
 import akka.util.ReflectiveAccess
-import akka.AkkaApplication
 import scala.util.DynamicVariable
-import akka.remote.RemoteSupport
+import com.typesafe.config.{ ConfigRoot, ConfigParseOptions, ConfigFactory, Config }
+import com.typesafe.config.Config._
+import akka.config.ConfigurationException
+import akka.actor.{ Extension, ActorSystem, ActorSystemImpl }
 
 case class NoSerializerFoundException(m: String) extends AkkaException(m)
+
+object Serialization {
+
+  // TODO ensure that these are always set (i.e. withValue()) when doing deserialization
+  val currentSystem = new DynamicVariable[ActorSystemImpl](null)
+
+  class Settings(cfg: Config) {
+    private def referenceConfig: Config =
+      ConfigFactory.parseResource(classOf[ActorSystem], "/akka-serialization-reference.conf",
+        ConfigParseOptions.defaults.setAllowMissing(false))
+    val config: ConfigRoot = ConfigFactory.emptyRoot("akka-serialization").withFallback(cfg).withFallback(referenceConfig).resolve()
+
+    import scala.collection.JavaConverters._
+    import config._
+
+    val Serializers: Map[String, String] = {
+      toStringMap(getConfig("akka.actor.serializers"))
+    }
+
+    val SerializationBindings: Map[String, Seq[String]] = {
+      val configPath = "akka.actor.serialization-bindings"
+      hasPath(configPath) match {
+        case false ⇒ Map()
+        case true ⇒
+          val serializationBindings: Map[String, Seq[String]] = getConfig(configPath).toObject.unwrapped.asScala.toMap.map {
+            case (k: String, v: java.util.Collection[_]) ⇒ (k -> v.asScala.toSeq.asInstanceOf[Seq[String]])
+            case invalid                                 ⇒ throw new ConfigurationException("Invalid serialization-bindings [%s]".format(invalid))
+          }
+          serializationBindings
+
+      }
+    }
+
+    private def toStringMap(mapConfig: Config): Map[String, String] =
+      mapConfig.toObject.unwrapped.asScala.toMap.map { case (k, v) ⇒ (k, v.toString) }
+  }
+}
 
 /**
  * Serialization module. Contains methods for serialization and deserialization as well as
  * locating a Serializer for a particular class as defined in the mapping in the 'akka.conf' file.
  */
-class Serialization(val app: AkkaApplication) {
+class Serialization(val system: ActorSystemImpl) extends Extension {
+  import Serialization._
+
+  val settings = new Settings(system.applicationConfig)
 
   //TODO document me
   def serialize(o: AnyRef): Either[Exception, Array[Byte]] =
@@ -28,7 +70,7 @@ class Serialization(val app: AkkaApplication) {
     clazz: Class[_],
     classLoader: Option[ClassLoader]): Either[Exception, AnyRef] =
     try {
-      Serialization.app.withValue(app) {
+      currentSystem.withValue(system) {
         Right(serializerFor(clazz).fromBinary(bytes, Some(clazz), classLoader))
       }
     } catch { case e: Exception ⇒ Left(e) }
@@ -46,7 +88,7 @@ class Serialization(val app: AkkaApplication) {
    * Tries to load the specified Serializer by the FQN
    */
   def serializerOf(serializerFQN: String): Either[Exception, Serializer] =
-    ReflectiveAccess.createInstance(serializerFQN, ReflectiveAccess.emptyParams, ReflectiveAccess.emptyArguments)
+    ReflectiveAccess.createInstance(serializerFQN, ReflectiveAccess.noParams, ReflectiveAccess.noArgs)
 
   private def serializerForBestMatchClass(cl: Class[_]): Either[Exception, Serializer] = {
     if (bindings.isEmpty)
@@ -69,39 +111,36 @@ class Serialization(val app: AkkaApplication) {
    * By default always contains the following mapping: "default" -> akka.serialization.JavaSerializer
    * But "default" can be overridden in config
    */
-  val serializers: Map[String, Serializer] =
-    app.config.getSection("akka.actor.serializers")
-      .map(_.map)
-      .getOrElse(Map())
-      .foldLeft(Map[String, Serializer]("default" -> akka.serialization.JavaSerializer)) {
-        case (result, (k: String, v: String)) ⇒ result + (k -> serializerOf(v).fold(throw _, identity))
-        case (result, _)                      ⇒ result
-      }
+  lazy val serializers: Map[String, Serializer] = {
+    val serializersConf = settings.Serializers
+    for ((k: String, v: String) ← serializersConf)
+      yield k -> serializerOf(v).fold(throw _, identity)
+  }
 
   /**
    *  bindings is a Map whose keys = FQN of class that is serializable and values = the alias of the serializer to be used
    */
-  val bindings: Map[String, String] = app.config.getSection("akka.actor.serialization-bindings") map {
-    _.map.foldLeft(Map[String, String]()) {
-      case (result, (k: String, vs: List[_])) ⇒ result ++ (vs collect { case v: String ⇒ (v, k) }) //All keys which are lists, take the Strings from them and Map them
-      case (result, _)                        ⇒ result //For any other values, just skip them, TODO: print out warnings?
+  lazy val bindings: Map[String, String] = {
+    val configBindings = settings.SerializationBindings
+    configBindings.foldLeft(Map[String, String]()) {
+      case (result, (k: String, vs: Seq[_])) ⇒
+        //All keys which are lists, take the Strings from them and Map them
+        result ++ (vs collect { case v: String ⇒ (v, k) })
+      case (result, x) ⇒
+        //For any other values, just skip them
+        result
     }
-  } getOrElse Map()
+  }
 
   /**
    * serializerMap is a Map whose keys = FQN of class that is serializable and values = the FQN of the serializer to be used for that class
    */
-  val serializerMap: Map[String, Serializer] = bindings mapValues serializers
+  lazy val serializerMap: Map[String, Serializer] = bindings mapValues serializers
 
   /**
    * Maps from a Serializer.Identifier (Byte) to a Serializer instance (optimization)
    */
-  val serializerByIdentity: Map[Serializer.Identifier, Serializer] =
+  lazy val serializerByIdentity: Map[Serializer.Identifier, Serializer] =
     Map(NullSerializer.identifier -> NullSerializer) ++ serializers map { case (_, v) ⇒ (v.identifier, v) }
-}
-
-object Serialization {
-  // TODO ensure that these are always set (i.e. withValue()) when doing deserialization
-  val app = new DynamicVariable[AkkaApplication](null)
 }
 

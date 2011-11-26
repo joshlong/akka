@@ -5,11 +5,15 @@
 package akka.dispatch
 
 import util.DynamicVariable
-import akka.actor.{ ActorCell, Actor, IllegalActorStateException }
+import akka.actor.{ ActorCell, Actor, IllegalActorStateException, ActorRef }
 import java.util.concurrent.{ LinkedBlockingQueue, ConcurrentLinkedQueue, ConcurrentSkipListSet }
 import java.util.{ Comparator, Queue }
 import annotation.tailrec
-import akka.AkkaApplication
+import akka.actor.ActorSystem
+import akka.event.EventStream
+import akka.actor.Scheduler
+import java.util.concurrent.atomic.AtomicBoolean
+import akka.util.Duration
 
 /**
  * An executor based event driven dispatcher which will try to redistribute work from busy actors to idle actors. It is assumed
@@ -28,25 +32,24 @@ import akka.AkkaApplication
  * @author Viktor Klang
  */
 class BalancingDispatcher(
-  _app: AkkaApplication,
+  _prerequisites: DispatcherPrerequisites,
   _name: String,
   throughput: Int,
-  throughputDeadlineTime: Int,
+  throughputDeadlineTime: Duration,
   mailboxType: MailboxType,
   config: ThreadPoolConfig,
-  _timeoutMs: Long)
-  extends Dispatcher(_app, _name, throughput, throughputDeadlineTime, mailboxType, config, _timeoutMs) {
+  _shutdownTimeout: Duration)
+  extends Dispatcher(_prerequisites, _name, throughput, throughputDeadlineTime, mailboxType, config, _shutdownTimeout) {
 
-  private val buddies = new ConcurrentSkipListSet[ActorCell](new Comparator[ActorCell] { def compare(a: ActorCell, b: ActorCell) = a.uuid.compareTo(b.uuid) }) //new ConcurrentLinkedQueue[ActorCell]()
+  val buddies = new ConcurrentSkipListSet[ActorCell](akka.util.Helpers.IdentityHashComparator)
+  val rebalance = new AtomicBoolean(false)
 
-  protected val messageQueue: MessageQueue = mailboxType match {
+  val messageQueue: MessageQueue = mailboxType match {
     case u: UnboundedMailbox ⇒ new QueueBasedMessageQueue with UnboundedMessageQueueSemantics {
       final val queue = new ConcurrentLinkedQueue[Envelope]
-      final val dispatcher = BalancingDispatcher.this
     }
     case BoundedMailbox(cap, timeout) ⇒ new QueueBasedMessageQueue with BoundedMessageQueueSemantics {
       final val queue = new LinkedBlockingQueue[Envelope](cap)
-      final val dispatcher = BalancingDispatcher.this
       final val pushTimeOut = timeout
     }
     case other ⇒ throw new IllegalArgumentException("Only handles BoundedMailbox and UnboundedMailbox, but you specified [" + other + "]")
@@ -55,61 +58,60 @@ class BalancingDispatcher(
   protected[akka] override def createMailbox(actor: ActorCell): Mailbox = new SharingMailbox(actor)
 
   class SharingMailbox(_actor: ActorCell) extends Mailbox(_actor) with DefaultSystemMessageQueue {
-    final def enqueue(handle: Envelope) = messageQueue.enqueue(handle)
+    final def enqueue(receiver: ActorRef, handle: Envelope) = messageQueue.enqueue(receiver, handle)
 
     final def dequeue(): Envelope = messageQueue.dequeue()
 
     final def numberOfMessages: Int = messageQueue.numberOfMessages
 
     final def hasMessages: Boolean = messageQueue.hasMessages
-
-    final val dispatcher = BalancingDispatcher.this
   }
 
   protected[akka] override def register(actor: ActorCell) = {
     super.register(actor)
-    registerForExecution(actor.mailbox, false, false) //Allow newcomers to be productive from the first moment
+    buddies.add(actor)
   }
 
   protected[akka] override def unregister(actor: ActorCell) = {
-    super.unregister(actor)
     buddies.remove(actor)
-    val buddy = buddies.pollFirst()
-    if (buddy ne null)
-      registerForExecution(buddy.mailbox, false, false)
-  }
-
-  protected[akka] override def shutdown() {
-    super.shutdown()
-    buddies.clear()
+    super.unregister(actor)
+    intoTheFray(except = actor) //When someone leaves, he tosses a friend into the fray
   }
 
   protected override def cleanUpMailboxFor(actor: ActorCell, mailBox: Mailbox) {
     if (mailBox.hasSystemMessages) {
-      var messages = mailBox.systemDrain()
-      while (messages ne null) {
-        deadLetterMailbox.systemEnqueue(messages) //Send to dead letter queue
-        messages = messages.next
-        if (messages eq null) //Make sure that any system messages received after the current drain are also sent to the dead letter mbox
-          messages = mailBox.systemDrain()
+      var message = mailBox.systemDrain()
+      while (message ne null) {
+        // message must be “virgin” before being able to systemEnqueue again
+        val next = message.next
+        message.next = null
+        prerequisites.deadLetterMailbox.systemEnqueue(actor.self, message)
+        message = next
       }
     }
   }
 
-  protected[akka] override def registerForExecution(mbox: Mailbox, hasMessagesHint: Boolean, hasSystemMessagesHint: Boolean): Boolean = {
-    if (!super.registerForExecution(mbox, hasMessagesHint, hasSystemMessagesHint)) {
-      if (mbox.isInstanceOf[SharingMailbox]) buddies.add(mbox.asInstanceOf[SharingMailbox].actor)
-      false
-    } else true
-  }
+  def intoTheFray(except: ActorCell): Unit =
+    if (rebalance.compareAndSet(false, true)) {
+      try {
+        val i = buddies.iterator()
+
+        @tailrec
+        def throwIn(): Unit = {
+          val n = if (i.hasNext) i.next() else null
+          if (n eq null) ()
+          else if ((n ne except) && registerForExecution(n.mailbox, false, false)) ()
+          else throwIn()
+        }
+        throwIn()
+      } finally {
+        rebalance.set(false)
+      }
+    }
 
   override protected[akka] def dispatch(receiver: ActorCell, invocation: Envelope) = {
-    messageQueue enqueue invocation
-
-    val buddy = buddies.pollFirst()
-    if ((buddy ne null) && (buddy ne receiver))
-      registerForExecution(buddy.mailbox, false, false)
-
+    messageQueue.enqueue(receiver.self, invocation)
     registerForExecution(receiver.mailbox, false, false)
+    intoTheFray(except = receiver)
   }
 }

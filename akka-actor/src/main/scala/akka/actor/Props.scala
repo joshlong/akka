@@ -28,9 +28,8 @@ object Props {
     case _                               ⇒ Escalate
   }
   final val defaultFaultHandler: FaultHandlingStrategy = OneForOneStrategy(defaultDecider, None, None)
-  final val defaultSupervisor: Option[ActorRef] = None
+
   final val noHotSwap: Stack[Actor.Receive] = Stack.empty
-  final val randomAddress: String = ""
 
   /**
    * The default Props instance, uses the settings from the Props object starting with default*

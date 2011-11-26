@@ -13,7 +13,7 @@ object SupervisorHierarchySpec {
 
   class CountDownActor(countDown: CountDownLatch) extends Actor {
     protected def receive = {
-      case p: Props ⇒ channel ! context.actorOf(p)
+      case p: Props ⇒ sender ! context.actorOf(p)
     }
     override def postRestart(reason: Throwable) = {
       countDown.countDown()
@@ -53,7 +53,7 @@ class SupervisorHierarchySpec extends AkkaSpec {
       val countDownMax = new CountDownLatch(1)
       val boss = actorOf(Props(new Actor {
         val crasher = context.actorOf(Props(new CountDownActor(countDownMessages)))
-        self startsMonitoring crasher
+        self startsWatching crasher
 
         protected def receive = {
           case "killCrasher" ⇒ crasher ! Kill

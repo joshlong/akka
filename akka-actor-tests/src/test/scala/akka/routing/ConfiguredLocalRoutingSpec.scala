@@ -11,24 +11,25 @@ import akka.routing.Routing.Broadcast
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class ConfiguredLocalRoutingSpec extends AkkaSpec {
 
+  val deployer = system.asInstanceOf[ActorSystemImpl].provider.deployer
+
   "round robin router" must {
 
     "be able to shut down its instance" in {
-      val address = "round-robin-0"
+      val path = system / "round-robin-0"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           RoundRobin,
           NrOfInstances(5),
-          NoOpFailureDetector,
           LocalScope))
 
       val helloLatch = new CountDownLatch(5)
       val stopLatch = new CountDownLatch(5)
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         def receive = {
           case "hello" ⇒ helloLatch.countDown()
         }
@@ -36,7 +37,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         override def postStop() {
           stopLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       actor ! "hello"
       actor ! "hello"
@@ -50,15 +51,14 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
     }
 
     "deliver messages in a round robin fashion" in {
-      val address = "round-robin-1"
+      val path = system / "round-robin-1"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           RoundRobin,
           NrOfInstances(10),
-          NoOpFailureDetector,
           LocalScope))
 
       val connectionCount = 10
@@ -71,13 +71,13 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         replies = replies + (i -> 0)
       }
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         lazy val id = counter.getAndIncrement()
         def receive = {
-          case "hit" ⇒ channel ! id
+          case "hit" ⇒ sender ! id
           case "end" ⇒ doneLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       for (i ← 0 until iterationCount) {
         for (k ← 0 until connectionCount) {
@@ -95,21 +95,20 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
     }
 
     "deliver a broadcast message using the !" in {
-      val address = "round-robin-2"
+      val path = system / "round-robin-2"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           RoundRobin,
           NrOfInstances(5),
-          NoOpFailureDetector,
           LocalScope))
 
       val helloLatch = new CountDownLatch(5)
       val stopLatch = new CountDownLatch(5)
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         def receive = {
           case "hello" ⇒ helloLatch.countDown()
         }
@@ -117,7 +116,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         override def postStop() {
           stopLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       actor ! Broadcast("hello")
       helloLatch.await(5, TimeUnit.SECONDS) must be(true)
@@ -130,20 +129,19 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
   "random router" must {
 
     "be able to shut down its instance" in {
-      val address = "random-0"
+      val path = system / "random-0"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           Random,
           NrOfInstances(7),
-          NoOpFailureDetector,
           LocalScope))
 
       val stopLatch = new CountDownLatch(7)
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         def receive = {
           case "hello" ⇒ {}
         }
@@ -151,7 +149,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         override def postStop() {
           stopLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       actor ! "hello"
       actor ! "hello"
@@ -164,15 +162,14 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
     }
 
     "deliver messages in a random fashion" in {
-      val address = "random-1"
+      val path = system / "random-1"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           Random,
           NrOfInstances(10),
-          NoOpFailureDetector,
           LocalScope))
 
       val connectionCount = 10
@@ -185,13 +182,13 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         replies = replies + (i -> 0)
       }
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         lazy val id = counter.getAndIncrement()
         def receive = {
-          case "hit" ⇒ channel ! id
+          case "hit" ⇒ sender ! id
           case "end" ⇒ doneLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       for (i ← 0 until iterationCount) {
         for (k ← 0 until connectionCount) {
@@ -209,21 +206,20 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
     }
 
     "deliver a broadcast message using the !" in {
-      val address = "random-2"
+      val path = system / "random-2"
 
-      app.deployer.deploy(
+      deployer.deploy(
         Deploy(
-          address,
+          path.toString,
           None,
           Random,
           NrOfInstances(6),
-          NoOpFailureDetector,
           LocalScope))
 
       val helloLatch = new CountDownLatch(6)
       val stopLatch = new CountDownLatch(6)
 
-      val actor = app.actorOf(Props(new Actor {
+      val actor = system.actorOf(Props(new Actor {
         def receive = {
           case "hello" ⇒ helloLatch.countDown()
         }
@@ -231,7 +227,7 @@ class ConfiguredLocalRoutingSpec extends AkkaSpec {
         override def postStop() {
           stopLatch.countDown()
         }
-      }), address)
+      }), path.name)
 
       actor ! Broadcast("hello")
       helloLatch.await(5, TimeUnit.SECONDS) must be(true)

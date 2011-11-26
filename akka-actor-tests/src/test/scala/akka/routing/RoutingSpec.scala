@@ -3,7 +3,7 @@ package akka.routing
 import akka.routing._
 import akka.config.ConfigurationException
 import java.util.concurrent.atomic.AtomicInteger
-import akka.actor.{ ActorRef, Actor }
+import akka.actor._
 import collection.mutable.LinkedList
 import akka.routing.Routing.Broadcast
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
@@ -22,25 +22,17 @@ object RoutingSpec {
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class RoutingSpec extends AkkaSpec {
 
+  val impl = system.asInstanceOf[ActorSystemImpl]
+
   import akka.routing.RoutingSpec._
 
   "direct router" must {
     "be started when constructed" in {
       val actor1 = actorOf[TestActor]
 
-      val props = RoutedProps().withDirectRouter.withLocalConnections(List(actor1))
-      val actor = app.actorOf(props, "foo")
-      actor.isShutdown must be(false)
-    }
-
-    "throw ConfigurationException at construction when no connections" in {
-      try {
-        val props = RoutedProps().withDirectRouter
-        app.actorOf(props, "foo")
-        fail()
-      } catch {
-        case e: ConfigurationException ⇒
-      }
+      val props = RoutedProps(routerFactory = () ⇒ new DirectRouter, connectionManager = new LocalConnectionManager(List(actor1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
+      actor.isTerminated must be(false)
     }
 
     "send message to connection" in {
@@ -54,8 +46,8 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withDirectRouter.withLocalConnections(List(connection1))
-      val routedActor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new DirectRouter, connectionManager = new LocalConnectionManager(List(connection1)))
+      val routedActor = new RoutedActorRef(system, props, impl.guardian, "foo")
       routedActor ! "hello"
       routedActor ! "end"
 
@@ -75,8 +67,8 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withDirectRouter.withLocalConnections(List(connection1))
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new DirectRouter, connectionManager = new LocalConnectionManager(List(connection1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(1)
       actor ! "end"
@@ -92,19 +84,9 @@ class RoutingSpec extends AkkaSpec {
     "be started when constructed" in {
       val actor1 = actorOf[TestActor]
 
-      val props = RoutedProps().withRoundRobinRouter.withLocalConnections(List(actor1))
-      val actor = app.actorOf(props, "foo")
-      actor.isShutdown must be(false)
-    }
-
-    "throw ConfigurationException at construction when no connections" in {
-      try {
-        val props = RoutedProps().withRoundRobinRouter
-        app.actorOf(props, "foo")
-        fail()
-      } catch {
-        case e: ConfigurationException ⇒
-      }
+      val props = RoutedProps(routerFactory = () ⇒ new RoundRobinRouter, connectionManager = new LocalConnectionManager(List(actor1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
+      actor.isTerminated must be(false)
     }
 
     //In this test a bunch of actors are created and each actor has its own counter.
@@ -132,8 +114,8 @@ class RoutingSpec extends AkkaSpec {
       }
 
       //create the routed actor.
-      val props = RoutedProps().withRoundRobinRouter.withLocalConnections(connections)
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new RoundRobinRouter, connectionManager = new LocalConnectionManager(connections))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       //send messages to the actor.
       for (i ← 0 until iterationCount) {
@@ -171,8 +153,8 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withRoundRobinRouter.withLocalConnections(List(connection1, connection2))
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new RoundRobinRouter, connectionManager = new LocalConnectionManager(List(connection1, connection2)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(1)
       actor ! Broadcast("end")
@@ -194,15 +176,10 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withRoundRobinRouter.withLocalConnections(List(connection1))
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new RoundRobinRouter, connectionManager = new LocalConnectionManager(List(connection1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
-      try {
-        actor ? Broadcast(1)
-        fail()
-      } catch {
-        case e: RoutingException ⇒
-      }
+      intercept[RoutingException] { actor ? Broadcast(1) }
 
       actor ! "end"
       doneLatch.await(5, TimeUnit.SECONDS) must be(true)
@@ -216,23 +193,9 @@ class RoutingSpec extends AkkaSpec {
 
       val actor1 = actorOf[TestActor]
 
-      val props = RoutedProps().withRandomRouter.withLocalConnections(List(actor1))
-      val actor = app.actorOf(props, "foo")
-      actor.isShutdown must be(false)
-    }
-
-    "throw ConfigurationException at construction when no connections" in {
-      try {
-        val props = RoutedProps().withRandomRouter
-        app.actorOf(props, "foo")
-        fail()
-      } catch {
-        case e: ConfigurationException ⇒
-      }
-    }
-
-    "deliver messages in a random fashion" ignore {
-
+      val props = RoutedProps(routerFactory = () ⇒ new RandomRouter, connectionManager = new LocalConnectionManager(List(actor1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
+      actor.isTerminated must be(false)
     }
 
     "deliver a broadcast message" in {
@@ -254,8 +217,8 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withRandomRouter.withLocalConnections(List(connection1, connection2))
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new RandomRouter, connectionManager = new LocalConnectionManager(List(connection1, connection2)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(1)
       actor ! Broadcast("end")
@@ -277,8 +240,8 @@ class RoutingSpec extends AkkaSpec {
         }
       })
 
-      val props = RoutedProps().withRandomRouter.withLocalConnections(List(connection1))
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new RandomRouter, connectionManager = new LocalConnectionManager(List(connection1)))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       try {
         actor ? Broadcast(1)
@@ -299,11 +262,9 @@ class RoutingSpec extends AkkaSpec {
 
       val shutdownLatch = new TestLatch(1)
 
-      val props = RoutedProps()
-        .withLocalConnections(List(newActor(0, Some(shutdownLatch)), newActor(1, Some(shutdownLatch))))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(newActor(0, Some(shutdownLatch)), newActor(1, Some(shutdownLatch)))))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(Stop(Some(0)))
 
@@ -316,11 +277,9 @@ class RoutingSpec extends AkkaSpec {
 
       val shutdownLatch = new TestLatch(2)
 
-      val props = RoutedProps()
-        .withLocalConnections(List(newActor(0, Some(shutdownLatch)), newActor(1, Some(shutdownLatch))))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(newActor(0, Some(shutdownLatch)), newActor(1, Some(shutdownLatch)))))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(Stop())
 
@@ -334,47 +293,27 @@ class RoutingSpec extends AkkaSpec {
 
     "return the first response from connections, when all of them replied" in {
 
-      val props = RoutedProps()
-        .withLocalConnections(List(newActor(0), newActor(1)))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(newActor(0), newActor(1))))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       (actor ? Broadcast("Hi!")).get.asInstanceOf[Int] must be(0)
 
     }
 
     "return the first response from connections, when some of them failed to reply" in {
-      val props = RoutedProps()
-        .withLocalConnections(List(newActor(0), newActor(1)))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(newActor(0), newActor(1))))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       (actor ? Broadcast(0)).get.asInstanceOf[Int] must be(1)
     }
 
     "be started when constructed" in {
-      val props = RoutedProps()
-        .withLocalConnections(List(newActor(0)))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
-      val actor = app.actorOf(props, "foo")
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(newActor(0))))
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
-      actor.isShutdown must be(false)
-
-    }
-
-    "throw ConfigurationException at construction when no connections" in {
-      val props = RoutedProps()
-        .withLocalConnections(List())
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
-
-      try {
-        app.actorOf(props, "foo")
-        fail()
-      } catch {
-        case e: ConfigurationException ⇒
-      }
+      actor.isTerminated must be(false)
     }
 
     "deliver one-way messages in a round robin fashion" in {
@@ -387,7 +326,7 @@ class RoutingSpec extends AkkaSpec {
       for (i ← 0 until connectionCount) {
         counters = counters :+ new AtomicInteger()
 
-        val connection = app.actorOf(new Actor {
+        val connection = system.actorOf(new Actor {
           def receive = {
             case "end"    ⇒ doneLatch.countDown()
             case msg: Int ⇒ counters.get(i).get.addAndGet(msg)
@@ -396,11 +335,9 @@ class RoutingSpec extends AkkaSpec {
         connections = connections :+ connection
       }
 
-      val props = RoutedProps()
-        .withLocalConnections(connections)
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(connections))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       for (i ← 0 until iterationCount) {
         for (k ← 0 until connectionCount) {
@@ -422,7 +359,7 @@ class RoutingSpec extends AkkaSpec {
       val doneLatch = new TestLatch(2)
 
       val counter1 = new AtomicInteger
-      val connection1 = app.actorOf(new Actor {
+      val connection1 = system.actorOf(new Actor {
         def receive = {
           case "end"    ⇒ doneLatch.countDown()
           case msg: Int ⇒ counter1.addAndGet(msg)
@@ -430,18 +367,16 @@ class RoutingSpec extends AkkaSpec {
       })
 
       val counter2 = new AtomicInteger
-      val connection2 = app.actorOf(new Actor {
+      val connection2 = system.actorOf(new Actor {
         def receive = {
           case "end"    ⇒ doneLatch.countDown()
           case msg: Int ⇒ counter2.addAndGet(msg)
         }
       })
 
-      val props = RoutedProps.apply()
-        .withLocalConnections(List(connection1, connection2))
-        .withRouter(() ⇒ new ScatterGatherFirstCompletedRouter())
+      val props = RoutedProps(routerFactory = () ⇒ new ScatterGatherFirstCompletedRouter, connectionManager = new LocalConnectionManager(List(connection1, connection2)))
 
-      val actor = app.actorOf(props, "foo")
+      val actor = new RoutedActorRef(system, props, impl.guardian, "foo")
 
       actor ! Broadcast(1)
       actor ! Broadcast("end")
@@ -454,17 +389,92 @@ class RoutingSpec extends AkkaSpec {
 
     case class Stop(id: Option[Int] = None)
 
-    def newActor(id: Int, shudownLatch: Option[TestLatch] = None) = app.actorOf(new Actor {
+    def newActor(id: Int, shudownLatch: Option[TestLatch] = None) = system.actorOf(new Actor {
       def receive = {
         case Stop(None)                     ⇒ self.stop()
         case Stop(Some(_id)) if (_id == id) ⇒ self.stop()
         case _id: Int if (_id == id)        ⇒
-        case _                              ⇒ Thread sleep 100 * id; channel.tryTell(id)
+        case _                              ⇒ Thread sleep 100 * id; sender.tell(id)
       }
 
       override def postStop = {
         shudownLatch foreach (_.countDown())
       }
     })
+  }
+
+  "broadcast router" must {
+
+    "be started when constructed" in {
+      val actor1 = actorOf[TestActor]
+
+      val props = RoutedProps(routerFactory = () ⇒ new BroadcastRouter, connectionManager = new LocalConnectionManager(List(actor1)))
+      val actor = new RoutedActorRef(system, props, system.asInstanceOf[ActorSystemImpl].guardian, "foo")
+      actor.isTerminated must be(false)
+    }
+
+    "broadcast message using !" in {
+      val doneLatch = new CountDownLatch(2)
+
+      val counter1 = new AtomicInteger
+      val connection1 = actorOf(new Actor {
+        def receive = {
+          case "end"    ⇒ doneLatch.countDown()
+          case msg: Int ⇒ counter1.addAndGet(msg)
+        }
+      })
+
+      val counter2 = new AtomicInteger
+      val connection2 = actorOf(new Actor {
+        def receive = {
+          case "end"    ⇒ doneLatch.countDown()
+          case msg: Int ⇒ counter2.addAndGet(msg)
+        }
+      })
+
+      val props = RoutedProps(routerFactory = () ⇒ new BroadcastRouter, connectionManager = new LocalConnectionManager(List(connection1, connection2)))
+      val actor = new RoutedActorRef(system, props, system.asInstanceOf[ActorSystemImpl].guardian, "foo")
+
+      actor ! 1
+      actor ! "end"
+
+      doneLatch.await(5, TimeUnit.SECONDS) must be(true)
+
+      counter1.get must be(1)
+      counter2.get must be(1)
+    }
+
+    "broadcast message using ?" in {
+      val doneLatch = new CountDownLatch(2)
+
+      val counter1 = new AtomicInteger
+      val connection1 = actorOf(new Actor {
+        def receive = {
+          case "end" ⇒ doneLatch.countDown()
+          case msg: Int ⇒
+            counter1.addAndGet(msg)
+            sender ! "ack"
+        }
+      })
+
+      val counter2 = new AtomicInteger
+      val connection2 = actorOf(new Actor {
+        def receive = {
+          case "end"    ⇒ doneLatch.countDown()
+          case msg: Int ⇒ counter2.addAndGet(msg)
+        }
+      })
+
+      val props = RoutedProps(routerFactory = () ⇒ new BroadcastRouter, connectionManager = new LocalConnectionManager(List(connection1, connection2)))
+      val actor = new RoutedActorRef(system, props, system.asInstanceOf[ActorSystemImpl].guardian, "foo")
+
+      actor ? 1
+      actor ! "end"
+
+      doneLatch.await(5, TimeUnit.SECONDS) must be(true)
+
+      counter1.get must be(1)
+      counter2.get must be(1)
+    }
   }
 }
