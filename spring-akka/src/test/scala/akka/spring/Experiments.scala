@@ -1,33 +1,47 @@
 package akka.spring
 
-import config.ActorBeanPostProcessor
-import org.springframework.context.annotation.{Configuration, Bean, AnnotationConfigApplicationContext}
+
+import akka.spring.config.ActorBeanPostProcessor
 import javax.annotation.PostConstruct
+import org.springframework.context.annotation.{Configuration, Bean, AnnotationConfigApplicationContext}
+import akka.actor.ActorSystem
+import org.springframework.beans.factory.annotation.Autowired
 
 
 /**
  * scratchpad.
  */
 object Experiments extends App {
-
-  //  val aa = new AkkaApplication ( "aName", Configuration.fromResource("config/akka.conf"))
-
-  val ac = new AnnotationConfigApplicationContext(classOf[SimpleConfiguration])
+  val applicationContext = new AnnotationConfigApplicationContext
+  applicationContext.scan(classOf[MyActor].getPackage.getName)
+  applicationContext.refresh()
 }
 
-@Actor
+@akka.spring.Actor
 class MyActor {
+
+  @Autowired
+  var actorSystem: ActorSystem = null;
 
   @PostConstruct
   def setup() {
-    Console.printf("PostConstruct...")
+
+    Console.println("PostConstruct(): actorSystem is " +
+      (if (this.actorSystem != null) "not" else "") + " null");
+
   }
 
+  // protected def receive:Receive =>
+  @Receive
+  protected def aCustomReceiveMethod(msg: Any) {
+    Console.println("received a notification")
+  }
 }
 
 @Configuration
 class SimpleConfiguration {
-  @Bean
-  def actorBpp() =
-    new ActorBeanPostProcessor
+
+  @Bean def actorSystem = ActorSystem()
+
+  @Bean def actorBpp() = new ActorBeanPostProcessor(actorSystem)
 }
