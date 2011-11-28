@@ -1,84 +1,131 @@
-package akka.spring.config
+package akka.spring.config {
 
-import org.springframework.beans.factory.config._
-import javax.annotation.PostConstruct
-import akka.actor.{Actor, ActorSystem}
-import java.lang.reflect.Method
-import org.springframework.util.{Assert, ReflectionUtils}
 import org.springframework.beans.factory.InitializingBean
+import java.lang.reflect.Method
+import akka.actor.{Actor, ActorSystem}
+import akka.spring.config.util.ComponentReflectionUtilities
+import org.springframework.util.Assert
+import org.springframework.beans.factory.config.BeanPostProcessor
 
-class ActorBeanPostProcessor(val actorSystem: ActorSystem) extends BeanPostProcessor with InitializingBean {
 
-  def log(msg: String) {
-    Console.println("the string s " + msg)
+/**
+ * @author Josh Long
+ */
+class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
+
+  type A = akka.actor.Actor
+  type AR = akka.actor.ActorRef
+
+  var system: ActorSystem = ActorSystem()
+
+  private[this] def log(msg: String) {
+    Console.println(  msg  );
   }
 
   def postProcessAfterInitialization(bean: AnyRef, beanName: String): AnyRef = {
     log("postProcessAfterInitialization(bean, '" + beanName + "')")
-    if (bean.isInstanceOf[Actor]) {
-      val actorRef = bean.asInstanceOf[Actor]
-      val actor = actorSystem.actorOf(actorRef)
-      return actor
-    }
     bean
   }
 
-
-  def postProcessBeforeInitialization(bean: AnyRef, p2: String): AnyRef = {
-    log("postProcessAfterInitialization " + p2)
+  def postProcessBeforeInitialization(bean: AnyRef, beanName: String): AnyRef = {
+    log("postProcessAfterInitialization " + beanName)
+    // is it an @Actor ?
+    val isActor = bean.getClass.getAnnotation(classOf[akka.spring.Actor]) != null
+    if (isActor) {
+      val delegate = new DelegatingActor(bean)
+      log("creating a DelegatingActor for bean " + bean)
+      val a: AR = system.actorOf(delegate)
+      return a
+    }
     bean
   }
 
   def afterPropertiesSet() {
-    log( "afterPropertiesSet()")
+    log("afterPropertiesSet()")
   }
 }
 
+/**
+ * wrapper class for the Actor.
+ */
+class DelegatingActor(d: AnyRef) extends Actor {
+
+  var receiveMethod: Method = null;
+  val delegate = d
+  setup(delegate)
+
+  private def setup(b: AnyRef) {
+    val receiveAnnotation = classOf[akka.spring.Receive];
+    receiveMethod = ComponentReflectionUtilities.findMethodWithAnnotation(b, receiveAnnotation)
+    Assert.notNull(receiveMethod,
+      "there must be one (and only" +
+        " one) method annotated with @Receive")
+  }
+
+  protected def doReceive(msg: AnyRef) {
+    val ar = msg.asInstanceOf[AnyRef];
+    receiveMethod.invoke(delegate, ar)
+  }
+
+  protected def receive = {
+    case e: AnyRef => doReceive(e)
+  }
+}
+
+}
+
+package akka.spring.config.util {
+
+import java.lang.reflect.Method
+import org.springframework.util.{ReflectionUtils, Assert}
+import reflect.BeanProperty
+
 
 /**
- * wrapper calss for the Actor.
+ * Sifting through methods is dirty business. This class handles that chore
+ * (and, possibly) others related to inspecting the components at runtime.
  *
+ * @author Josh Long
  */
-  class DelegatingActor(d: AnyRef) extends Actor {
+object ComponentReflectionUtilities {
 
-    private[this] def setup(b: AnyRef) {
-      val classOfDelegate = delegate.getClass
-      val callback = new HandlerResolvingMethodCallback
-      val filter = new HandlerResolvingMethodFilter
-      ReflectionUtils.doWithMethods(classOfDelegate, callback, filter)
-    }
+  import java.lang.annotation.Annotation
 
-    // provided by logic in #setup
+  def findMethodWithAnnotation(bean: AnyRef, annotation: Class[_ <: Annotation]): Method = {
+    val methods = findMethodsWithAnnotation(bean, annotation)
+    Assert.isTrue(methods.size == 1, "there should not be more than one match for methods with the annotation " + annotation.getClass.getName)
+    methods(0)
+  }
 
-    var receiveMethod: Method = null;
-    val delegate = d
-    setup(delegate)
+  def findMethodsWithAnnotation(bean: AnyRef, annotation: Class[_ <: Annotation]): List[Method] = {
+    val methodFilter = new HandlerResolvingMethodFilter(annotation);
+    val methodCallback = new HandlerResolvingMethodCallback(annotation);
+    ReflectionUtils.doWithMethods(bean.getClass, methodCallback, methodFilter)
+    methodCallback.getMethods()
+  }
 
-    // mark the class as a receive callback
-    class HandlerResolvingMethodCallback extends ReflectionUtils.MethodCallback {
-      def doWith(m: Method) {
-        // find the method
-        Assert.isTrue(receiveMethod == null,
-          "this indicates that there are two methods " +
-            "annotate with @Receive on the class (please specify only one)");
-        receiveMethod = m
-      }
-    }
+  /**
+   * Simply records the method that matches (or throws an exception if the m's already been set)
+   */
+  private class HandlerResolvingMethodCallback(annotation: Class[_ <: Annotation]) extends ReflectionUtils.MethodCallback {
 
-    // find the receive handling methods on the class
-    class HandlerResolvingMethodFilter extends ReflectionUtils.MethodFilter {
-      def matches(method: Method) = {
-        val annotationType = classOf[akka.spring.Receive]
-        method.getAnnotation(annotationType) != null
-      }
-    }
+    @BeanProperty
+    var methods: List[Method] = List();
 
-    protected def doReceive( msg:AnyRef){
-      val ar = msg.asInstanceOf[AnyRef];
-      receiveMethod.invoke(delegate, ar)
-    }
-
-    protected def receive = {
-      case e:AnyRef => doReceive(e)
+    def doWith(m: Method) {
+      this.methods = m :: methods
     }
   }
+
+  /**
+   * Preserves any object that has an annotation matching the specified annotation type
+   */
+  private class HandlerResolvingMethodFilter(annotation: Class[_ <: Annotation]) extends ReflectionUtils.MethodFilter {
+    def matches(method: Method) = {
+      method.getAnnotation(this.annotation) != null
+    }
+  }
+
+}
+
+}
