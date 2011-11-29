@@ -16,10 +16,10 @@ class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
   type A = akka.actor.Actor
   type AR = akka.actor.ActorRef
 
-  var system: ActorSystem = ActorSystem()
+  var system:ActorSystem = ActorSystem()
 
   private[this] def log(msg: String) {
-    Console.println(  msg  );
+    Console.println(msg);
   }
 
   def postProcessAfterInitialization(bean: AnyRef, beanName: String): AnyRef = {
@@ -32,9 +32,8 @@ class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
     // is it an @Actor ?
     val isActor = bean.getClass.getAnnotation(classOf[akka.spring.Actor]) != null
     if (isActor) {
-      val delegate = new DelegatingActor(bean)
       log("creating a DelegatingActor for bean " + bean)
-      val a: AR = system.actorOf(delegate)
+      val a: AR = system.actorOf(new DelegatingActor(bean)) // do NOT sperate the Actor creation from system.actorOf() call.
       return a
     }
     bean
@@ -58,8 +57,8 @@ class DelegatingActor(d: AnyRef) extends Actor {
     val receiveAnnotation = classOf[akka.spring.Receive];
     receiveMethod = ComponentReflectionUtilities.findMethodWithAnnotation(b, receiveAnnotation)
     Assert.notNull(receiveMethod,
-      "there must be one (and only" +
-        " one) method annotated with @Receive")
+      "there must be one (and only " +
+        "one) method annotated with @Receive")
   }
 
   protected def doReceive(msg: AnyRef) {
