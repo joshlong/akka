@@ -1,11 +1,11 @@
 package akka.routing
 
-import akka.dispatch.{ KeptPromise, Future }
 import akka.actor._
 import akka.testkit._
 import akka.util.duration._
 import java.util.concurrent.atomic.{ AtomicBoolean, AtomicInteger }
 import akka.testkit.AkkaSpec
+import akka.dispatch.{ Await, Promise, Future }
 
 object ActorPoolSpec {
 
@@ -17,7 +17,7 @@ object ActorPoolSpec {
     import TypedActor.dispatcher
     def sq(x: Int, sleep: Long): Future[Int] = {
       if (sleep > 0) Thread.sleep(sleep)
-      new KeptPromise(Right(x * x))
+      Promise.successful(x * x)
     }
   }
 
@@ -25,11 +25,13 @@ object ActorPoolSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class TypedActorPoolSpec extends AkkaSpec {
+class TypedActorPoolSpec extends AkkaSpec with DefaultTimeout {
   import ActorPoolSpec._
   "Actor Pool (2)" must {
     "support typed actors" in {
-      val pool = system.createProxy[Foo](new Actor with DefaultActorPool with BoundedCapacityStrategy with MailboxPressureCapacitor with SmallestMailboxSelector with Filter with RunningMeanBackoff with BasicRampup {
+      val ta = TypedActor(system)
+      val pool = ta.createProxy[Foo](new Actor with DefaultActorPool with BoundedCapacityStrategy with MailboxPressureCapacitor with SmallestMailboxSelector with Filter with RunningMeanBackoff with BasicRampup {
+        val typedActor = TypedActor(context)
         def lowerBound = 1
         def upperBound = 5
         def pressureThreshold = 1
@@ -38,22 +40,22 @@ class TypedActorPoolSpec extends AkkaSpec {
         def rampupRate = 0.1
         def backoffRate = 0.50
         def backoffThreshold = 0.50
-        def instance(p: Props) = system.typedActor.getActorRefFor(context.typedActorOf[Foo, FooImpl](props = p.withTimeout(10 seconds)))
+        def instance(p: Props) = typedActor.getActorRefFor(typedActor.typedActorOf[Foo, FooImpl](props = p.withTimeout(10 seconds)))
         def receive = _route
       }, Props().withTimeout(10 seconds).withFaultHandler(faultHandler))
 
       val results = for (i ← 1 to 100) yield (i, pool.sq(i, 0))
 
       for ((i, r) ← results)
-        r.get must equal(i * i)
+        Await.result(r, timeout.duration) must equal(i * i)
 
-      system.typedActor.stop(pool)
+      ta.stop(pool)
     }
   }
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class ActorPoolSpec extends AkkaSpec {
+class ActorPoolSpec extends AkkaSpec with DefaultTimeout {
   import ActorPoolSpec._
 
   "Actor Pool" must {
@@ -62,9 +64,9 @@ class ActorPoolSpec extends AkkaSpec {
       val latch = TestLatch(2)
       val count = new AtomicInteger(0)
 
-      val pool = actorOf(
+      val pool = system.actorOf(
         Props(new Actor with DefaultActorPool with FixedCapacityStrategy with SmallestMailboxSelector {
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case _ ⇒
                 count.incrementAndGet
@@ -80,11 +82,11 @@ class ActorPoolSpec extends AkkaSpec {
         }).withFaultHandler(faultHandler))
 
       val successes = TestLatch(2)
-      val successCounter = actorOf(new Actor {
+      val successCounter = system.actorOf(Props(new Actor {
         def receive = {
           case "success" ⇒ successes.countDown()
         }
-      })
+      }))
 
       implicit val replyTo = successCounter
       pool ! "a"
@@ -95,13 +97,13 @@ class ActorPoolSpec extends AkkaSpec {
 
       count.get must be(2)
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be(2)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be(2)
 
-      pool.stop()
+      system.stop(pool)
     }
 
     "pass ticket #705" in {
-      val pool = actorOf(
+      val pool = system.actorOf(
         Props(new Actor with DefaultActorPool with BoundedCapacityStrategy with MailboxPressureCapacitor with SmallestMailboxSelector with BasicFilter {
           def lowerBound = 2
           def upperBound = 20
@@ -112,7 +114,7 @@ class ActorPoolSpec extends AkkaSpec {
           def selectionCount = 1
           def receive = _route
           def pressureThreshold = 1
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case req: String ⇒ {
                 (10 millis).dilated.sleep
@@ -123,11 +125,11 @@ class ActorPoolSpec extends AkkaSpec {
         }).withFaultHandler(faultHandler))
 
       try {
-        (for (count ← 1 to 500) yield pool.?("Test", 20000)) foreach {
-          _.await.resultOrException.get must be("Response")
+        (for (count ← 1 to 500) yield pool.?("Test", 20 seconds)) foreach {
+          Await.result(_, 20 seconds) must be("Response")
         }
       } finally {
-        pool.stop()
+        system.stop(pool)
       }
     }
 
@@ -138,9 +140,9 @@ class ActorPoolSpec extends AkkaSpec {
       var latch = TestLatch(3)
       val count = new AtomicInteger(0)
 
-      val pool = actorOf(
+      val pool = system.actorOf(
         Props(new Actor with DefaultActorPool with BoundedCapacityStrategy with ActiveActorsPressureCapacitor with SmallestMailboxSelector with BasicNoBackoffFilter {
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case n: Int ⇒
                 (n millis).dilated.sleep
@@ -161,7 +163,7 @@ class ActorPoolSpec extends AkkaSpec {
 
       pool ! 1
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be(2)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be(2)
 
       var loops = 0
       def loop(t: Int) = {
@@ -181,7 +183,7 @@ class ActorPoolSpec extends AkkaSpec {
       latch.await
       count.get must be(loops)
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be(2)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be(2)
 
       // a whole bunch should max it out
 
@@ -190,9 +192,9 @@ class ActorPoolSpec extends AkkaSpec {
       latch.await
       count.get must be(loops)
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be(4)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be(4)
 
-      pool.stop()
+      system.stop(pool)
     }
 
     "grow as needed under mailbox pressure" in {
@@ -202,9 +204,9 @@ class ActorPoolSpec extends AkkaSpec {
       var latch = TestLatch(3)
       val count = new AtomicInteger(0)
 
-      val pool = actorOf(
+      val pool = system.actorOf(
         Props(new Actor with DefaultActorPool with BoundedCapacityStrategy with MailboxPressureCapacitor with SmallestMailboxSelector with BasicNoBackoffFilter {
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case n: Int ⇒
                 (n millis).dilated.sleep
@@ -237,7 +239,7 @@ class ActorPoolSpec extends AkkaSpec {
       latch.await
       count.get must be(loops)
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be(2)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be(2)
 
       // send a bunch over the threshold and observe an increment
       loops = 15
@@ -246,22 +248,22 @@ class ActorPoolSpec extends AkkaSpec {
       latch.await(10 seconds)
       count.get must be(loops)
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be >= (3)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be >= (3)
 
-      pool.stop()
+      system.stop(pool)
     }
 
     "round robin" in {
       val latch1 = TestLatch(2)
       val delegates = new java.util.concurrent.ConcurrentHashMap[String, String]
 
-      val pool1 = actorOf(
+      val pool1 = system.actorOf(
         Props(new Actor with DefaultActorPool with FixedCapacityStrategy with RoundRobinSelector with BasicNoBackoffFilter {
 
-          def instance(p: Props): ActorRef = actorOf(p.withCreator(new Actor {
+          def instance(p: Props): ActorRef = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case _ ⇒
-                delegates put (self.address, "")
+                delegates put (self.path.toString, "")
                 latch1.countDown()
             }
           }))
@@ -279,17 +281,17 @@ class ActorPoolSpec extends AkkaSpec {
       latch1.await
       delegates.size must be(1)
 
-      pool1.stop()
+      system.stop(pool1)
 
       val latch2 = TestLatch(2)
       delegates.clear()
 
-      val pool2 = actorOf(
+      val pool2 = system.actorOf(
         Props(new Actor with DefaultActorPool with FixedCapacityStrategy with RoundRobinSelector with BasicNoBackoffFilter {
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case _ ⇒
-                delegates put (self.address, "")
+                delegates put (self.path.toString, "")
                 latch2.countDown()
             }
           }))
@@ -307,15 +309,15 @@ class ActorPoolSpec extends AkkaSpec {
       latch2.await
       delegates.size must be(2)
 
-      pool2.stop()
+      system.stop(pool2)
     }
 
     "backoff" in {
       val latch = TestLatch(10)
 
-      val pool = actorOf(
+      val pool = system.actorOf(
         Props(new Actor with DefaultActorPool with BoundedCapacityStrategy with MailboxPressureCapacitor with SmallestMailboxSelector with Filter with RunningMeanBackoff with BasicRampup {
-          def instance(p: Props) = actorOf(p.withCreator(new Actor {
+          def instance(p: Props) = system.actorOf(p.withCreator(new Actor {
             def receive = {
               case n: Int ⇒
                 (n millis).dilated.sleep
@@ -340,7 +342,7 @@ class ActorPoolSpec extends AkkaSpec {
 
       (5 millis).dilated.sleep
 
-      val z = (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size
+      val z = Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size
 
       z must be >= (2)
 
@@ -351,9 +353,9 @@ class ActorPoolSpec extends AkkaSpec {
         (500 millis).dilated.sleep
       }
 
-      (pool ? ActorPool.Stat).as[ActorPool.Stats].get.size must be <= (z)
+      Await.result((pool ? ActorPool.Stat).mapTo[ActorPool.Stats], timeout.duration).size must be <= (z)
 
-      pool.stop()
+      system.stop(pool)
     }
   }
 }

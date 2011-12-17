@@ -9,8 +9,7 @@ import akka.actor._
 import scala.annotation.tailrec
 
 import java.util.concurrent.atomic.{ AtomicReference, AtomicInteger }
-import java.net.InetSocketAddress
-import akka.remote.RemoteAddress
+import collection.JavaConverters
 
 /**
  * An Iterable that also contains a version.
@@ -25,8 +24,6 @@ trait VersionedIterable[A] {
 
 /**
  * Manages connections (ActorRefs) for a router.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 trait ConnectionManager {
   /**
@@ -68,62 +65,4 @@ trait ConnectionManager {
    * @param ref the dead
    */
   def remove(deadRef: ActorRef)
-
-  /**
-   * Creates a new connection (ActorRef) if it didn't exist. Atomically.
-   */
-  def putIfAbsent(address: RemoteAddress, newConnectionFactory: () ⇒ ActorRef): ActorRef
-
-  /**
-   * Fails over connections from one address to another.
-   */
-  def failOver(from: RemoteAddress, to: RemoteAddress)
-}
-
-/**
- * Manages local connections for a router, e.g. local actors.
- */
-class LocalConnectionManager(initialConnections: Iterable[ActorRef]) extends ConnectionManager {
-
-  case class State(version: Long, connections: Iterable[ActorRef]) extends VersionedIterable[ActorRef] {
-    def iterable = connections
-  }
-
-  private val state: AtomicReference[State] = new AtomicReference[State](newState())
-
-  private def newState() = State(Long.MinValue, initialConnections)
-
-  def version: Long = state.get.version
-
-  def size: Int = state.get.connections.size
-
-  def isEmpty: Boolean = state.get.connections.isEmpty
-
-  def connections = state.get
-
-  def shutdown() {
-    state.get.connections foreach (_.stop())
-  }
-
-  @tailrec
-  final def remove(ref: ActorRef) = {
-    val oldState = state.get
-
-    //remote the ref from the connections.
-    var newList = oldState.connections.filter(currentActorRef ⇒ currentActorRef ne ref)
-
-    if (newList.size != oldState.connections.size) {
-      //one or more occurrences of the actorRef were removed, so we need to update the state.
-
-      val newState = State(oldState.version + 1, newList)
-      //if we are not able to update the state, we just try again.
-      if (!state.compareAndSet(oldState, newState)) remove(ref)
-    }
-  }
-
-  def failOver(from: RemoteAddress, to: RemoteAddress) {} // do nothing here
-
-  def putIfAbsent(address: RemoteAddress, newConnectionFactory: () ⇒ ActorRef): ActorRef = {
-    throw new UnsupportedOperationException("Not supported")
-  }
 }

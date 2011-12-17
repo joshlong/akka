@@ -14,20 +14,13 @@ class TellThroughputComputationPerformanceSpec extends PerformanceSpec {
 
   def createDispatcher(name: String) = ThreadPoolConfigDispatcherBuilder(config ⇒
     new Dispatcher(system.dispatcherFactory.prerequisites, name, 5,
-      Duration.Zero, UnboundedMailbox(), config, 60 seconds), ThreadPoolConfig())
+      Duration.Zero, UnboundedMailbox(), config, 1 seconds), ThreadPoolConfig())
     .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
     .setCorePoolSize(maxClients)
     .build
 
   val clientDispatcher = createDispatcher("client-dispatcher")
   val destinationDispatcher = createDispatcher("destination-dispatcher")
-
-  override def atTermination {
-    super.atTermination()
-    System.out.println("Cleaning up after TellThroughputComputationPerformanceSpec")
-    clientDispatcher.shutdown()
-    destinationDispatcher.shutdown()
-  }
 
   val repeat = 500L * repeatFactor
 
@@ -126,7 +119,7 @@ class TellThroughputComputationPerformanceSpec extends PerformanceSpec {
 
         val start = System.nanoTime
         clients.foreach(_ ! Run)
-        val ok = latch.await((5000000 + 500 * repeat) * timeDilation, TimeUnit.MICROSECONDS)
+        val ok = latch.await(maxRunDuration.toMillis, TimeUnit.MILLISECONDS)
         val durationNs = (System.nanoTime - start)
 
         if (!ok) {
@@ -154,8 +147,8 @@ class TellThroughputComputationPerformanceSpec extends PerformanceSpec {
           ok must be(true)
           logMeasurement(numberOfClients, durationNs, repeat)
         }
-        clients.foreach(_ ! PoisonPill)
-        destinations.foreach(_ ! PoisonPill)
+        clients.foreach(system.stop(_))
+        destinations.foreach(system.stop(_))
 
       }
     }
@@ -211,7 +204,7 @@ object TellThroughputComputationPerformanceSpec {
           actor ! Msg
           sent += 1
         } else if (received >= repeat) {
-          println("PI: " + pi)
+          //println("PI: " + pi)
           latch.countDown()
         }
       case Run ⇒

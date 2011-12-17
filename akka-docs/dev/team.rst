@@ -1,7 +1,9 @@
+
 .. _team:
 
-Team
-=====
+######
+ Team
+######
 
 ===================  ==========================  ====================================
 Name                 Role                        Email
@@ -26,4 +28,5 @@ Scott Clasen         Committer
 Roland Kuhn          Committer
 Patrik Nordwall      Committer                   patrik DOT nordwall AT gmail DOT com
 Derek Williams       Committer                   derek AT nebvin DOT ca
+Henrik Engström      Committer
 ===================  ==========================  ====================================

@@ -7,10 +7,7 @@ package akka.dispatch
 import java.util.Collection
 import java.util.concurrent.atomic.{ AtomicLong, AtomicInteger }
 import akka.util.Duration
-import akka.event.Logging.{ Warning, Error }
-import akka.actor.ActorSystem
 import java.util.concurrent._
-import akka.event.EventStream
 
 object ThreadPoolConfig {
   type Bounds = Int
@@ -22,9 +19,10 @@ object ThreadPoolConfig {
   val defaultMaxPoolSize: Int = 128
   val defaultTimeout: Duration = Duration(60000L, TimeUnit.MILLISECONDS)
 
-  def fixedPoolSize(size: Int): Int = size
-  def scaledPoolSize(multiplier: Double): Int =
-    (Runtime.getRuntime.availableProcessors * multiplier).ceil.toInt
+  def scaledPoolSize(floor: Int, multiplier: Double, ceiling: Int): Int = {
+    import scala.math.{ min, max }
+    min(max((Runtime.getRuntime.availableProcessors * multiplier).ceil.toInt, floor), ceiling)
+  }
 
   def arrayBlockingQueue(capacity: Int, fair: Boolean): QueueFactory =
     () ⇒ new ArrayBlockingQueue[Runnable](capacity, fair)
@@ -68,16 +66,17 @@ case class ThreadPoolConfig(allowCorePoolTimeout: Boolean = ThreadPoolConfig.def
                             corePoolSize: Int = ThreadPoolConfig.defaultCorePoolSize,
                             maxPoolSize: Int = ThreadPoolConfig.defaultMaxPoolSize,
                             threadTimeout: Duration = ThreadPoolConfig.defaultTimeout,
-                            queueFactory: ThreadPoolConfig.QueueFactory = ThreadPoolConfig.linkedBlockingQueue())
+                            queueFactory: ThreadPoolConfig.QueueFactory = ThreadPoolConfig.linkedBlockingQueue(),
+                            daemonic: Boolean = false)
   extends ExecutorServiceFactoryProvider {
-  final def createExecutorServiceFactory(name: String): ExecutorServiceFactory = new ExecutorServiceFactory {
-    val threadFactory = new MonitorableThreadFactory(name)
+  class ThreadPoolExecutorServiceFactory(val threadFactory: ThreadFactory) extends ExecutorServiceFactory {
     def createExecutorService: ExecutorService = {
       val service = new ThreadPoolExecutor(corePoolSize, maxPoolSize, threadTimeout.length, threadTimeout.unit, queueFactory(), threadFactory, new SaneRejectedExecutionHandler)
       service.allowCoreThreadTimeOut(allowCorePoolTimeout)
       service
     }
   }
+  final def createExecutorServiceFactory(name: String): ExecutorServiceFactory = new ThreadPoolExecutorServiceFactory(new MonitorableThreadFactory(name, daemonic))
 }
 
 trait DispatcherBuilder {
@@ -119,11 +118,11 @@ case class ThreadPoolConfigDispatcherBuilder(dispatcherFactory: (ThreadPoolConfi
   def setMaxPoolSize(size: Int): ThreadPoolConfigDispatcherBuilder =
     this.copy(config = config.copy(maxPoolSize = size))
 
-  def setCorePoolSizeFromFactor(multiplier: Double): ThreadPoolConfigDispatcherBuilder =
-    setCorePoolSize(scaledPoolSize(multiplier))
+  def setCorePoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigDispatcherBuilder =
+    setCorePoolSize(scaledPoolSize(min, multiplier, max))
 
-  def setMaxPoolSizeFromFactor(multiplier: Double): ThreadPoolConfigDispatcherBuilder =
-    setMaxPoolSize(scaledPoolSize(multiplier))
+  def setMaxPoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigDispatcherBuilder =
+    setMaxPoolSize(scaledPoolSize(min, multiplier, max))
 
   def setKeepAliveTimeInMillis(time: Long): ThreadPoolConfigDispatcherBuilder =
     setKeepAliveTime(Duration(time, TimeUnit.MILLISECONDS))
@@ -140,9 +139,6 @@ case class ThreadPoolConfigDispatcherBuilder(dispatcherFactory: (ThreadPoolConfi
   def configure(fs: Option[Function[ThreadPoolConfigDispatcherBuilder, ThreadPoolConfigDispatcherBuilder]]*): ThreadPoolConfigDispatcherBuilder = fs.foldLeft(this)((c, f) ⇒ f.map(_(c)).getOrElse(c))
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 class MonitorableThreadFactory(val name: String, val daemonic: Boolean = false) extends ThreadFactory {
   protected val counter = new AtomicLong
 
@@ -153,9 +149,6 @@ class MonitorableThreadFactory(val name: String, val daemonic: Boolean = false) 
   }
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 object MonitorableThread {
   val DEFAULT_NAME = "MonitorableThread".intern
 
@@ -164,9 +157,6 @@ object MonitorableThread {
   val alive = new AtomicInteger
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 class MonitorableThread(runnable: Runnable, name: String)
   extends Thread(runnable, name + "-" + MonitorableThread.created.incrementAndGet) {
 
@@ -224,3 +214,54 @@ class SaneRejectedExecutionHandler extends RejectedExecutionHandler {
     else runnable.run()
   }
 }
+
+/**
+ * Commented out pending discussion with Doug Lea
+ *
+ * case class ForkJoinPoolConfig(targetParallelism: Int = Runtime.getRuntime.availableProcessors()) extends ExecutorServiceFactoryProvider {
+ * final def createExecutorServiceFactory(name: String): ExecutorServiceFactory = new ExecutorServiceFactory {
+ * def createExecutorService: ExecutorService = {
+ * new ForkJoinPool(targetParallelism) with ExecutorService {
+ * setAsyncMode(true)
+ * setMaintainsParallelism(true)
+ *
+ * override final def execute(r: Runnable) {
+ * r match {
+ * case fjmbox: FJMailbox ⇒
+ * //fjmbox.fjTask.reinitialize()
+ * Thread.currentThread match {
+ * case fjwt: ForkJoinWorkerThread if fjwt.getPool eq this ⇒
+ * fjmbox.fjTask.fork() //We should do fjwt.pushTask(fjmbox.fjTask) but it's package protected
+ * case _ ⇒ super.execute[Unit](fjmbox.fjTask)
+ * }
+ * case _ ⇒
+ * super.execute(r)
+ * }
+ * }
+ *
+ * import java.util.{ Collection ⇒ JCollection }
+ *
+ * def invokeAny[T](callables: JCollection[_ <: Callable[T]]) =
+ * throw new UnsupportedOperationException("invokeAny. NOT!")
+ *
+ * def invokeAny[T](callables: JCollection[_ <: Callable[T]], l: Long, timeUnit: TimeUnit) =
+ * throw new UnsupportedOperationException("invokeAny. NOT!")
+ *
+ * def invokeAll[T](callables: JCollection[_ <: Callable[T]], l: Long, timeUnit: TimeUnit) =
+ * throw new UnsupportedOperationException("invokeAny. NOT!")
+ * }
+ * }
+ * }
+ * }
+ *
+ * trait FJMailbox { self: Mailbox ⇒
+ * final val fjTask = new ForkJoinTask[Unit] with Runnable {
+ * private[this] var result: Unit = ()
+ * final def getRawResult() = result
+ * final def setRawResult(v: Unit) { result = v }
+ * final def exec() = { self.run(); true }
+ * final def run() { invoke() }
+ * }
+ * }
+ *
+ */

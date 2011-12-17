@@ -1,3 +1,4 @@
+*.vim
 *~
 *#
 src_managed
@@ -9,12 +10,14 @@ project/boot/*
 lib_managed
 etags
 tags
+.tags
 TAGS
 akka.tmproj
 reports
 dist
 target
 deploy/*.jar
+.history
 data
 out
 logs
@@ -57,3 +60,4 @@ akka.sublime-project
 akka.sublime-workspace
 .target
 .multi-jvm
+_mb

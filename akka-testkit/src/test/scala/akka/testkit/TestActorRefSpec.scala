@@ -7,7 +7,7 @@ import org.scalatest.matchers.MustMatchers
 import org.scalatest.{ BeforeAndAfterEach, WordSpec }
 import akka.actor._
 import akka.event.Logging.Warning
-import akka.dispatch.{ Future, Promise }
+import akka.dispatch.{ Future, Promise, Await }
 import akka.util.duration._
 import akka.actor.ActorSystem
 
@@ -37,6 +37,7 @@ object TestActorRefSpec {
   }
 
   class ReplyActor extends TActor {
+    import context.system
     var replyTo: ActorRef = null
 
     def receiveT = {
@@ -55,8 +56,8 @@ object TestActorRefSpec {
 
   class WorkerActor() extends TActor {
     def receiveT = {
-      case "work"                ⇒ sender ! "workDone"; self.stop()
-      case replyTo: Promise[Any] ⇒ replyTo.completeWithResult("complexReply")
+      case "work"                ⇒ sender ! "workDone"; context.stop(self)
+      case replyTo: Promise[Any] ⇒ replyTo.success("complexReply")
       case replyTo: ActorRef     ⇒ replyTo ! "complexReply"
     }
   }
@@ -87,7 +88,7 @@ object TestActorRefSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
+class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
 
   import TestActorRefSpec._
 
@@ -109,7 +110,7 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
           def receive = { case _ ⇒ sender ! nested }
         }))
         a must not be (null)
-        val nested = (a ? "any").as[ActorRef].get
+        val nested = Await.result((a ? "any").mapTo[ActorRef], timeout.duration)
         nested must not be (null)
         a must not be theSameInstanceAs(nested)
       }
@@ -120,7 +121,7 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
           def receive = { case _ ⇒ sender ! nested }
         }))
         a must not be (null)
-        val nested = (a ? "any").as[ActorRef].get
+        val nested = Await.result((a ? "any").mapTo[ActorRef], timeout.duration)
         nested must not be (null)
         a must not be theSameInstanceAs(nested)
       }
@@ -155,7 +156,10 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
     "stop when sent a poison pill" in {
       EventFilter[ActorKilledException]() intercept {
         val a = TestActorRef(Props[WorkerActor])
-        testActor startsWatching a
+        val forwarder = system.actorOf(Props(new Actor {
+          context.watch(a)
+          def receive = { case x ⇒ testActor forward x }
+        }))
         a.!(PoisonPill)(testActor)
         expectMsgPF(5 seconds) {
           case Terminated(`a`) ⇒ true
@@ -170,8 +174,7 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
         counter = 2
 
         val boss = TestActorRef(Props(new TActor {
-          val impl = system.asInstanceOf[ActorSystemImpl]
-          val ref = new TestActorRef(impl, impl.dispatcherFactory.prerequisites, Props(new TActor {
+          val ref = TestActorRef(Props(new TActor {
             def receiveT = { case _ ⇒ }
             override def preRestart(reason: Throwable, msg: Option[Any]) { counter -= 1 }
             override def postRestart(reason: Throwable) { counter -= 1 }
@@ -192,7 +195,7 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
       val f = a ? "work"
       // CallingThreadDispatcher means that there is no delay
       f must be('completed)
-      f.as[String] must equal(Some("workDone"))
+      Await.result(f, timeout.duration) must equal("workDone")
     }
 
   }
@@ -213,7 +216,7 @@ class TestActorRefSpec extends AkkaSpec with BeforeAndAfterEach {
 
     "set receiveTimeout to None" in {
       val a = TestActorRef[WorkerActor]
-      a.underlyingActor.receiveTimeout must be(None)
+      a.underlyingActor.context.receiveTimeout must be(None)
     }
 
     "set CallingThreadDispatcher" in {

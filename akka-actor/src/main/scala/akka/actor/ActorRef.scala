@@ -9,50 +9,69 @@ import akka.util._
 import scala.collection.immutable.Stack
 import java.lang.{ UnsupportedOperationException, IllegalStateException }
 import akka.serialization.Serialization
-import java.net.InetSocketAddress
-import akka.remote.RemoteAddress
 import java.util.concurrent.TimeUnit
 import akka.event.EventStream
 import akka.event.DeathWatch
+import scala.annotation.tailrec
+import java.util.concurrent.ConcurrentHashMap
+import akka.event.LoggingAdapter
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * ActorRef is an immutable and serializable handle to an Actor.
- * <p/>
- * Create an ActorRef for an Actor by using the factory method on the Actor object.
- * <p/>
- * Here is an example on how to create an actor with a default constructor.
- * <pre>
- *   import Actor._
+ * Immutable and serializable handle to an actor, which may or may not reside
+ * on the local host or inside the same [[akka.actor.ActorSystem]]. An ActorRef
+ * can be obtained from an [[akka.actor.ActorRefFactory]], an interface which
+ * is implemented by ActorSystem and [[akka.actor.ActorContext]]. This means
+ * actors can be created top-level in the ActorSystem or as children of an
+ * existing actor, but only from within that actor.
  *
- *   val actor = actorOf[MyActor]
- *   actor ! message
- *   actor.stop()
- * </pre>
+ * ActorRefs can be freely shared among actors by message passing. Message
+ * passing conversely is their only purpose, as demonstrated in the following
+ * examples:
  *
- * You can also create and start actors like this:
- * <pre>
- *   val actor = actorOf[MyActor]
- * </pre>
+ * Scala:
+ * {{{
+ * class ExampleActor extends Actor {
+ *   val other = context.actorOf(Props[OtherActor], "childName") // will be destroyed and re-created upon restart by default
  *
- * Here is an example on how to create an actor with a non-default constructor.
- * <pre>
- *   import Actor._
+ *   def receive {
+ *     case Request1(msg) => other ! refine(msg)     // uses this actor as sender reference, reply goes to us
+ *     case Request2(msg) => other.tell(msg, sender) // forward sender reference, enabling direct reply
+ *     case Request3(msg) => sender ! (other ? msg)  // will reply with a Future for holding other’s reply (implicit timeout from "akka.actor.timeout")
+ *   }
+ * }
+ * }}}
  *
- *   val actor = actorOf(new MyActor(...))
- *   actor ! message
- *   actor.stop()
- * </pre>
+ * Java:
+ * {{{
+ * public class ExampleActor Extends UntypedActor {
+ *   // this child will be destroyed and re-created upon restart by default
+ *   final ActorRef other = getContext().actorOf(new Props(OtherActor.class), "childName");
  *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
+ *   @Override
+ *   public void onReceive(Object o) {
+ *     if (o instanceof Request1) {
+ *       val msg = ((Request1) o).getMsg();
+ *       other.tell(msg);              // uses this actor as sender reference, reply goes to us
+ *
+ *     } else if (o instanceof Request2) {
+ *       val msg = ((Request2) o).getMsg();
+ *       other.tell(msg, getSender()); // forward sender reference, enabling direct reply
+ *
+ *     } else if (o instanceof Request3) {
+ *       val msg = ((Request3) o).getMsg();
+ *       getSender().tell(other.ask(msg, 5000)); // reply with Future for holding the other’s reply (timeout 5 seconds)
+ *
+ *     }
+ *   }
+ * }
+ * }}}
+ *
+ * ActorRef does not have a method for terminating the actor it points to, use
+ * [[akka.actor.ActorRefFactory]]`.stop(child)` for this purpose.
  */
 abstract class ActorRef extends java.lang.Comparable[ActorRef] with Serializable {
-  scalaRef: ScalaActorRef ⇒
-  // Only mutable for RemoteServer in order to maintain identity across nodes
-
-  /**
-   * Returns the name for this actor. Locally unique (across siblings).
-   */
-  def name: String
+  scalaRef: InternalActorRef ⇒
 
   /**
    * Returns the path for this actor (from this actor up to the root actor).
@@ -60,14 +79,9 @@ abstract class ActorRef extends java.lang.Comparable[ActorRef] with Serializable
   def path: ActorPath
 
   /**
-   * Returns the absolute address for this actor in the form hostname:port/path/to/actor.
-   */
-  def address: String
-
-  /**
    * Comparison only takes address into account.
    */
-  def compareTo(other: ActorRef) = this.address compareTo other.address
+  final def compareTo(other: ActorRef) = this.path compareTo other.path
 
   /**
    * Sends the specified message to the sender, i.e. fire-and-forget semantics.<p/>
@@ -89,17 +103,29 @@ abstract class ActorRef extends java.lang.Comparable[ActorRef] with Serializable
   final def tell(msg: Any, sender: ActorRef): Unit = this.!(msg)(sender)
 
   /**
-   * Akka Java API. <p/>
+   * Akka Java API.
+   *
    * Sends a message asynchronously returns a future holding the eventual reply message.
-   * <p/>
+   *
    * <b>NOTE:</b>
-   * Use this method with care. In most cases it is better to use 'tell' together with the 'getContext().getSender()' to
-   * implement request/response message exchanges.
-   * <p/>
-   * If you are sending messages using <code>ask</code> then you <b>have to</b> use <code>getContext().sender().tell(...)</code>
-   * to send a reply message to the original sender. If not then the sender will block until the timeout expires.
+   * Use this method with care. In most cases it is better to use 'tell' together with the sender
+   * parameter to implement non-blocking request/response message exchanges.
+   *
+   * If you are sending messages using <code>ask</code> and using blocking operations on the Future, such as
+   * 'get', then you <b>have to</b> use <code>getContext().sender().tell(...)</code>
+   * in the target actor to send a reply message to the original sender, and thereby completing the Future,
+   * otherwise the sender will block until the timeout expires.
+   *
+   * When using future callbacks, inside actors you need to carefully avoid closing over
+   * the containing actor’s reference, i.e. do not call methods or access mutable state
+   * on the enclosing actor from within the callback. This would break the actor
+   * encapsulation and may introduce synchronization bugs and race conditions because
+   * the callback will be scheduled concurrently to the enclosing actor. Unfortunately
+   * there is not yet a way to detect these illegal accesses at compile time.
    */
-  def ask(message: AnyRef, timeout: Long): Future[AnyRef] = ?(message, Timeout(timeout)).asInstanceOf[Future[AnyRef]]
+  def ask(message: AnyRef, timeout: Timeout): Future[AnyRef] = ?(message, timeout).asInstanceOf[Future[AnyRef]]
+
+  def ask(message: AnyRef, timeoutMillis: Long): Future[AnyRef] = ask(message, new Timeout(timeoutMillis))
 
   /**
    * Forwards the message and passes the original sender actor as the sender.
@@ -109,155 +135,21 @@ abstract class ActorRef extends java.lang.Comparable[ActorRef] with Serializable
   def forward(message: Any)(implicit context: ActorContext) = tell(message, context.sender)
 
   /**
-   * Suspends the actor. It will not process messages while suspended.
-   */
-  def suspend(): Unit //TODO FIXME REMOVE THIS
-
-  /**
-   * Resumes a suspended actor.
-   */
-  def resume(): Unit //TODO FIXME REMOVE THIS
-
-  /**
-   * Shuts down the actor its dispatcher and message queue.
-   */
-  def stop(): Unit
-
-  /**
    * Is the actor shut down?
+   * The contract is that if this method returns true, then it will never be false again.
+   * But you cannot rely on that it is alive if it returns true, since this by nature is a racy method.
    */
   def isTerminated: Boolean
 
-  /**
-   * Registers this actor to be a death monitor of the provided ActorRef
-   * This means that this actor will get a Terminated()-message when the provided actor
-   * is permanently terminated.
-   *
-   * @return the same ActorRef that is provided to it, to allow for cleaner invocations
-   */
-  def startsWatching(subject: ActorRef): ActorRef //TODO FIXME REMOVE THIS
+  // FIXME RK check if we should scramble the bits or whether they can stay the same
+  final override def hashCode: Int = path.hashCode
 
-  /**
-   * Deregisters this actor from being a death monitor of the provided ActorRef
-   * This means that this actor will not get a Terminated()-message when the provided actor
-   * is permanently terminated.
-   *
-   * @return the same ActorRef that is provided to it, to allow for cleaner invocations
-   */
-  def stopsWatching(subject: ActorRef): ActorRef //TODO FIXME REMOVE THIS
-
-  override def hashCode: Int = HashCode.hash(HashCode.SEED, address)
-
-  override def equals(that: Any): Boolean = {
-    that.isInstanceOf[ActorRef] &&
-      that.asInstanceOf[ActorRef].address == address
+  final override def equals(that: Any): Boolean = that match {
+    case other: ActorRef ⇒ path == other.path
+    case _               ⇒ false
   }
 
-  override def toString = "Actor[%s]".format(address)
-}
-
-/**
- *  Local (serializable) ActorRef that is used when referencing the Actor on its "home" node.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
-class LocalActorRef private[akka] (
-  system: ActorSystemImpl,
-  _props: Props,
-  _supervisor: ActorRef,
-  val path: ActorPath,
-  val systemService: Boolean = false,
-  _receiveTimeout: Option[Long] = None,
-  _hotswap: Stack[PartialFunction[Any, Unit]] = Props.noHotSwap)
-  extends ActorRef with ScalaActorRef {
-
-  def name = path.name
-
-  def address: String = path.toString
-
-  /*
-   * actorCell.start() publishes actorCell & this to the dispatcher, which
-   * means that messages may be processed theoretically before the constructor
-   * ends. The JMM guarantees visibility for final fields only after the end
-   * of the constructor, so publish the actorCell safely by making it a
-   * @volatile var which is NOT TO BE WRITTEN TO. The alternative would be to
-   * move start() outside of the constructor, which would basically require
-   * us to use purely factory methods for creating LocalActorRefs.
-   */
-  @volatile
-  private var actorCell = new ActorCell(system, this, _props, _supervisor, _receiveTimeout, _hotswap)
-  actorCell.start()
-
-  /**
-   * Is the actor terminated?
-   * If this method returns true, it will never return false again, but if it returns false, you cannot be sure if it's alive still (race condition)
-   */
-  override def isTerminated: Boolean = actorCell.isTerminated
-
-  /**
-   * Suspends the actor so that it will not process messages until resumed. The
-   * suspend request is processed asynchronously to the caller of this method
-   * as well as to normal message sends: the only ordering guarantee is that
-   * message sends done from the same thread after calling this method will not
-   * be processed until resumed.
-   */
-  //FIXME TODO REMOVE THIS, NO REPLACEMENT
-  def suspend(): Unit = actorCell.suspend()
-
-  /**
-   * Resumes a suspended actor.
-   */
-  //FIXME TODO REMOVE THIS, NO REPLACEMENT
-  def resume(): Unit = actorCell.resume()
-
-  /**
-   * Shuts down the actor and its message queue
-   */
-  def stop(): Unit = actorCell.stop()
-
-  /**
-   * Registers this actor to be a death monitor of the provided ActorRef
-   * This means that this actor will get a Terminated()-message when the provided actor
-   * is permanently terminated.
-   *
-   * @return the same ActorRef that is provided to it, to allow for cleaner invocations
-   */
-  def startsWatching(subject: ActorRef): ActorRef = actorCell.startsWatching(subject)
-
-  /**
-   * Deregisters this actor from being a death monitor of the provided ActorRef
-   * This means that this actor will not get a Terminated()-message when the provided actor
-   * is permanently terminated.
-   *
-   * @return the same ActorRef that is provided to it, to allow for cleaner invocations
-   */
-  def stopsWatching(subject: ActorRef): ActorRef = actorCell.stopsWatching(subject)
-
-  // ========= AKKA PROTECTED FUNCTIONS =========
-
-  protected[akka] def underlying: ActorCell = actorCell
-
-  // FIXME TODO: remove this method
-  // @deprecated("This method does a spin-lock to block for the actor, which might never be there, do not use this", "2.0")
-  protected[akka] def underlyingActorInstance: Actor = {
-    var instance = actorCell.actor
-    while ((instance eq null) && !actorCell.isTerminated) {
-      try { Thread.sleep(1) } catch { case i: InterruptedException ⇒ }
-      instance = actorCell.actor
-    }
-    instance
-  }
-
-  protected[akka] def sendSystemMessage(message: SystemMessage) { underlying.dispatcher.systemDispatch(underlying, message) }
-
-  def !(message: Any)(implicit sender: ActorRef = null): Unit = actorCell.tell(message, sender)
-
-  def ?(message: Any)(implicit timeout: Timeout): Future[Any] = actorCell.provider.ask(message, this, timeout)
-
-  protected[akka] override def restart(cause: Throwable): Unit = actorCell.restart(cause)
-
-  @throws(classOf[java.io.ObjectStreamException])
-  private def writeReplace(): AnyRef = actorCell.provider.serialize(this)
+  override def toString = "Actor[%s]".format(path)
 }
 
 /**
@@ -266,8 +158,6 @@ class LocalActorRef private[akka] (
  * from ActorRef -> ScalaActorRef and back
  */
 trait ScalaActorRef { ref: ActorRef ⇒
-
-  protected[akka] def sendSystemMessage(message: SystemMessage): Unit
 
   /**
    * Sends a one-way asynchronous message. E.g. fire-and-forget semantics.
@@ -287,6 +177,21 @@ trait ScalaActorRef { ref: ActorRef ⇒
 
   /**
    * Sends a message asynchronously, returning a future which may eventually hold the reply.
+   * <b>NOTE:</b>
+   * Use this method with care. In most cases it is better to use '!' together with implicit or explicit
+   * sender parameter to implement non-blocking request/response message exchanges.
+   *
+   * If you are sending messages using <code>ask</code> and using blocking operations on the Future, such as
+   * 'get', then you <b>have to</b> use <code>getContext().sender().tell(...)</code>
+   * in the target actor to send a reply message to the original sender, and thereby completing the Future,
+   * otherwise the sender will block until the timeout expires.
+   *
+   * When using future callbacks, inside actors you need to carefully avoid closing over
+   * the containing actor’s reference, i.e. do not call methods or access mutable state
+   * on the enclosing actor from within the callback. This would break the actor
+   * encapsulation and may introduce synchronization bugs and race conditions because
+   * the callback will be scheduled concurrently to the enclosing actor. Unfortunately
+   * there is not yet a way to detect these illegal accesses at compile time.
    */
   def ?(message: Any)(implicit timeout: Timeout): Future[Any]
 
@@ -296,42 +201,190 @@ trait ScalaActorRef { ref: ActorRef ⇒
    * implicit timeout
    */
   def ?(message: Any, timeout: Timeout)(implicit ignore: Int = 0): Future[Any] = ?(message)(timeout)
+}
 
-  protected[akka] def restart(cause: Throwable): Unit
+/**
+ * Internal trait for assembling all the functionality needed internally on
+ * ActorRefs. NOTE THAT THIS IS NOT A STABLE EXTERNAL INTERFACE!
+ *
+ * DO NOT USE THIS UNLESS INTERNALLY WITHIN AKKA!
+ */
+private[akka] abstract class InternalActorRef extends ActorRef with ScalaActorRef {
+  def resume(): Unit
+  def suspend(): Unit
+  def restart(cause: Throwable): Unit
+  def stop(): Unit
+  def sendSystemMessage(message: SystemMessage): Unit
+  def getParent: InternalActorRef
+  /**
+   * Obtain ActorRef by possibly traversing the actor tree or looking it up at
+   * some provider-specific location. This method shall return the end result,
+   * i.e. not only the next step in the look-up; this will typically involve
+   * recursive invocation. A path element of ".." signifies the parent, a
+   * trailing "" element must be disregarded. If the requested path does not
+   * exist, return Nobody.
+   */
+  def getChild(name: Iterator[String]): InternalActorRef
+}
+
+private[akka] case object Nobody extends MinimalActorRef {
+  val path = new RootActorPath(new LocalAddress("all-systems"), "/Nobody")
+}
+
+/**
+ *  Local (serializable) ActorRef that is used when referencing the Actor on its "home" node.
+ */
+private[akka] class LocalActorRef private[akka] (
+  _system: ActorSystemImpl,
+  _props: Props,
+  _supervisor: InternalActorRef,
+  val path: ActorPath,
+  val systemService: Boolean = false,
+  _receiveTimeout: Option[Duration] = None,
+  _hotswap: Stack[PartialFunction[Any, Unit]] = Props.noHotSwap)
+  extends InternalActorRef {
+
+  /*
+   * actorCell.start() publishes actorCell & this to the dispatcher, which
+   * means that messages may be processed theoretically before the constructor
+   * ends. The JMM guarantees visibility for final fields only after the end
+   * of the constructor, so publish the actorCell safely by making it a
+   * @volatile var which is NOT TO BE WRITTEN TO. The alternative would be to
+   * move start() outside of the constructor, which would basically require
+   * us to use purely factory methods for creating LocalActorRefs.
+   */
+  @volatile
+  private var actorCell = newActorCell(_system, this, _props, _supervisor, _receiveTimeout, _hotswap)
+  actorCell.start()
+
+  protected def newActorCell(
+    system: ActorSystemImpl,
+    ref: InternalActorRef,
+    props: Props,
+    supervisor: InternalActorRef,
+    receiveTimeout: Option[Duration],
+    hotswap: Stack[PartialFunction[Any, Unit]]): ActorCell =
+    new ActorCell(system, ref, props, supervisor, receiveTimeout, hotswap)
+
+  protected def actorContext: ActorContext = actorCell
+
+  /**
+   * Is the actor terminated?
+   * If this method returns true, it will never return false again, but if it
+   * returns false, you cannot be sure if it's alive still (race condition)
+   */
+  override def isTerminated: Boolean = actorCell.isTerminated
+
+  /**
+   * Suspends the actor so that it will not process messages until resumed. The
+   * suspend request is processed asynchronously to the caller of this method
+   * as well as to normal message sends: the only ordering guarantee is that
+   * message sends done from the same thread after calling this method will not
+   * be processed until resumed.
+   */
+  def suspend(): Unit = actorCell.suspend()
+
+  /**
+   * Resumes a suspended actor.
+   */
+  def resume(): Unit = actorCell.resume()
+
+  /**
+   * Shuts down the actor and its message queue
+   */
+  def stop(): Unit = actorCell.stop()
+
+  def getParent: InternalActorRef = actorCell.parent
+
+  /**
+   * Method for looking up a single child beneath this actor. Override in order
+   * to inject “synthetic” actor paths like “/temp”.
+   */
+  protected def getSingleChild(name: String): InternalActorRef = {
+    if (actorCell.isTerminated) Nobody // read of the mailbox status ensures we get the latest childrenRefs
+    else {
+      val children = actorCell.childrenRefs
+      if (children contains name) children(name).child.asInstanceOf[InternalActorRef]
+      else Nobody
+    }
+  }
+
+  def getChild(names: Iterator[String]): InternalActorRef = {
+    /*
+     * The idea is to recursively descend as far as possible with LocalActor
+     * Refs and hand over to that “foreign” child when we encounter it.
+     */
+    @tailrec
+    def rec(ref: InternalActorRef, name: Iterator[String]): InternalActorRef =
+      ref match {
+        case l: LocalActorRef ⇒
+          val n = name.next()
+          val next = n match {
+            case ".." ⇒ l.getParent
+            case ""   ⇒ l
+            case _    ⇒ l.getSingleChild(n)
+          }
+          if (next == Nobody || name.isEmpty) next else rec(next, name)
+        case _ ⇒
+          ref.getChild(name)
+      }
+    if (names.isEmpty) this
+    else rec(this, names)
+  }
+
+  // ========= AKKA PROTECTED FUNCTIONS =========
+
+  protected[akka] def underlying: ActorCell = actorCell
+
+  def sendSystemMessage(message: SystemMessage) { underlying.dispatcher.systemDispatch(underlying, message) }
+
+  def !(message: Any)(implicit sender: ActorRef = null): Unit = actorCell.tell(message, sender)
+
+  def ?(message: Any)(implicit timeout: Timeout): Future[Any] = {
+    actorCell.provider.ask(timeout) match {
+      case Some(a) ⇒
+        this.!(message)(a)
+        a.result
+      case None ⇒
+        this.!(message)(null)
+        Promise[Any]()(actorCell.system.dispatcher)
+    }
+  }
+
+  def restart(cause: Throwable): Unit = actorCell.restart(cause)
+
+  @throws(classOf[java.io.ObjectStreamException])
+  private def writeReplace(): AnyRef = SerializedActorRef(path.toString)
 }
 
 /**
  * Memento pattern for serializing ActorRefs transparently
  */
-
-case class SerializedActorRef(hostname: String, port: Int, path: String) {
+case class SerializedActorRef(path: String) {
   import akka.serialization.Serialization.currentSystem
-
-  def this(remoteAddress: RemoteAddress, path: String) = this(remoteAddress.hostname, remoteAddress.port, path)
-  def this(remoteAddress: InetSocketAddress, path: String) = this(remoteAddress.getAddress.getHostAddress, remoteAddress.getPort, path) //TODO FIXME REMOVE
 
   @throws(classOf[java.io.ObjectStreamException])
   def readResolve(): AnyRef = currentSystem.value match {
-    case null ⇒ throw new IllegalStateException(
-      "Trying to deserialize a serialized ActorRef without an ActorSystem in scope." +
-        " Use akka.serialization.Serialization.currentSystem.withValue(system) { ... }")
-    case someSystem ⇒ someSystem.provider.deserialize(this) match {
-      case Some(actor) ⇒ actor
-      case None        ⇒ throw new IllegalStateException("Could not deserialize ActorRef")
-    }
+    case null ⇒
+      throw new IllegalStateException(
+        "Trying to deserialize a serialized ActorRef without an ActorSystem in scope." +
+          " Use 'akka.serialization.Serialization.currentSystem.withValue(system) { ... }'")
+    case someSystem ⇒
+      someSystem.actorFor(path)
   }
 }
 
 /**
  * Trait for ActorRef implementations where all methods contain default stubs.
  */
-trait MinimalActorRef extends ActorRef with ScalaActorRef {
+trait MinimalActorRef extends InternalActorRef {
 
-  private[akka] val uuid: Uuid = newUuid()
-  def name: String = uuid.toString
-
-  def startsWatching(actorRef: ActorRef): ActorRef = actorRef
-  def stopsWatching(actorRef: ActorRef): ActorRef = actorRef
+  def getParent: InternalActorRef = Nobody
+  def getChild(names: Iterator[String]): InternalActorRef = {
+    val dropped = names.dropWhile(_.isEmpty)
+    if (dropped.isEmpty) this
+    else Nobody
+  }
 
   def suspend(): Unit = ()
   def resume(): Unit = ()
@@ -343,10 +396,18 @@ trait MinimalActorRef extends ActorRef with ScalaActorRef {
   def !(message: Any)(implicit sender: ActorRef = null): Unit = ()
 
   def ?(message: Any)(implicit timeout: Timeout): Future[Any] =
-    throw new UnsupportedOperationException("Not supported for %s".format(getClass.getName))
+    throw new UnsupportedOperationException("Not supported for [%s]".format(getClass.getName))
 
-  protected[akka] def sendSystemMessage(message: SystemMessage): Unit = ()
-  protected[akka] def restart(cause: Throwable): Unit = ()
+  def sendSystemMessage(message: SystemMessage): Unit = ()
+  def restart(cause: Throwable): Unit = ()
+}
+
+object MinimalActorRef {
+  def apply(_path: ActorPath)(receive: PartialFunction[Any, Unit]): ActorRef = new MinimalActorRef {
+    def path = _path
+    override def !(message: Any)(implicit sender: ActorRef = null): Unit =
+      if (receive.isDefinedAt(message)) receive(message)
+  }
 }
 
 case class DeadLetter(message: Any, sender: ActorRef, recipient: ActorRef)
@@ -371,13 +432,9 @@ class DeadLetterActorRef(val eventStream: EventStream) extends MinimalActorRef {
   }
 
   private[akka] def init(dispatcher: MessageDispatcher, rootPath: ActorPath) {
-    _path = rootPath / "nul"
-    brokenPromise = new KeptPromise[Any](Left(new ActorKilledException("In DeadLetterActorRef, promises are always broken.")))(dispatcher)
+    _path = rootPath / "deadLetters"
+    brokenPromise = Promise.failed(new ActorKilledException("In DeadLetterActorRef - promises are always broken."))(dispatcher)
   }
-
-  override val name: String = "dead-letter"
-
-  def address: String = path.toString
 
   override def isTerminated(): Boolean = true
 
@@ -397,39 +454,70 @@ class DeadLetterActorRef(val eventStream: EventStream) extends MinimalActorRef {
   private def writeReplace(): AnyRef = DeadLetterActorRef.serialized
 }
 
-abstract class AskActorRef(val path: ActorPath, provider: ActorRefProvider, deathWatch: DeathWatch, timeout: Timeout, val dispatcher: MessageDispatcher) extends MinimalActorRef {
-  final val result = new DefaultPromise[Any](timeout)(dispatcher)
+class VirtualPathContainer(val path: ActorPath, override val getParent: InternalActorRef, val log: LoggingAdapter) extends MinimalActorRef {
 
-  override def name = path.name
+  private val children = new ConcurrentHashMap[String, InternalActorRef]
 
-  def address: String = path.toString
-
-  {
-    val callback: Future[Any] ⇒ Unit = { _ ⇒ deathWatch.publish(Terminated(AskActorRef.this)); whenDone() }
-    result onComplete callback
-    result onTimeout callback
+  def addChild(name: String, ref: InternalActorRef): Unit = {
+    children.put(name, ref) match {
+      case null ⇒ // okay
+      case old  ⇒ log.warning("{} replacing child {} ({} -> {})", path, name, old, ref)
+    }
   }
 
-  protected def whenDone(): Unit
-
-  override def !(message: Any)(implicit sender: ActorRef = null): Unit = message match {
-    case Status.Success(r) ⇒ result.completeWithResult(r)
-    case Status.Failure(f) ⇒ result.completeWithException(f)
-    case other             ⇒ result.completeWithResult(other)
+  def removeChild(name: String): Unit = {
+    children.remove(name) match {
+      case null ⇒ log.warning("{} trying to remove non-child {}", path, name)
+      case _    ⇒ //okay
+    }
   }
 
-  protected[akka] override def sendSystemMessage(message: SystemMessage): Unit = message match {
+  def getChild(name: String): InternalActorRef = children.get(name)
+
+  override def getChild(name: Iterator[String]): InternalActorRef = {
+    if (name.isEmpty) this
+    else {
+      val n = name.next()
+      if (n.isEmpty) this
+      else children.get(n) match {
+        case null ⇒ Nobody
+        case some ⇒
+          if (name.isEmpty) some
+          else some.getChild(name)
+      }
+    }
+  }
+}
+
+class AskActorRef(
+  val path: ActorPath,
+  override val getParent: InternalActorRef,
+  val dispatcher: MessageDispatcher,
+  val deathWatch: DeathWatch) extends MinimalActorRef {
+
+  final val running = new AtomicBoolean(true)
+  final val result = Promise[Any]()(dispatcher)
+
+  override def !(message: Any)(implicit sender: ActorRef = null): Unit = if (running.get) message match {
+    case Status.Success(r) ⇒ result.success(r)
+    case Status.Failure(f) ⇒ result.failure(f)
+    case other             ⇒ result.success(other)
+  }
+
+  override def sendSystemMessage(message: SystemMessage): Unit = message match {
     case _: Terminate ⇒ stop()
     case _            ⇒
   }
 
   override def ?(message: Any)(implicit timeout: Timeout): Future[Any] =
-    new KeptPromise[Any](Left(new UnsupportedOperationException("Ask/? is not supported for %s".format(getClass.getName))))(dispatcher)
+    Promise.failed(new UnsupportedOperationException("Ask/? is not supported for [%s]".format(getClass.getName)))(dispatcher)
 
-  override def isTerminated = result.isCompleted || result.isExpired
+  override def isTerminated = result.isCompleted
 
-  override def stop(): Unit = if (!isTerminated) result.completeWithException(new ActorKilledException("Stopped"))
+  override def stop(): Unit = if (running.getAndSet(false)) {
+    deathWatch.publish(Terminated(this))
+  }
 
   @throws(classOf[java.io.ObjectStreamException])
-  private def writeReplace(): AnyRef = provider.serialize(this)
+  private def writeReplace(): AnyRef = SerializedActorRef(path.toString)
 }

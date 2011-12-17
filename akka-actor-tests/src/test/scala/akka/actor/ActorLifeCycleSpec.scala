@@ -11,6 +11,7 @@ import akka.actor.Actor._
 import akka.testkit._
 import akka.util.duration._
 import java.util.concurrent.atomic._
+import akka.dispatch.Await
 
 object ActorLifeCycleSpec {
 
@@ -26,7 +27,7 @@ object ActorLifeCycleSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class ActorLifeCycleSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitSender {
+class ActorLifeCycleSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitSender with DefaultTimeout {
   import ActorLifeCycleSpec._
 
   "An Actor" must {
@@ -34,13 +35,13 @@ class ActorLifeCycleSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitS
     "invoke preRestart, preStart, postRestart when using OneForOneStrategy" in {
       filterException[ActorKilledException] {
         val id = newUuid().toString
-        val supervisor = actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
+        val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
         val gen = new AtomicInteger(0)
         val restarterProps = Props(new LifeCycleTestActor(testActor, id, gen) {
           override def preRestart(reason: Throwable, message: Option[Any]) { report("preRestart") }
           override def postRestart(reason: Throwable) { report("postRestart") }
         })
-        val restarter = (supervisor ? restarterProps).as[ActorRef].get
+        val restarter = Await.result((supervisor ? restarterProps).mapTo[ActorRef], timeout.duration)
 
         expectMsg(("preStart", id, 0))
         restarter ! Kill
@@ -61,17 +62,17 @@ class ActorLifeCycleSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitS
         restarter ! Kill
         expectMsg(("postStop", id, 3))
         expectNoMsg(1 seconds)
-        supervisor.stop
+        system.stop(supervisor)
       }
     }
 
     "default for preRestart and postRestart is to call postStop and preStart respectively" in {
       filterException[ActorKilledException] {
         val id = newUuid().toString
-        val supervisor = actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
+        val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
         val gen = new AtomicInteger(0)
         val restarterProps = Props(new LifeCycleTestActor(testActor, id, gen))
-        val restarter = (supervisor ? restarterProps).as[ActorRef].get
+        val restarter = Await.result((supervisor ? restarterProps).mapTo[ActorRef], timeout.duration)
 
         expectMsg(("preStart", id, 0))
         restarter ! Kill
@@ -92,23 +93,23 @@ class ActorLifeCycleSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitS
         restarter ! Kill
         expectMsg(("postStop", id, 3))
         expectNoMsg(1 seconds)
-        supervisor.stop
+        system.stop(supervisor)
       }
     }
 
     "not invoke preRestart and postRestart when never restarted using OneForOneStrategy" in {
       val id = newUuid().toString
-      val supervisor = actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
+      val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(3))))
       val gen = new AtomicInteger(0)
       val props = Props(new LifeCycleTestActor(testActor, id, gen))
-      val a = (supervisor ? props).as[ActorRef].get
+      val a = Await.result((supervisor ? props).mapTo[ActorRef], timeout.duration)
       expectMsg(("preStart", id, 0))
       a ! "status"
       expectMsg(("OK", id, 0))
-      a.stop
+      system.stop(a)
       expectMsg(("postStop", id, 0))
       expectNoMsg(1 seconds)
-      supervisor.stop
+      system.stop(supervisor)
     }
   }
 

@@ -1,5 +1,7 @@
-Supervision
-===========
+.. _supervision:
+
+Supervision and Monitoring
+==========================
 
 This chapter outlines the concept behind supervision, the primitives offered
 and their semantics. For details on how that translates into real code, please
@@ -8,12 +10,13 @@ refer to the corresponding chapters for Scala and Java APIs.
 What Supervision Means
 ----------------------
 
-Supervision describes a dependency relationship between actors: the supervisor
-delegates tasks to subordinates and therefore must respond to their failures.
-When a subordinate detects a failure (i.e. throws an exception), it suspends
-itself and all its subordinates and sends a message to its supervisor,
-signaling failure.  Depending on the nature of the work to be supervised and
-the nature of the failure, the supervisor has four basic choices:
+As described in :ref:`actor-systems` supervision describes a dependency
+relationship between actors: the supervisor delegates tasks to subordinates and
+therefore must respond to their failures.  When a subordinate detects a failure
+(i.e. throws an exception), it suspends itself and all its subordinates and
+sends a message to its supervisor, signaling failure.  Depending on the nature
+of the work to be supervised and the nature of the failure, the supervisor has
+four basic choices:
 
 #. Resume the subordinate, keeping its accumulated internal state
 #. Restart the subordinate, clearing out its accumulated internal state
@@ -25,7 +28,10 @@ which explains the existence of the fourth choice (as a supervisor also is
 subordinate to another supervisor higher up) and has implications on the first
 three: resuming an actor resumes all its subordinates, restarting an actor
 entails restarting all its subordinates, similarly stopping an actor will also
-stop all its subordinates.
+stop all its subordinates. It should be noted that the default behavior of an
+actor is to stop all its children before restarting, but this can be overridden
+using the :meth:`preRestart` hook; the recursive restart applies to all 
+children left after this hook has been executed.
 
 Each supervisor is configured with a function translating all possible failure
 causes (i.e. exceptions) into one of the four choices given above; notably,
@@ -44,7 +50,7 @@ makes the formation of actor supervision hierarchies explicit and encourages
 sound design decisions. It should be noted that this also guarantees that
 actors cannot be orphaned or attached to supervisors from the outside, which
 might otherwise catch them unawares. In addition, this yields a natural and
-clean shutdown procedure for (parts of) actor applications.
+clean shutdown procedure for (sub-trees of) actor applications.
 
 What Restarting Means
 ---------------------
@@ -69,14 +75,12 @@ that the restart is not visible outside of the actor itself with the notable
 exception that the message during which the failure occurred is not
 re-processed.
 
-Restarting an actor in this way recursively restarts all its children in the
-same fashion, whereby all parent–child relationships are kept intact. If this
-is not the right approach for certain sub-trees of the supervision hierarchy,
-you should choose to stop the failed actor instead, which will terminate all
-its children recursively, after which that part of the system may be recreated
-from scratch. The second part of this action may be implemented using the
-lifecycle monitoring described next or using lifecycle callbacks as described
-in :class:`Actor`.
+Restarting an actor in this way recursively terminates all its children. If 
+this is not the right approach for certain sub-trees of the supervision 
+hierarchy, you may choose to retain the children, in which case they will be 
+recursively restarted in the same fashion as the failed parent (with the same 
+default to terminate children, which must be overridden on a per-actor basis, 
+see :class:`Actor` for details).
 
 What Lifecycle Monitoring Means
 -------------------------------
@@ -90,12 +94,11 @@ it may react to the other actor’s termination, in contrast to supervision whic
 reacts to failure.
 
 Lifecycle monitoring is implemented using a :class:`Terminated` message to be
-received by the behavior of the monitoring actor, where the default behavior is
-to throw a special :class:`DeathPactException` if not otherwise handled. One
-important property is that the message will be delivered irrespective of the
-order in which the monitoring request and target’s termination occur, i.e. you
-still get the message even if at the time of registration the target is already
-dead.
+received by the monitoring actor, where the default behavior is to throw a
+special :class:`DeathPactException` if not otherwise handled. One important
+property is that the message will be delivered irrespective of the order in
+which the monitoring request and target’s termination occur, i.e. you still get
+the message even if at the time of registration the target is already dead.
 
 Monitoring is particularly useful if a supervisor cannot simply restart its
 children and has to stop them, e.g. in case of errors during actor
@@ -104,6 +107,6 @@ them or schedule itself to retry this at a later time.
 
 Another common use case is that an actor needs to fail in the absence of an
 external resource, which may also be one of its own children. If a third party
-terminates a child by way of the ``stop()`` method or sending a
+terminates a child by way of the ``system.stop(child)`` method or sending a
 :class:`PoisonPill`, the supervisor might well be affected.
 

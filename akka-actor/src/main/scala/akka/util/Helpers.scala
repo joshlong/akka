@@ -6,16 +6,16 @@ package akka.util
 import java.io.{ PrintWriter, StringWriter }
 import java.util.Comparator
 import scala.annotation.tailrec
+import java.util.regex.Pattern
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 object Helpers {
+
+  def makePattern(s: String): Pattern = Pattern.compile("^\\Q" + s.replace("?", "\\E.\\Q").replace("*", "\\E.*\\Q") + "\\E$")
 
   def compareIdentityHash(a: AnyRef, b: AnyRef): Int = {
     /*
-     * make sure that there is no overflow or underflow in comparisons, so 
-     * that the ordering is actually consistent and you cannot have a 
+     * make sure that there is no overflow or underflow in comparisons, so
+     * that the ordering is actually consistent and you cannot have a
      * sequence which cyclically is monotone without end.
      */
     val diff = ((System.identityHashCode(a) & 0xffffffffL) - (System.identityHashCode(b) & 0xffffffffL))
@@ -26,7 +26,7 @@ object Helpers {
     def compare(a: AnyRef, b: AnyRef): Int = compareIdentityHash(a, b)
   }
 
-  final val base64chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789*?"
+  final val base64chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+%"
 
   @tailrec
   def base64(l: Long, sb: StringBuilder = new StringBuilder("$")): String = {

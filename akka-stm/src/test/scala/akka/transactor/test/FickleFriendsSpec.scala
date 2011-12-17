@@ -5,12 +5,14 @@ import org.scalatest.matchers.MustMatchers
 import org.scalatest.BeforeAndAfterAll
 import akka.actor.ActorSystem
 import akka.actor._
+import akka.util.Timeout
 import akka.stm._
 import akka.util.duration._
 import akka.testkit._
 import scala.util.Random.{ nextInt ⇒ random }
 import java.util.concurrent.CountDownLatch
 import akka.testkit.TestEvent.Mute
+import akka.dispatch.Await
 
 object FickleFriends {
   case class FriendlyIncrement(friends: Seq[ActorRef], latch: CountDownLatch)
@@ -119,12 +121,12 @@ class FickleFriendsSpec extends AkkaSpec with BeforeAndAfterAll {
       val latch = new CountDownLatch(1)
       coordinator ! FriendlyIncrement(counters, latch)
       latch.await // this could take a while
-      (coordinator ? GetCount).as[Int].get must be === 1
+      Await.result(coordinator ? GetCount, timeout.duration) must be === 1
       for (counter ← counters) {
-        (counter ? GetCount).as[Int].get must be === 1
+        Await.result(counter ? GetCount, timeout.duration) must be === 1
       }
-      counters foreach (_.stop())
-      coordinator.stop()
+      counters foreach (system.stop(_))
+      system.stop(coordinator)
     }
   }
 }

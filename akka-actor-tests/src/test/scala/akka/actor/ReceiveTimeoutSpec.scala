@@ -17,58 +17,35 @@ class ReceiveTimeoutSpec extends AkkaSpec {
     "get timeout" in {
       val timeoutLatch = TestLatch()
 
-      val timeoutActor = actorOf(new Actor {
-        receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
       timeoutLatch.await
-      timeoutActor.stop()
-    }
-
-    "get timeout when swapped" in {
-      val timeoutLatch = TestLatch()
-
-      val timeoutActor = actorOf(new Actor {
-        receiveTimeout = Some(500L)
-
-        protected def receive = {
-          case ReceiveTimeout ⇒ timeoutLatch.open
-        }
-      })
-
-      timeoutLatch.await
-
-      val swappedLatch = TestLatch()
-
-      timeoutActor ! HotSwap(self ⇒ {
-        case ReceiveTimeout ⇒ swappedLatch.open
-      })
-
-      swappedLatch.await
-      timeoutActor.stop()
+      system.stop(timeoutActor)
     }
 
     "reschedule timeout after regular receive" in {
       val timeoutLatch = TestLatch()
       case object Tick
 
-      val timeoutActor = actorOf(new Actor {
-        receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case Tick           ⇒ ()
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
       timeoutActor ! Tick
 
       timeoutLatch.await
-      timeoutActor.stop()
+      system.stop(timeoutActor)
     }
 
     "be able to turn off timeout if desired" in {
@@ -76,40 +53,40 @@ class ReceiveTimeoutSpec extends AkkaSpec {
       val timeoutLatch = TestLatch()
       case object Tick
 
-      val timeoutActor = actorOf(new Actor {
-        receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case Tick ⇒ ()
           case ReceiveTimeout ⇒
             count.incrementAndGet
             timeoutLatch.open
-            receiveTimeout = None
+            context.resetReceiveTimeout()
         }
-      })
+      }))
 
       timeoutActor ! Tick
 
       timeoutLatch.await
       count.get must be(1)
-      timeoutActor.stop()
+      system.stop(timeoutActor)
     }
 
     "not receive timeout message when not specified" in {
       val timeoutLatch = TestLatch()
 
-      val timeoutActor = actorOf(new Actor {
+      val timeoutActor = system.actorOf(Props(new Actor {
         protected def receive = {
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
       timeoutLatch.awaitTimeout(1 second) // timeout expected
-      timeoutActor.stop()
+      system.stop(timeoutActor)
     }
 
     "have ReceiveTimeout eq to Actors ReceiveTimeout" in {
-      akka.actor.Actors.receiveTimeout() must be theSameInstanceAs (ReceiveTimeout)
+      akka.actor.Actors.receiveTimeout must be theSameInstanceAs (ReceiveTimeout)
     }
   }
 }

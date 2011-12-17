@@ -125,7 +125,7 @@ final class Path {
         if (other instanceof Path) {
             Path that = (Path) other;
             return this.first.equals(that.first)
-                    && ConfigUtil.equalsHandlingNull(this.remainder,
+                    && ConfigImplUtil.equalsHandlingNull(this.remainder,
                             that.remainder);
         } else {
             return false;
@@ -139,11 +139,25 @@ final class Path {
     }
 
     // this doesn't have a very precise meaning, just to reduce
-    // noise from quotes in the rendered path
+    // noise from quotes in the rendered path for average cases
     static boolean hasFunkyChars(String s) {
-        for (int i = 0; i < s.length(); ++i) {
+        int length = s.length();
+
+        if (length == 0)
+            return false;
+
+        // if the path starts with something that could be a number,
+        // we need to quote it because the number could be invalid,
+        // for example it could be a hyphen with no digit afterward
+        // or the exponent "e" notation could be mangled.
+        char first = s.charAt(0);
+        if (!(Character.isLetter(first)))
+            return true;
+
+        for (int i = 1; i < length; ++i) {
             char c = s.charAt(i);
-            if (Character.isLetterOrDigit(c) || c == ' ')
+
+            if (Character.isLetterOrDigit(c) || c == '-' || c == '_')
                 continue;
             else
                 return true;
@@ -152,8 +166,8 @@ final class Path {
     }
 
     private void appendToStringBuilder(StringBuilder sb) {
-        if (hasFunkyChars(first))
-            sb.append(ConfigUtil.renderJsonString(first));
+        if (hasFunkyChars(first) || first.isEmpty())
+            sb.append(ConfigImplUtil.renderJsonString(first));
         else
             sb.append(first);
         if (remainder != null) {

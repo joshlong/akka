@@ -3,10 +3,11 @@ package akka.actor.dispatch
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
 import java.util.concurrent.atomic.{ AtomicBoolean, AtomicInteger }
 import akka.testkit.{ filterEvents, EventFilter, AkkaSpec }
-import akka.dispatch.{ PinnedDispatcher, Dispatchers, Dispatcher }
 import akka.actor.{ Props, Actor }
 import akka.util.Duration
 import akka.util.duration._
+import akka.testkit.DefaultTimeout
+import akka.dispatch.{ Await, PinnedDispatcher, Dispatchers, Dispatcher }
 
 object DispatcherActorSpec {
   class TestActor extends Actor {
@@ -27,7 +28,7 @@ object DispatcherActorSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class DispatcherActorSpec extends AkkaSpec {
+class DispatcherActorSpec extends AkkaSpec with DefaultTimeout {
   import DispatcherActorSpec._
 
   private val unit = TimeUnit.MILLISECONDS
@@ -35,17 +36,16 @@ class DispatcherActorSpec extends AkkaSpec {
   "A Dispatcher and an Actor" must {
 
     "support tell" in {
-      val actor = actorOf(Props[OneWayTestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
+      val actor = system.actorOf(Props[OneWayTestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
       val result = actor ! "OneWay"
       assert(OneWayTestActor.oneWay.await(1, TimeUnit.SECONDS))
-      actor.stop()
+      system.stop(actor)
     }
 
     "support ask/reply" in {
-      val actor = actorOf(Props[TestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
-      val result = (actor ? "Hello").as[String]
-      assert("World" === result.get)
-      actor.stop()
+      val actor = system.actorOf(Props[TestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
+      assert("World" === Await.result(actor ? "Hello", timeout.duration))
+      system.stop(actor)
     }
 
     "respect the throughput setting" in {
@@ -57,22 +57,22 @@ class DispatcherActorSpec extends AkkaSpec {
       val works = new AtomicBoolean(true)
       val latch = new CountDownLatch(100)
       val start = new CountDownLatch(1)
-      val fastOne = actorOf(
+      val fastOne = system.actorOf(
         Props(context ⇒ { case "sabotage" ⇒ works.set(false) }).withDispatcher(throughputDispatcher))
 
-      val slowOne = actorOf(
+      val slowOne = system.actorOf(
         Props(context ⇒ {
           case "hogexecutor" ⇒ context.sender ! "OK"; start.await
           case "ping"        ⇒ if (works.get) latch.countDown()
         }).withDispatcher(throughputDispatcher))
 
-      assert((slowOne ? "hogexecutor").get === "OK")
+      assert(Await.result(slowOne ? "hogexecutor", timeout.duration) === "OK")
       (1 to 100) foreach { _ ⇒ slowOne ! "ping" }
       fastOne ! "sabotage"
       start.countDown()
       latch.await(10, TimeUnit.SECONDS)
-      fastOne.stop()
-      slowOne.stop()
+      system.stop(fastOne)
+      system.stop(slowOne)
       assert(latch.getCount() === 0)
     }
 
@@ -87,15 +87,15 @@ class DispatcherActorSpec extends AkkaSpec {
       val start = new CountDownLatch(1)
       val ready = new CountDownLatch(1)
 
-      val fastOne = actorOf(
+      val fastOne = system.actorOf(
         Props(context ⇒ {
-          case "ping" ⇒ if (works.get) latch.countDown(); context.self.stop()
+          case "ping" ⇒ if (works.get) latch.countDown(); context.stop(context.self)
         }).withDispatcher(throughputDispatcher))
 
-      val slowOne = actorOf(
+      val slowOne = system.actorOf(
         Props(context ⇒ {
           case "hogexecutor" ⇒ ready.countDown(); start.await
-          case "ping"        ⇒ works.set(false); context.self.stop()
+          case "ping"        ⇒ works.set(false); context.stop(context.self)
         }).withDispatcher(throughputDispatcher))
 
       slowOne ! "hogexecutor"

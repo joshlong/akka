@@ -3,9 +3,10 @@ package akka.dispatch
 import akka.actor.{ Props, LocalActorRef, Actor }
 import akka.testkit.AkkaSpec
 import akka.util.Duration
+import akka.testkit.DefaultTimeout
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class PriorityDispatcherSpec extends AkkaSpec {
+class PriorityDispatcherSpec extends AkkaSpec with DefaultTimeout {
 
   "A PriorityDispatcher" must {
     "Order it's messages according to the specified comparator using an unbounded mailbox" in {
@@ -26,7 +27,7 @@ class PriorityDispatcherSpec extends AkkaSpec {
   def testOrdering(mboxType: MailboxType) {
     val dispatcher = system.dispatcherFactory.newDispatcher("Test", 1, Duration.Zero, mboxType).build
 
-    val actor = actorOf(Props(new Actor {
+    val actor = system.actorOf(Props(new Actor {
       var acc: List[Int] = Nil
 
       def receive = {
@@ -42,7 +43,7 @@ class PriorityDispatcherSpec extends AkkaSpec {
 
     actor.resume //Signal the actor to start treating it's message backlog
 
-    actor.?('Result).as[List[Int]].get must be === (msgs.reverse)
+    Await.result(actor.?('Result).mapTo[List[Int]], timeout.duration) must be === msgs.reverse
   }
 
 }

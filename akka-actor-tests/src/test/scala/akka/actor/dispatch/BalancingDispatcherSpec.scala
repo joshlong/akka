@@ -44,8 +44,8 @@ class BalancingDispatcherSpec extends AkkaSpec {
     "have fast actor stealing work from slow actor" in {
       val finishedCounter = new CountDownLatch(110)
 
-      val slow = actorOf(Props(new DelayableActor(50, finishedCounter)).withDispatcher(delayableActorDispatcher)).asInstanceOf[LocalActorRef]
-      val fast = actorOf(Props(new DelayableActor(10, finishedCounter)).withDispatcher(delayableActorDispatcher)).asInstanceOf[LocalActorRef]
+      val slow = system.actorOf(Props(new DelayableActor(50, finishedCounter)).withDispatcher(delayableActorDispatcher)).asInstanceOf[LocalActorRef]
+      val fast = system.actorOf(Props(new DelayableActor(10, finishedCounter)).withDispatcher(delayableActorDispatcher)).asInstanceOf[LocalActorRef]
 
       var sentToFast = 0
 
@@ -71,11 +71,11 @@ class BalancingDispatcherSpec extends AkkaSpec {
       finishedCounter.await(5, TimeUnit.SECONDS)
       fast.underlying.mailbox.asInstanceOf[Mailbox].hasMessages must be(false)
       slow.underlying.mailbox.asInstanceOf[Mailbox].hasMessages must be(false)
-      fast.underlyingActorInstance.asInstanceOf[DelayableActor].invocationCount must be > sentToFast
-      fast.underlyingActorInstance.asInstanceOf[DelayableActor].invocationCount must be >
-        (slow.underlyingActorInstance.asInstanceOf[DelayableActor].invocationCount)
-      slow.stop()
-      fast.stop()
+      fast.underlying.actor.asInstanceOf[DelayableActor].invocationCount must be > sentToFast
+      fast.underlying.actor.asInstanceOf[DelayableActor].invocationCount must be >
+        (slow.underlying.actor.asInstanceOf[DelayableActor].invocationCount)
+      system.stop(slow)
+      system.stop(fast)
     }
   }
 }

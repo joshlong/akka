@@ -4,9 +4,11 @@ General
 .. toctree::
    :maxdepth: 2
 
-   jmm
-   configuration
-   event-handler
-   slf4j
+   actor-systems
+   actors
    supervision
-   guaranteed-delivery
+   addressing
+   remoting
+   jmm
+   message-send-semantics
+   configuration

@@ -5,37 +5,32 @@
  Microkernel
 #############
 
+The Akka Microkernel is included in the Akka download found at `downloads`_.
 
-Run the microkernel
-===================
+.. _downloads: http://akka.io/downloads
 
-To start the kernel use the scripts in the ``bin`` directory.
+To run an application with the microkernel you need to create a Bootable class
+that handles the startup and shutdown the application. An example is included below.
 
-All services are configured in the ``config/akka.conf`` configuration file. See
-the Akka documentation on Configuration for more details. Services you want to
-be started up automatically should be listed in the list of ``boot`` classes in
-the configuration.
+Put your application jar in the ``deploy`` directory to have it automatically
+loaded.
 
-Put your application in the ``deploy`` directory.
+To start the kernel use the scripts in the ``bin`` directory, passing the boot
+classes for your application.
 
+There is a simple example of an application setup for running with the
+microkernel included in the akka download. This can be run with the following
+command (on a unix-based system):
 
-Akka Home
----------
+.. code-block:: none
 
-Note that the microkernel needs to know where the Akka home is (the base
-directory of the microkernel). The above scripts do this for you. Otherwise, you
-can set Akka home by:
+   bin/akka sample.kernel.hello.HelloKernel
 
-* Specifying the ``AKKA_HOME`` environment variable
+Use ``Ctrl-C`` to interrupt and exit the microkernel.
 
-* Specifying the ``-Dakka.home`` java option
+On a Windows machine you can also use the bin/akka.bat script.
 
+The code for the Hello Kernel example (see the ``HelloKernel`` class for an example
+of creating a Bootable):
 
-.. _hello-microkernel:
-
-Hello Microkernel
-=================
-
-There is a very simple Akka Mist sample project included in the microkernel
-``deploy`` directory. Start the microkernel with the start script and then go to
-http://localhost:9998 to say Hello to the microkernel.
+.. includecode:: ../../akka-samples/akka-sample-hello-kernel/src/main/scala/sample/kernel/hello/HelloKernel.scala

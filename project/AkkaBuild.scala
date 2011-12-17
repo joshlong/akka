@@ -5,14 +5,11 @@
 package akka
 
 import sbt._
-import Keys._
-
+import sbt.Keys._
 import com.typesafe.sbtmultijvm.MultiJvmPlugin
+import com.typesafe.sbtmultijvm.MultiJvmPlugin.{ MultiJvm, extraOptions, jvmOptions, scalatestOptions }
 import com.typesafe.sbtscalariform.ScalariformPlugin
-
-import MultiJvmPlugin.{ MultiJvm, extraOptions, jvmOptions, scalatestOptions }
-import ScalariformPlugin.{ format, formatPreferences, formatSourceDirectories }
-
+import com.typesafe.sbtscalariform.ScalariformPlugin.ScalariformKeys
 import java.lang.Boolean.getBoolean
 
 object AkkaBuild extends Build {
@@ -27,12 +24,13 @@ object AkkaBuild extends Build {
   lazy val akka = Project(
     id = "akka",
     base = file("."),
-    settings = parentSettings ++ Unidoc.settings ++ rstdocSettings ++ Seq(
+    settings = parentSettings ++ Release.settings ++ Unidoc.settings ++ Rstdoc.settings ++ Publish.versionSettings ++ Dist.settings ++ Seq(
       parallelExecution in GlobalScope := false,
+      Publish.defaultPublishTo in ThisBuild <<= crossTarget / "repository",
       Unidoc.unidocExclude := Seq(samples.id, tutorials.id),
-      rstdocDirectory <<= baseDirectory / "akka-docs"
+      Dist.distExclude := Seq(actorTests.id, akkaSbtPlugin.id, docs.id)
     ),
-    aggregate = Seq(actor, testkit, actorTests, stm, remote, slf4j, amqp, mailboxes, akkaSbtPlugin, samples, tutorials, docs)
+    aggregate = Seq(actor, testkit, actorTests, remote, slf4j, mailboxes, kernel, akkaSbtPlugin, samples, tutorials, docs)
   )
 
   lazy val actor = Project(
@@ -68,19 +66,10 @@ object AkkaBuild extends Build {
     )
   )
 
-  lazy val stm = Project(
-    id = "akka-stm",
-    base = file("akka-stm"),
-    dependencies = Seq(actor, testkit % "test->test"),
-    settings = defaultSettings ++ Seq(
-      libraryDependencies ++= Dependencies.stm
-    )
-  )
-
   lazy val remote = Project(
     id = "akka-remote",
     base = file("akka-remote"),
-    dependencies = Seq(stm, actorTests % "test->test", testkit % "test->test"),
+    dependencies = Seq(actor, actorTests % "test->test", testkit % "test->test"),
     settings = defaultSettings ++ multiJvmSettings ++ Seq(
       libraryDependencies ++= Dependencies.cluster,
       extraOptions in MultiJvm <<= (sourceDirectory in MultiJvm) { src =>
@@ -103,14 +92,14 @@ object AkkaBuild extends Build {
     )
   )
 
-  lazy val amqp = Project(
-    id = "akka-amqp",
-    base = file("akka-amqp"),
-    dependencies = Seq(actor, testkit % "test->test"),
-    settings = defaultSettings ++ Seq(
-      libraryDependencies ++= Dependencies.amqp
-    )
-  )
+  // lazy val amqp = Project(
+  //   id = "akka-amqp",
+  //   base = file("akka-amqp"),
+  //   dependencies = Seq(actor, testkit % "test->test"),
+  //   settings = defaultSettings ++ Seq(
+  //     libraryDependencies ++= Dependencies.amqp
+  //   )
+  // )
 
   lazy val mailboxes = Project(
     id = "akka-durable-mailboxes",
@@ -194,14 +183,14 @@ object AkkaBuild extends Build {
   //   )
   // )
 
-  // lazy val kernel = Project(
-  //   id = "akka-kernel",
-  //   base = file("akka-kernel"),
-  //   dependencies = Seq(cluster, slf4j, spring),
-  //   settings = defaultSettings ++ Seq(
-  //     libraryDependencies ++= Dependencies.kernel
-  //   )
-  // )
+  lazy val kernel = Project(
+    id = "akka-kernel",
+    base = file("akka-kernel"),
+    dependencies = Seq(actor, testkit % "test->test"),
+    settings = defaultSettings ++ Seq(
+      libraryDependencies ++= Dependencies.kernel
+    )
+  )
 
   lazy val akkaSbtPlugin = Project(
     id = "akka-sbt-plugin",
@@ -215,7 +204,7 @@ object AkkaBuild extends Build {
     id = "akka-samples",
     base = file("akka-samples"),
     settings = parentSettings,
-    aggregate = Seq(fsmSample)
+    aggregate = Seq(fsmSample, helloSample, helloKernelSample)
   )
 
   lazy val fsmSample = Project(
@@ -225,41 +214,57 @@ object AkkaBuild extends Build {
     settings = defaultSettings
   )
 
+  lazy val helloSample = Project(
+    id = "akka-sample-hello",
+    base = file("akka-samples/akka-sample-hello"),
+    dependencies = Seq(actor),
+    settings = defaultSettings
+  )
+
+  lazy val helloKernelSample = Project(
+    id = "akka-sample-hello-kernel",
+    base = file("akka-samples/akka-sample-hello-kernel"),
+    dependencies = Seq(kernel),
+    settings = defaultSettings
+  )
+
   lazy val tutorials = Project(
     id = "akka-tutorials",
     base = file("akka-tutorials"),
     settings = parentSettings,
-    aggregate = Seq(firstTutorial, secondTutorial)
+    aggregate = Seq(firstTutorial)
   )
 
   lazy val firstTutorial = Project(
     id = "akka-tutorial-first",
     base = file("akka-tutorials/akka-tutorial-first"),
-    dependencies = Seq(actor),
-    settings = defaultSettings
+    dependencies = Seq(actor, testkit),
+    settings = defaultSettings ++ Seq(
+      libraryDependencies ++= Dependencies.tutorials
+    )
   )
 
-  lazy val secondTutorial = Project(
-    id = "akka-tutorial-second",
-    base = file("akka-tutorials/akka-tutorial-second"),
-    dependencies = Seq(actor),
-    settings = defaultSettings
-  )
+  //  lazy val secondTutorial = Project(
+  //    id = "akka-tutorial-second",
+  //    base = file("akka-tutorials/akka-tutorial-second"),
+  //    dependencies = Seq(actor),
+  //    settings = defaultSettings
+  //  )
 
   lazy val docs = Project(
     id = "akka-docs",
     base = file("akka-docs"),
-    dependencies = Seq(actor, testkit % "test->test", stm, remote, slf4j),
+    dependencies = Seq(actor, testkit % "test->test", remote, slf4j, fileMailbox, mongoMailbox, redisMailbox, beanstalkMailbox, zookeeperMailbox),
     settings = defaultSettings ++ Seq(
       unmanagedSourceDirectories in Test <<= baseDirectory { _ ** "code" get },
       libraryDependencies ++= Dependencies.docs,
-      formatSourceDirectories in Test <<= unmanagedSourceDirectories in Test
+      unmanagedSourceDirectories in ScalariformKeys.format in Test <<= unmanagedSourceDirectories in Test
     )
   )
 
   // Settings
 
-  override lazy val settings = super.settings ++ buildSettings ++ Publish.versionSettings
+  override lazy val settings = super.settings ++ buildSettings
 
   lazy val baseSettings = Defaults.defaultSettings ++ Publish.settings
 
@@ -325,9 +330,9 @@ object AkkaBuild extends Build {
     testOptions in Test += Tests.Argument("-oF")
   )
 
-  lazy val formatSettings = ScalariformPlugin.settings ++ Seq(
-    formatPreferences in Compile := formattingPreferences,
-    formatPreferences in Test    := formattingPreferences
+  lazy val formatSettings = ScalariformPlugin.scalariformSettings ++ Seq(
+    ScalariformKeys.preferences in Compile := formattingPreferences,
+    ScalariformKeys.preferences in Test    := formattingPreferences
   )
 
   def formattingPreferences = {
@@ -338,27 +343,10 @@ object AkkaBuild extends Build {
     .setPreference(AlignSingleLineCaseStatements, true)
   }
 
-  lazy val multiJvmSettings = MultiJvmPlugin.settings ++ inConfig(MultiJvm)(ScalariformPlugin.formatSettings) ++ Seq(
-    compileInputs in MultiJvm <<= (compileInputs in MultiJvm) dependsOn (format in MultiJvm),
-    formatPreferences in MultiJvm := formattingPreferences
+  lazy val multiJvmSettings = MultiJvmPlugin.settings ++ inConfig(MultiJvm)(ScalariformPlugin.scalariformSettings) ++ Seq(
+    compileInputs in MultiJvm <<= (compileInputs in MultiJvm) dependsOn (ScalariformKeys.format in MultiJvm),
+    ScalariformKeys.preferences in MultiJvm := formattingPreferences
   )
-
-  // reStructuredText docs
-
-  val rstdocDirectory = SettingKey[File]("rstdoc-directory")
-  val rstdoc = TaskKey[File]("rstdoc", "Build the reStructuredText documentation.")
-
-  lazy val rstdocSettings = Seq(rstdoc <<= rstdocTask)
-
-  def rstdocTask = (rstdocDirectory, streams) map {
-    (dir, s) => {
-      s.log.info("Building reStructuredText documentation...")
-      val exitCode = Process(List("make", "clean", "html", "pdf"), dir) ! s.log
-      if (exitCode != 0) sys.error("Failed to build docs.")
-      s.log.info("Done building docs.")
-      dir
-    }
-  }
 }
 
 // Dependencies
@@ -369,11 +357,9 @@ object Dependencies {
   val testkit = Seq(Test.scalatest, Test.junit)
 
   val actorTests = Seq(
-    Test.junit, Test.scalatest, Test.multiverse, Test.commonsMath, Test.mockito,
+    Test.junit, Test.scalatest, Test.commonsMath, Test.mockito,
     Test.scalacheck, protobuf, jacksonMapper, sjson
   )
-
-  val stm = Seq(multiverse, Test.junit, Test.scalatest)
 
   val cluster = Seq(
     bookkeeper, commonsCodec, commonsIo, guice, h2Lzf, jacksonCore, jacksonMapper, log4j, netty,
@@ -398,13 +384,13 @@ object Dependencies {
 
   val spring = Seq(springBeans, springContext, Test.junit, Test.scalatest)
 
-  val kernel = Seq(
-    jettyUtil, jettyXml, jettyServlet, jacksonCore, staxApi
-  )
+  val kernel = Seq(Test.scalatest, Test.junit)
 
   // TODO: resolve Jetty version conflict
   // val sampleCamel = Seq(camelCore, camelSpring, commonsCodec, Runtime.camelJms, Runtime.activemq, Runtime.springJms,
   //   Test.junit, Test.scalatest, Test.logback)
+
+  val tutorials = Seq(Test.scalatest, Test.junit)
 
   val docs = Seq(Test.scalatest, Test.junit)
 }
@@ -420,7 +406,6 @@ object Dependency {
     val Jersey       = "1.3"
     val Jetty        = "7.4.0.v20110414"
     val Logback      = "0.9.28"
-    val Multiverse   = "0.6.2"
     val Netty        = "3.2.5.Final"
     val Protobuf     = "2.4.1"
     val Scalatest    = "1.6.1"
@@ -447,7 +432,6 @@ object Dependency {
   val jettyServlet  = "org.eclipse.jetty"           % "jetty-servlet"          % V.Jetty      // Eclipse license
   val log4j         = "log4j"                       % "log4j"                  % "1.2.15"     // ApacheV2
   val mongoAsync    = "com.mongodb.async"           % "mongo-driver_2.9.0-1"   % "0.2.9-1"    // ApacheV2
-  val multiverse    = "org.multiverse"              % "multiverse-alpha"       % V.Multiverse // ApacheV2
   val netty         = "org.jboss.netty"             % "netty"                  % V.Netty      // ApacheV2
   val osgi          = "org.osgi"                    % "org.osgi.core"          % "4.2.0"      // ApacheV2
   val protobuf      = "com.google.protobuf"         % "protobuf-java"          % V.Protobuf   // New BSD
@@ -490,7 +474,6 @@ object Dependency {
     val junit       = "junit"                   % "junit"               % "4.5"        % "test" // Common Public License 1.0
     val logback     = "ch.qos.logback"          % "logback-classic"     % V.Logback    % "test" // EPL 1.0 / LGPL 2.1
     val mockito     = "org.mockito"             % "mockito-all"         % "1.8.1"      % "test" // MIT
-    val multiverse  = "org.multiverse"          % "multiverse-alpha"    % V.Multiverse % "test" // ApacheV2
     val scalatest   = "org.scalatest"           %% "scalatest"          % V.Scalatest  % "test" // ApacheV2
     val scalacheck  = "org.scala-tools.testing" %% "scalacheck"         % "1.9"        % "test" // New BSD
   }

@@ -34,9 +34,9 @@ object FSM {
 
     def schedule(actor: ActorRef, timeout: Duration) {
       if (repeat) {
-        ref = Some(system.scheduler.schedule(actor, this, timeout, timeout))
+        ref = Some(system.scheduler.schedule(timeout, timeout, actor, this))
       } else {
-        ref = Some(system.scheduler.scheduleOnce(actor, this, timeout))
+        ref = Some(system.scheduler.scheduleOnce(timeout, actor, this))
       }
     }
 
@@ -189,7 +189,7 @@ trait FSM[S, D] extends ListenerManagement {
   type Timeout = Option[Duration]
   type TransitionHandler = PartialFunction[(S, S), Unit]
 
-  val log = Logging(system, context.self)
+  val log = Logging(context.system, context.self)
 
   /**
    * ****************************************
@@ -279,7 +279,7 @@ trait FSM[S, D] extends ListenerManagement {
     if (timers contains name) {
       timers(name).cancel
     }
-    val timer = Timer(name, msg, repeat, timerGen.next)
+    val timer = Timer(name, msg, repeat, timerGen.next)(context.system)
     timer.schedule(self, timeout)
     timers(name) = timer
     stay
@@ -382,6 +382,11 @@ trait FSM[S, D] extends ListenerManagement {
    */
   protected[akka] def stateData: D = currentState.stateData
 
+  /**
+   * Return next state data (available in onTransition handlers)
+   */
+  protected[akka] def nextStateData = nextState.stateData
+
   /*
    * ****************************************************************
    *                PRIVATE IMPLEMENTATION DETAILS
@@ -393,6 +398,7 @@ trait FSM[S, D] extends ListenerManagement {
    */
   private var currentState: State = _
   private var timeoutFuture: Option[Cancellable] = None
+  private var nextState: State = _
   private var generation: Long = 0L
 
   /*
@@ -505,7 +511,7 @@ trait FSM[S, D] extends ListenerManagement {
       case _ ⇒
         nextState.replies.reverse foreach { r ⇒ sender ! r }
         terminate(nextState)
-        self.stop()
+        context.stop(self)
     }
   }
 
@@ -515,6 +521,7 @@ trait FSM[S, D] extends ListenerManagement {
     } else {
       nextState.replies.reverse foreach { r ⇒ sender ! r }
       if (currentState.stateName != nextState.stateName) {
+        this.nextState = nextState
         handleTransition(currentState.stateName, nextState.stateName)
         notifyListeners(Transition(self, currentState.stateName, nextState.stateName))
       }
@@ -523,7 +530,7 @@ trait FSM[S, D] extends ListenerManagement {
       if (timeout.isDefined) {
         val t = timeout.get
         if (t.finite_? && t.length >= 0) {
-          timeoutFuture = Some(system.scheduler.scheduleOnce(self, TimeoutMarker(generation), t))
+          timeoutFuture = Some(context.system.scheduler.scheduleOnce(t, self, TimeoutMarker(generation)))
         }
       }
     }
@@ -557,7 +564,6 @@ trait FSM[S, D] extends ListenerManagement {
 /**
  * Stackable trait for FSM which adds a rolling event log.
  *
- * @author Roland Kuhn
  * @since 1.2
  */
 trait LoggingFSM[S, D] extends FSM[S, D] { this: Actor ⇒
@@ -566,7 +572,7 @@ trait LoggingFSM[S, D] extends FSM[S, D] { this: Actor ⇒
 
   def logDepth: Int = 0
 
-  private val debugEvent = system.settings.FsmDebugEvent
+  private val debugEvent = context.system.settings.FsmDebugEvent
 
   private val events = new Array[Event](logDepth)
   private val states = new Array[AnyRef](logDepth)

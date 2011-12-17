@@ -11,6 +11,7 @@ import akka.testkit.{ EventFilter, TestEvent }
 import java.net.ConnectException
 import java.nio.channels.NotYetConnectedException
 import akka.cluster.LocalCluster
+import akka.dispatch.Await
 
 object DirectRoutingFailoverMultiJvmSpec {
 
@@ -44,11 +45,11 @@ class DirectRoutingFailoverMultiJvmNode1 extends MasterClusterTestNode {
       }
 
       LocalCluster.barrier("actor-creation", NrOfNodes) {
-        actor = Actor.actorOf[SomeActor]("service-hello")
+        actor = Actor.actorOf(Props[SomeActor]("service-hello")
       }
 
       LocalCluster.barrier("verify-actor", NrOfNodes) {
-        (actor ? "identify").get must equal("node2")
+        Await.result(actor ? "identify", timeout.duration) must equal("node2")
       }
 
       val timer = Timer(30.seconds, true)

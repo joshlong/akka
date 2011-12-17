@@ -16,6 +16,8 @@ object TestActor {
   type Ignore = Option[PartialFunction[AnyRef, Boolean]]
 
   case class SetIgnore(i: Ignore)
+  case class Watch(ref: ActorRef)
+  case class UnWatch(ref: ActorRef)
 
   trait Message {
     def msg: AnyRef
@@ -34,10 +36,17 @@ class TestActor(queue: BlockingDeque[TestActor.Message]) extends Actor {
   var ignore: Ignore = None
 
   def receive = {
-    case SetIgnore(ign) ⇒ ignore = ign
+    case SetIgnore(ign)   ⇒ ignore = ign
+    case x @ Watch(ref)   ⇒ context.watch(ref); queue.offerLast(RealMessage(x, self))
+    case x @ UnWatch(ref) ⇒ context.unwatch(ref); queue.offerLast(RealMessage(x, self))
     case x: AnyRef ⇒
       val observe = ignore map (ignoreFunc ⇒ if (ignoreFunc isDefinedAt x) !ignoreFunc(x) else true) getOrElse true
       if (observe) queue.offerLast(RealMessage(x, sender))
+  }
+
+  override def postStop() = {
+    import scala.collection.JavaConverters._
+    queue.asScala foreach { m ⇒ context.system.deadLetters ! DeadLetter(m.msg, m.sender, self) }
   }
 }
 
@@ -49,7 +58,7 @@ class TestActor(queue: BlockingDeque[TestActor.Message]) extends Actor {
  *
  * <pre>
  * class Test extends TestKit {
- *     val test = actorOf[SomeActor]
+ *     val test = actorOf(Props[SomeActor]
  *
  *     within (1 second) {
  *       test ! SomeWork
@@ -92,7 +101,7 @@ class TestKit(_system: ActorSystem) {
    * ActorRef of the test actor. Access is provided to enable e.g.
    * registration as message target.
    */
-  val testActor: ActorRef = {
+  lazy val testActor: ActorRef = {
     val impl = system.asInstanceOf[ActorSystemImpl]
     impl.systemActorOf(Props(new TestActor(queue))
       .copy(dispatcher = new CallingThreadDispatcher(system.dispatcherFactory.prerequisites)),
@@ -119,6 +128,26 @@ class TestKit(_system: ActorSystem) {
   def ignoreNoMsg() { testActor ! TestActor.SetIgnore(None) }
 
   /**
+   * Have the testActor watch someone (i.e. `context.watch(...)`). Waits until
+   * the Watch message is received back using expectMsg.
+   */
+  def watch(ref: ActorRef) {
+    val msg = TestActor.Watch(ref)
+    testActor ! msg
+    expectMsg(msg)
+  }
+
+  /**
+   * Have the testActor stop watching someone (i.e. `context.unwatch(...)`). Waits until
+   * the Watch message is received back using expectMsg.
+   */
+  def unwatch(ref: ActorRef) {
+    val msg = TestActor.UnWatch(ref)
+    testActor ! msg
+    expectMsg(msg)
+  }
+
+  /**
    * Obtain current time (`System.nanoTime`) as Duration.
    */
   def now: Duration = System.nanoTime.nanos
@@ -136,7 +165,7 @@ class TestKit(_system: ActorSystem) {
   def msgAvailable = !queue.isEmpty
 
   /**
-   * Block until the given condition evaluates to `true` or the timeout
+   * Await until the given condition evaluates to `true` or the timeout
    * expires, whichever comes first.
    *
    * If no timeout is given, take it from the innermost enclosing `within`
@@ -531,7 +560,7 @@ object TestKit {
   private[testkit] val testActorId = new AtomicInteger(0)
 
   /**
-   * Block until the given condition evaluates to `true` or the timeout
+   * Await until the given condition evaluates to `true` or the timeout
    * expires, whichever comes first.
    *
    * If no timeout is given, take it from the innermost enclosing `within`
@@ -612,4 +641,8 @@ object TestProbe {
 
 trait ImplicitSender { this: TestKit ⇒
   implicit def self = testActor
+}
+
+trait DefaultTimeout { this: TestKit ⇒
+  implicit val timeout = system.settings.ActorTimeout
 }

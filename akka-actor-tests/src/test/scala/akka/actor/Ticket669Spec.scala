@@ -9,9 +9,11 @@ import org.scalatest.BeforeAndAfterAll
 import akka.testkit.{ TestKit, filterEvents, EventFilter }
 import akka.testkit.AkkaSpec
 import akka.testkit.ImplicitSender
+import akka.testkit.DefaultTimeout
+import akka.dispatch.Await
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class Ticket669Spec extends AkkaSpec with BeforeAndAfterAll with ImplicitSender {
+class Ticket669Spec extends AkkaSpec with BeforeAndAfterAll with ImplicitSender with DefaultTimeout {
   import Ticket669Spec._
 
   // TODO: does this really make sense?
@@ -22,23 +24,23 @@ class Ticket669Spec extends AkkaSpec with BeforeAndAfterAll with ImplicitSender 
   "A supervised actor with lifecycle PERMANENT" should {
     "be able to reply on failure during preRestart" in {
       filterEvents(EventFilter[Exception]("test", occurrences = 1)) {
-        val supervisor = actorOf(Props[Supervisor].withFaultHandler(AllForOneStrategy(List(classOf[Exception]), 5, 10000)))
-        val supervised = (supervisor ? Props[Supervised]).as[ActorRef].get
+        val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(AllForOneStrategy(List(classOf[Exception]), 5, 10000)))
+        val supervised = Await.result((supervisor ? Props[Supervised]).mapTo[ActorRef], timeout.duration)
 
         supervised.!("test")(testActor)
         expectMsg("failure1")
-        supervisor.stop()
+        system.stop(supervisor)
       }
     }
 
     "be able to reply on failure during postStop" in {
       filterEvents(EventFilter[Exception]("test", occurrences = 1)) {
-        val supervisor = actorOf(Props[Supervisor].withFaultHandler(AllForOneStrategy(List(classOf[Exception]), Some(0), None)))
-        val supervised = (supervisor ? Props[Supervised]).as[ActorRef].get
+        val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(AllForOneStrategy(List(classOf[Exception]), Some(0), None)))
+        val supervised = Await.result((supervisor ? Props[Supervised]).mapTo[ActorRef], timeout.duration)
 
         supervised.!("test")(testActor)
         expectMsg("failure2")
-        supervisor.stop()
+        system.stop(supervisor)
       }
     }
   }

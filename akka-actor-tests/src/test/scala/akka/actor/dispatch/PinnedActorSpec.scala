@@ -3,10 +3,10 @@ package akka.actor.dispatch
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
 
 import akka.testkit._
-import akka.dispatch.{ PinnedDispatcher, Dispatchers }
 import akka.actor.{ Props, Actor }
 import akka.testkit.AkkaSpec
 import org.scalatest.BeforeAndAfterEach
+import akka.dispatch.{ Await, PinnedDispatcher, Dispatchers }
 
 object PinnedActorSpec {
   class TestActor extends Actor {
@@ -18,7 +18,7 @@ object PinnedActorSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class PinnedActorSpec extends AkkaSpec with BeforeAndAfterEach {
+class PinnedActorSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
   import PinnedActorSpec._
 
   private val unit = TimeUnit.MILLISECONDS
@@ -27,17 +27,16 @@ class PinnedActorSpec extends AkkaSpec with BeforeAndAfterEach {
 
     "support tell" in {
       var oneWay = new CountDownLatch(1)
-      val actor = actorOf(Props(self ⇒ { case "OneWay" ⇒ oneWay.countDown() }).withDispatcher(system.dispatcherFactory.newPinnedDispatcher("test")))
+      val actor = system.actorOf(Props(self ⇒ { case "OneWay" ⇒ oneWay.countDown() }).withDispatcher(system.dispatcherFactory.newPinnedDispatcher("test")))
       val result = actor ! "OneWay"
       assert(oneWay.await(1, TimeUnit.SECONDS))
-      actor.stop()
+      system.stop(actor)
     }
 
     "support ask/reply" in {
-      val actor = actorOf(Props[TestActor].withDispatcher(system.dispatcherFactory.newPinnedDispatcher("test")))
-      val result = (actor ? "Hello").as[String]
-      assert("World" === result.get)
-      actor.stop()
+      val actor = system.actorOf(Props[TestActor].withDispatcher(system.dispatcherFactory.newPinnedDispatcher("test")))
+      assert("World" === Await.result(actor ? "Hello", timeout.duration))
+      system.stop(actor)
     }
   }
 }

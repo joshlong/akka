@@ -5,9 +5,11 @@ import org.scalatest.matchers.MustMatchers
 
 import akka.actor.ActorSystem
 import akka.actor._
+import akka.util.Timeout
 import akka.stm._
 import akka.util.duration._
 import akka.testkit._
+import akka.dispatch.Await
 
 object TransactorIncrement {
   case class Increment(friends: Seq[ActorRef], latch: TestLatch)
@@ -95,10 +97,10 @@ class TransactorSpec extends AkkaSpec {
       counters(0) ! Increment(counters.tail, incrementLatch)
       incrementLatch.await
       for (counter ← counters) {
-        (counter ? GetCount).as[Int].get must be === 1
+        Await.result(counter ? GetCount, timeout.duration) must be === 1
       }
-      counters foreach (_.stop())
-      failer.stop()
+      counters foreach (system.stop(_))
+      system.stop(failer)
     }
 
     "increment no counters with a failing transaction" in {
@@ -112,10 +114,10 @@ class TransactorSpec extends AkkaSpec {
         counters(0) ! Increment(counters.tail :+ failer, failLatch)
         failLatch.await
         for (counter ← counters) {
-          (counter ? GetCount).as[Int].get must be === 0
+          Await.result(counter ? GetCount, timeout.duration) must be === 0
         }
-        counters foreach (_.stop())
-        failer.stop()
+        counters foreach (system.stop(_))
+        system.stop(failer)
       }
     }
   }
@@ -129,7 +131,7 @@ class TransactorSpec extends AkkaSpec {
       latch.await
       val value = atomic { ref.get }
       value must be === 5
-      transactor.stop()
+      system.stop(transactor)
     }
   }
 }

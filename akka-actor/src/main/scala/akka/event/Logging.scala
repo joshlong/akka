@@ -3,18 +3,19 @@
  */
 package akka.event
 
-import akka.actor.{ Actor, ActorPath, ActorRef, MinimalActorRef, LocalActorRef, Props, ActorSystem, ActorSystemImpl, simpleName }
+import akka.actor._
 import akka.AkkaException
 import akka.actor.ActorSystem.Settings
 import akka.util.ReflectiveAccess
 import akka.config.ConfigurationException
 import akka.util.ReentrantGuard
 import akka.util.duration._
-import akka.actor.Timeout
-import akka.dispatch.FutureTimeoutException
+import akka.util.Timeout
 import java.util.concurrent.atomic.AtomicInteger
 import akka.actor.ActorRefProvider
 import scala.util.control.NoStackTrace
+import java.util.concurrent.TimeoutException
+import akka.dispatch.Await
 
 object LoggingBus {
   implicit def fromActorSystem(system: ActorSystem): LoggingBus = system.eventStream
@@ -22,7 +23,7 @@ object LoggingBus {
 
 /**
  * This trait brings log level handling to the EventStream: it reads the log
- * levels for the initial logging (StandardOutLogger) and the loggers&level
+ * levels for the initial logging (StandardOutLogger) and the loggers & level
  * for after-init logging, possibly keeping the StandardOutLogger enabled if
  * it is part of the configured loggers. All configured loggers are treated as
  * system services and managed by this trait, i.e. subscribed/unsubscribed in
@@ -38,7 +39,6 @@ trait LoggingBus extends ActorEventBus {
   private val guard = new ReentrantGuard
   private var loggers = Seq.empty[ActorRef]
   private var _logLevel: LogLevel = _
-  private val loggerId = new AtomicInteger
 
   /**
    * Query currently set log level. See object Logging for more information.
@@ -81,7 +81,7 @@ trait LoggingBus extends ActorEventBus {
       loggers = Seq(StandardOutLogger)
       _logLevel = level
     }
-    publish(Info(simpleName(this), "StandardOutLogger started"))
+    publish(Debug(simpleName(this), "StandardOutLogger started"))
   }
 
   private[akka] def startDefaultLoggers(system: ActorSystemImpl) {
@@ -114,7 +114,7 @@ trait LoggingBus extends ActorEventBus {
         loggers = myloggers
         _logLevel = level
       }
-      publish(Info(simpleName(this), "Default Loggers started"))
+      publish(Debug(simpleName(this), "Default Loggers started"))
       if (!(defaultLoggers contains StandardOutLoggerName)) {
         unsubscribe(StandardOutLogger)
       }
@@ -130,7 +130,7 @@ trait LoggingBus extends ActorEventBus {
     val level = _logLevel // volatile access before reading loggers
     if (!(loggers contains StandardOutLogger)) {
       AllLogLevels filter (level >= _) foreach (l ⇒ subscribe(StandardOutLogger, classFor(l)))
-      publish(Info(simpleName(this), "shutting down: StandardOutLogger started"))
+      publish(Debug(simpleName(this), "shutting down: StandardOutLogger started"))
     }
     for {
       logger ← loggers
@@ -138,23 +138,26 @@ trait LoggingBus extends ActorEventBus {
     } {
       // this is very necessary, else you get infinite loop with DeadLetter
       unsubscribe(logger)
-      logger.stop()
+      logger match {
+        case ref: InternalActorRef ⇒ ref.stop()
+        case _                     ⇒
+      }
     }
-    publish(Info(simpleName(this), "all default loggers stopped"))
+    publish(Debug(simpleName(this), "all default loggers stopped"))
   }
 
   private def addLogger(system: ActorSystemImpl, clazz: Class[_ <: Actor], level: LogLevel): ActorRef = {
-    val name = "log" + loggerId.incrementAndGet + "-" + simpleName(clazz)
+    val name = "log" + Extension(system).id() + "-" + simpleName(clazz)
     val actor = system.systemActorOf(Props(clazz), name)
     implicit val timeout = Timeout(3 seconds)
-    val response = try actor ? InitializeLogger(this) get catch {
-      case _: FutureTimeoutException ⇒
+    val response = try Await.result(actor ? InitializeLogger(this), timeout.duration) catch {
+      case _: TimeoutException ⇒
         publish(Warning(simpleName(this), "Logger " + name + " did not respond within " + timeout + " to InitializeLogger(bus)"))
     }
     if (response != LoggerInitialized)
       throw new LoggerInitializationException("Logger " + name + " did not respond with LoggerInitialized, sent instead " + response)
     AllLogLevels filter (level >= _) foreach (l ⇒ subscribe(actor, classFor(l)))
-    publish(Info(simpleName(this), "logger " + name + " started"))
+    publish(Debug(simpleName(this), "logger " + name + " started"))
     actor
   }
 
@@ -170,11 +173,11 @@ object LogSource {
   }
 
   implicit val fromActor: LogSource[Actor] = new LogSource[Actor] {
-    def genString(a: Actor) = a.self.toString
+    def genString(a: Actor) = a.self.path.toString
   }
 
   implicit val fromActorRef: LogSource[ActorRef] = new LogSource[ActorRef] {
-    def genString(a: ActorRef) = a.toString
+    def genString(a: ActorRef) = a.path.toString
   }
 
   // this one unfortunately does not work as implicit, because existential types have some weird behavior
@@ -224,6 +227,13 @@ object LogSource {
  * </code></pre>
  */
 object Logging {
+
+  object Extension extends ExtensionKey[LogExt]
+
+  class LogExt(system: ActorSystemImpl) extends Extension {
+    private val loggerId = new AtomicInteger
+    def id() = loggerId.incrementAndGet()
+  }
 
   /**
    * Marker trait for annotating LogLevel, which must be Int after erasure.
@@ -275,19 +285,34 @@ object Logging {
   val debugFormat = "[DEBUG] [%s] [%s] [%s] %s".intern
 
   /**
-   * Obtain LoggingAdapter for the given application and source object. The
-   * source is used to identify the source of this logging channel and must have
+   * Obtain LoggingAdapter for the given event stream (system) and source object.
+   * Note that there is an implicit conversion from [[akka.actor.ActorSystem]]
+   * to [[akka.event.LoggingBus]].
+   *
+   * The source is used to identify the source of this logging channel and must have
    * a corresponding LogSource[T] instance in scope; by default these are
-   * provided for Class[_], Actor, ActorRef and String types.
+   * provided for Class[_], Actor, ActorRef and String types. The source
+   * object is translated to a String according to the following rules:
+   * <ul>
+   * <li>if it is an Actor or ActorRef, its path is used</li>
+   * <li>in case of a String it is used as is</li>
+   * <li>in case of a class an approximation of its simpleName
+   * <li>and in all other cases the simpleName of its class</li>
+   * </ul>
    */
   def apply[T: LogSource](eventStream: LoggingBus, logSource: T): LoggingAdapter =
     new BusLogging(eventStream, implicitly[LogSource[T]].genString(logSource))
 
   /**
-   * Java API: Obtain LoggingAdapter for the given application and source object. The
-   * source object is used to identify the source of this logging channel; if it is
-   * an Actor or ActorRef, its address is used, in case of a class an approximation of
-   * its simpleName and in all other cases the simpleName of its class.
+   * Java API: Obtain LoggingAdapter for the given system and source object. The
+   * source object is used to identify the source of this logging channel. The source
+   * object is translated to a String according to the following rules:
+   * <ul>
+   * <li>if it is an Actor or ActorRef, its path is used</li>
+   * <li>in case of a String it is used as is</li>
+   * <li>in case of a class an approximation of its simpleName
+   * <li>and in all other cases the simpleName of its class</li>
+   * </ul>
    */
   def getLogger(system: ActorSystem, logSource: AnyRef): LoggingAdapter = apply(system.eventStream, LogSource.fromAnyRef(logSource))
 
@@ -348,6 +373,11 @@ object Logging {
    */
   case object LoggerInitialized
 
+  /**
+   * Java API to create a LoggerInitialized message.
+   */
+  def loggerInitialized() = LoggerInitialized
+
   class LoggerInitializationException(msg: String) extends AkkaException(msg)
 
   trait StdOutLogger {
@@ -398,12 +428,6 @@ object Logging {
         event.thread.getName,
         event.logSource,
         event.message))
-
-    def instanceName(instance: AnyRef): String = instance match {
-      case null        ⇒ "NULL"
-      case a: ActorRef ⇒ a.address
-      case _           ⇒ simpleName(instance)
-    }
   }
 
   /**
@@ -414,9 +438,7 @@ object Logging {
    * <code>akka.stdout-loglevel</code> in <code>akka.conf</code>.
    */
   class StandardOutLogger extends MinimalActorRef with StdOutLogger {
-    override val name: String = "standard-out-logger"
-    val path: ActorPath = null // pathless
-    val address: String = name
+    val path: ActorPath = new RootActorPath(LocalAddress("all-systems"), "/StandardOutLogger")
     override val toString = "StandardOutLogger"
     override def !(message: Any)(implicit sender: ActorRef = null): Unit = print(message)
   }
