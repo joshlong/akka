@@ -1,22 +1,30 @@
 package akka.spring
 
-import akka.actor.{ ActorRef, Actor, ActorSystem }
 
-import config.{DelegatingActor, ActorBeanPostProcessor}
+import akka.actor.{ActorRef, ActorSystem}
+
+import config.ActorBeanPostProcessor
 import javax.annotation.PostConstruct
-import org.springframework.context.annotation.{Configuration, Bean}
+import org.springframework.context.annotation.{AnnotationConfigApplicationContext, Configuration, Bean}
 
-case class Order( amount: Int )
+
+case class Order(amount: Int)
 
 object Experiments extends App {
-  val bfpp = new ActorBeanPostProcessor()
-  bfpp.afterPropertiesSet()
 
   val system = ActorSystem()
-  val myActor = new MyActor()
 
-  val actorRef = bfpp.postProcessBeforeInitialization( myActor, "myActor").asInstanceOf[ActorRef]
-  actorRef ! Order(242)
+  val bfpp = new ActorBeanPostProcessor
+
+  val bn = "myactor";
+
+  var actor: AnyRef = new MyActor
+  actor = bfpp.postProcessBeforeInitialization(actor, bn)
+  actor = bfpp.postProcessAfterInitialization(actor, bn)
+
+  val ma :ActorRef =  actor.asInstanceOf[ActorRef];
+  ma ! Order(242)
+
 
   ///val delegatingActor = bfpp.postProcessBeforeInitialization( myActor, "myActor").asInstanceOf[akka.actor.ActorRef]
   /*  val applicationContext = new AnnotationConfigApplicationContext
@@ -37,9 +45,9 @@ class MyActor {
 
   // protected def receive:Receive =>
   @Receive
-  protected def aCustomReceiveMethod(msg: Any): akka.actor.Actor.Receive = {
+  def aCustomReceiveMethod(e:AnyRef) : akka.actor.Actor.Receive = {
     case Order(amount) ⇒ Console.println("Order received!");
-    case e   ⇒ Console.println( "something else received")
+    case e ⇒ Console.println("something else received")
   }
 }
 
