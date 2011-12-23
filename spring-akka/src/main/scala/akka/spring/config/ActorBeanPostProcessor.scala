@@ -104,25 +104,25 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
               }
 
             };
-            
+
             handler.actorContextReference.getOrElse(null) match {
               case null => null
               case acRef: Argument => {
                 mapOfArgs += acRef.argumentPosition -> c
               }
             }
-            
-            var args  = List[AnyRef]() 
+
+            var args = List[AnyRef]()
             // now, iterate through the map and then build an array and actually invoke the method 
-            mapOfArgs.keySet.toList.sorted.foreach((k:Int)=>{
-             args =  mapOfArgs(k) :: args
+            mapOfArgs.keySet.toList.sorted.foreach((k: Int) => {
+              args = mapOfArgs(k) :: args
             })
 
-            val argsForInvocation = args.reverse; 
+            val argsForInvocation = args.reverse;
             log(argsForInvocation.toString())
             // todo fix me
 
-            handler.method.invoke(this.delegate, argsForInvocation : _*)  // the '_*' tells scala that we want to use this sequence as a varargs expansion
+            handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
           }
         }
       }
