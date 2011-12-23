@@ -22,8 +22,8 @@ object Experiments extends App {
   actor = bfpp.postProcessBeforeInitialization(actor, bn)
   actor = bfpp.postProcessAfterInitialization(actor, bn)
 
-  val ma :ActorRef =  actor.asInstanceOf[ActorRef];
-  ma ! Order(242)
+  val ma : ActorRef =  actor.asInstanceOf[ActorRef];
+  ma  !  Order(242)
 
 
   ///val delegatingActor = bfpp.postProcessBeforeInitialization( myActor, "myActor").asInstanceOf[akka.actor.ActorRef]
@@ -35,20 +35,23 @@ object Experiments extends App {
 @akka.spring.Actor
 class MyActor {
 
-  var system = ActorSystem()
+  @Receive
+  def handleOrder( @Self self : ActorRef , @Payload o : Order) {
+    Console.println("received an order "+ o.toString)
+  }
 
   @PostConstruct
   def setup() {
-    Console.println("PostConstruct(): actorSystem is " +
-      (if (this.system != null) "not" else "") + " null");
+//    Console.println("PostConstruct(): actorSystem is " +
+//      (if (this.system != null) "not" else "") + " null");
   }
 
   // protected def receive:Receive =>
-  @Receive
+ /* @Receive
   def aCustomReceiveMethod(e:AnyRef) : akka.actor.Actor.Receive = {
     case Order(amount) ⇒ Console.println("Order received!");
     case e ⇒ Console.println("something else received")
-  }
+  }*/
 }
 
 @Configuration

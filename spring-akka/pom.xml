@@ -23,14 +23,24 @@
             <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
             <distribution>repo</distribution>
         </license>
-    </licenses>
+    </licenses>         <!--<modelVersion>4.0.0</modelVersion>
+    <groupId>com.typesafe.akka</groupId>
+    <artifactId>akka-actor</artifactId>
+    <packaging>jar</packaging>
+    <description>akka-actor</description>
+    <version>2.0-M1</version>
+    <name>akka-actor</name>-->
+
     <properties>
         <spring.framework.version>3.1.0.RC1</spring.framework.version>
         <scala.version>2.9.1</scala.version>
-        <akka.version>2.0-SNAPSHOT</akka.version>
+        <akka.version>2.0-M1</akka.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
     <repositories>
+        <repository>
+        <id>akka.io</id><url>http://akka.io/releases/</url>
+    </repository>
         <repository>
             <id>org.springframework.maven.milestone</id>
             <name>Spring Maven Milestone Repository</name>
