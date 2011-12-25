@@ -1,0 +1,32 @@
+- support a component model (like TypedActors++) with Spring
+
+ @Actor
+ public class MyActor {
+
+    @Receive   // each method annotated with @Receive should be an Akka handler
+    public void handleOrders(@Payload Order order ){
+        // ...
+    }
+
+    @Receive
+    public void handleOrders (@Payload Object allMessages ){
+        // ...
+    }
+
+    @Autowired private ActorContext context ; // actor-local reference (a proxy)
+
+    @Transactional // this uses Akka's transactors to *transactionally* receive or send messages
+    @Receive
+    public void handleReceive( @Context ActorContext context , @Payload Order order ){
+        // ...
+    }
+
+    @Receive
+    public void handleReceive(@Self ActorRef selfReference, @Payload Order order ) { }
+
+
+ }
+
+- We should have a way to configure Akka as the configuration file permits using a Spring XML namespace
+- look into a Spring Integration adapter
+- look into what a Spring Integration Akka mailbox looks like
