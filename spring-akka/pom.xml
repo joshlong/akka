@@ -23,19 +23,14 @@
             <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
             <distribution>repo</distribution>
         </license>
-    </licenses>         <!--<modelVersion>4.0.0</modelVersion>
-    <groupId>com.typesafe.akka</groupId>
-    <artifactId>akka-actor</artifactId>
-    <packaging>jar</packaging>
-    <description>akka-actor</description>
-    <version>2.0-M1</version>
-    <name>akka-actor</name>-->
+    </licenses>
 
     <properties>
         <spring.framework.version>3.1.0.RC1</spring.framework.version>
         <scala.version>2.9.1</scala.version>
         <akka.version>2.0-M1</akka.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <spring.integration.framework.version>2.1.0.RC2</spring.integration.framework.version>
     </properties>
     <repositories>
         <repository>
@@ -130,9 +125,15 @@
         </dependency>
         <dependency>
             <groupId>org.springframework</groupId>
-            <artifactId>spring-jdbc</artifactId>
+            <artifactId>spring-orm</artifactId>
             <version>${spring.framework.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.integration</groupId>
+            <artifactId>spring-integration-core</artifactId>
+            <version>${spring.integration.framework.version}</version>
+        </dependency>
+
         <!-- Testing dependencies -->
         <dependency>
             <groupId>org.scalatest</groupId>

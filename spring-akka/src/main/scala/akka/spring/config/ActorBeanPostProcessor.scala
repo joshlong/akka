@@ -1,16 +1,80 @@
+package akka.spring {
+
+import config.{DelegatingActorContextFactoryBean, ActorBeanPostProcessor}
+import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory, BeanFactoryPostProcessor}
+import org.springframework.beans.factory.support.{GenericBeanDefinition, BeanDefinitionRegistry}
+
+/**
+ *
+ * This BFPP installs all the objects that you need to start using Spring with Akka
+ *
+ * @author Josh Long 
+ */
+class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
+
+
+  def registerBeanIfItDoesntExist[T](bdf: BeanDefinitionRegistry, clazz: Class[T], callback: (String, GenericBeanDefinition) => Unit) {
+    val namingFunction = (n: Class[_]) => {
+      n.getName.toLowerCase
+    }
+    bdf.getBeanDefinitionNames.find((beanDefinitionName: String) => {
+      val beanDef = bdf.getBeanDefinition(beanDefinitionName)
+      beanDef.getBeanClassName.equals(clazz.toString)
+    }).isDefined match {
+      case false => {
+        val beanDef = new GenericBeanDefinition()
+        beanDef.setBeanClass(clazz)
+        callback(namingFunction(clazz), beanDef)
+      }
+    }
+  }
+
+  protected def registerBeans(bdf: BeanDefinitionRegistry) {
+
+    // first register the BPP
+    registerBeanIfItDoesntExist(bdf, classOf[ActorBeanPostProcessor], (name: String, beanDefinition: GenericBeanDefinition) => {
+      bdf.registerBeanDefinition(name, beanDefinition)
+    })
+
+    registerBeanIfItDoesntExist(bdf, classOf[DelegatingActorContextFactoryBean], (name: String, beanDefinition: GenericBeanDefinition) => {
+      bdf.registerBeanDefinition(name, beanDefinition)
+    });
+
+  }
+
+  def postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
+    if (beanFactory.isInstanceOf[BeanDefinitionRegistry]) {
+      var registry: BeanDefinitionRegistry = beanFactory.asInstanceOf[BeanDefinitionRegistry]
+      registerBeans(registry)
+    }
+
+  }
+}
+
+}
+
 package akka.spring.config {
 
-import org.springframework.beans.factory.InitializingBean
-import org.springframework.util.Assert
-import org.springframework.beans.factory.config.BeanPostProcessor
 import akka.japi.Creator
 import reflect.BeanProperty
 import akka.actor._
 import akka.spring.config.util.{Argument, HandlerMetadata, ComponentReflectionUtilities}
 import collection.mutable.HashMap
+import org.aopalliance.intercept.{MethodInvocation, MethodInterceptor}
+import org.springframework.aop.framework.ProxyFactoryBean
+import org.springframework.util.{ClassUtils, Assert}
+import org.springframework.beans.factory.{BeanFactory, BeanFactoryAware, FactoryBean, InitializingBean}
+import org.springframework.beans.factory.config.BeanPostProcessor
 
 
 /**
+ *
+ * A simple Spring {@link BeanPostProcessor} that finds all beans that have the {@link Actor} stereotype annotation
+ * and inspects them for particular handler methods.
+ *
+ * TOOD it would be ideal if this could be built on top of the typed actor implementation.
+ *
+ *
  * @author Josh Long
  */
 class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
@@ -22,9 +86,9 @@ class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
 
   @BeanProperty var system: ActorSystem = ActorSystem()
 
-  @BeanProperty var props: Props = Props() // this is overrideable  use defaults for now
+  @BeanProperty var props: Props = Props()
 
-  private[this] def log(msg: String) {
+  private def log(msg: String) {
     Console.println(msg);
   }
 
@@ -55,6 +119,15 @@ class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
 }
 
 /**
+ * Holds the state for the current actor during an invocation 
+ */
+class ActorLocalStorage(var self: ActorRef, var context: ActorContext)
+
+object ActorLocalStorage {
+  val current = new ThreadLocal[ActorLocalStorage]();
+}
+
+/**
  * wrapper class for the Actor.
  */
 class DelegatingActor(delegate: AnyRef) extends Actor {
@@ -77,7 +150,6 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
     val c: ActorContext = this.context
     val s: ActorRef = this.self
 
-
     log("inside the doReceive method about to invoke a handler method " + this.handlers.length);
 
     // lets find the right handler method that accepts a payload of the same type as specified here
@@ -87,14 +159,17 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
       val mapOfArgs = new HashMap[Int, AnyRef]
 
       handler.payload.get match {
-        case null => throw new RuntimeException("You must have a paramter that accepts the payload of the message! ")
+        case null => throw new RuntimeException("You must have a parameter that accepts the payload of the message! ")
         case ar: Argument => {
           // build a map that takes integer arg poisitions as keys
           // then find the highest integer key, N
           // then iterate through, 0->N, and add the values for those keys to an Array
           // then use the array to invoke the handler receive method
-          Console.println("handler's payload class: " + ar.argumentType.getName + "; actual message class: " + msg.getClass.getName)
+
+          log("handler's payload class: " + ar.argumentType.getName + "; actual message class: " + msg.getClass.getName)
+
           if ((ar.argumentType).isAssignableFrom(msg.getClass)) {
+            // then this is the handler method we should call!
             mapOfArgs += ar.argumentPosition -> msg;
 
             handler.selfReference.getOrElse(null) match {
@@ -122,7 +197,15 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
             log(argsForInvocation.toString())
             // todo fix me
 
-            handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
+            try {
+
+              ActorLocalStorage.current.get() match {
+                case null => ActorLocalStorage.current.set(new ActorLocalStorage(s, c))
+              }
+              handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
+            } finally {
+              ActorLocalStorage.current.remove()
+            }
           }
         }
       }
@@ -131,10 +214,53 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
     });
   }
 
+
   protected def receive = {
     case e: AnyRef => doReceive(e)
   }
 }
+
+
+/**
+ * installs a {@link ActorContext} that is thread safe, delegating to the ActorContext associated with each Actor 
+ */
+class DelegatingActorContextFactoryBean extends FactoryBean[ActorContext] with BeanFactoryAware {
+
+  var cachedBeanFactory: BeanFactory = _
+
+  def getObject: ActorContext = {
+    val interfacesToProxy: Array[Class[_]] = Array(classOf[ActorContext])
+    val pf = new ProxyFactoryBean
+    pf.setProxyClassLoader(ClassUtils.getDefaultClassLoader)
+    pf.setProxyTargetClass(true)
+    pf.setProxyInterfaces(interfacesToProxy)
+    pf.addAdvice(new ActorLocalDelegatingActorContextHandler)
+    pf.setBeanFactory(this.cachedBeanFactory)
+    pf.getObject.asInstanceOf[ActorContext]
+  }
+
+  def getObjectType = classOf[ActorContext]
+
+  def isSingleton = true
+
+  def setBeanFactory(beanFactory: BeanFactory) {
+    this.cachedBeanFactory = beanFactory
+  }
+
+  private[this] class ActorLocalDelegatingActorContextHandler extends MethodInterceptor {
+    def invoke(invocation: MethodInvocation) =
+      invocation.getMethod.invoke(ActorLocalStorage.current.get().context, invocation.getArguments)
+  }
+
+}
+
+
+/**
+ * the idea is that this class will handle all the chores typically assumed of an {@link ActorContext}, except that
+ * it will delegate to a thread bound {@link ActorConitext}, which means that users can injects this 
+ * bean and call it without fear of it being correctly bound.
+ */
+
 
 }
 
