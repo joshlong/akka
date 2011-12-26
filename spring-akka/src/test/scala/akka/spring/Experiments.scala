@@ -1,18 +1,19 @@
 package akka.spring
 
 
-import akka.actor.{ActorRef, ActorSystem}
-
-import config.ActorBeanPostProcessor
+import config.util.Log
+import config.{DelegatingActorContextFactoryBean, ActorBeanPostProcessor}
 import javax.annotation.PostConstruct
-import org.springframework.context.annotation.{Configuration, Bean}
+import org.springframework.context.annotation.{AnnotationConfigApplicationContext, Configuration, Bean}
+import akka.actor.{ActorContext, ActorRef, ActorSystem}
+import org.springframework.beans.factory.annotation.Autowired
 
 
 case class Order(amount: Int)
 
 object Experiments extends App {
 
-  val system = ActorSystem()
+ /* val system = ActorSystem()
 
   val bfpp = new ActorBeanPostProcessor
 
@@ -24,7 +25,27 @@ object Experiments extends App {
 
   val ma: ActorRef = actor.asInstanceOf[ActorRef];
   ma ! Order(242)
+*/    
 
+  def spring () {
+    val ac = new AnnotationConfigApplicationContext()
+    ac.register(classOf[SimpleConfiguration])
+    ac.addBeanFactoryPostProcessor( new AkkaBeanFactoryPostProcessor)
+    ac.refresh()      
+    val actorRef = ac.getBean(classOf[ActorRef])
+    actorRef ! Order(22)
+  }
+
+
+
+  def actorContext()  {
+    val acfb = new DelegatingActorContextFactoryBean
+    val ac : ActorContext = acfb.getObject 
+    Log.log("analysing the created actor context")
+    ac.self
+  } 
+ 
+  spring()
 
   ///val delegatingActor = bfpp.postProcessBeforeInitialization( myActor, "myActor").asInstanceOf[akka.actor.ActorRef]
   /*  val applicationContext = new AnnotationConfigApplicationContext
@@ -35,28 +56,23 @@ object Experiments extends App {
 @akka.spring.Actor
 class MyActor {
 
+  @Autowired 
+  var actorContext :ActorContext = _
+  
   @Receive
   def handleOrder(@Self self: ActorRef, @Payload o: Order) {
-    Console.println("received an order " + o.toString + " for the 'self' " + self.toString())
+    
+    Log.log ("i can call the ActorContext " + this.actorContext.self)
+    Log.log("received an order " + o.toString + " for the 'self' " + self.toString())
   }
-
-  @PostConstruct
-  def setup() {
-    //    Console.println("PostConstruct(): actorSystem is " +
-    //      (if (this.system != null) "not" else "") + " null");
-  }
-
-  // protected def receive:Receive =>
-  /* @Receive
-  def aCustomReceiveMethod(e:AnyRef) : akka.actor.Actor.Receive = {
-    case Order(amount) ⇒ Console.println("Order received!");
-    case e ⇒ Console.println("something else received")
-  }*/
+ 
 }
 
 @Configuration
 class SimpleConfiguration {
+  
+  @Bean def actorSystem = ActorSystem()
 
-  @Bean def actorBpp = new ActorBeanPostProcessor()
+  @Bean def myActor = new MyActor 
 
 }
