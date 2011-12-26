@@ -138,6 +138,17 @@ private class HandlerResolvingMethodCallback(annotation: Class[_ <: Annotation])
       })
 
       this._metadata = hm :: this._metadata;
+
+      /**
+       *
+       * todo Add this support for fire-n-forget, Futures, and this akka.japi.Option/scala.Option combo, as well.
+       *
+      def isOneWay = method.getReturnType == java.lang.Void.TYPE
+    def returnsFuture_? = classOf[Future[_]].isAssignableFrom(method.getReturnType)
+    def returnsJOption_? = classOf[akka.japi.Option[_]].isAssignableFrom(method.getReturnType)
+    def returnsOption_? = classOf[scala.Option[_]].isAssignableFrom(method.getReturnType)
+       */
+
     }
   }
 
