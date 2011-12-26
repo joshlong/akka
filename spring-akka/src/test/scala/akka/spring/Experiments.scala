@@ -33,7 +33,7 @@ object Experiments extends App {
     ac.addBeanFactoryPostProcessor( new AkkaBeanFactoryPostProcessor)
     ac.refresh()      
     val actorRef = ac.getBean(classOf[ActorRef])
-    actorRef ! Order(22)
+    actorRef ! Order(24)
   }
 
 
