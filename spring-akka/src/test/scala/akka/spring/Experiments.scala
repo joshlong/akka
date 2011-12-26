@@ -1,9 +1,9 @@
 package akka.spring
 
 
+import akka.spring.config.util.Log._
 import config.util.Log
-import config.{DelegatingActorContextFactoryBean, ActorBeanPostProcessor}
-import javax.annotation.PostConstruct
+import config.DelegatingActorContextFactoryBean
 import org.springframework.context.annotation.{AnnotationConfigApplicationContext, Configuration, Bean}
 import akka.actor.{ActorContext, ActorRef, ActorSystem}
 import org.springframework.beans.factory.annotation.Autowired
@@ -41,7 +41,7 @@ object Experiments extends App {
   def actorContext()  {
     val acfb = new DelegatingActorContextFactoryBean
     val ac : ActorContext = acfb.getObject 
-    Log.log("analysing the created actor context")
+    log("analysing the created actor context")
     ac.self
   } 
  

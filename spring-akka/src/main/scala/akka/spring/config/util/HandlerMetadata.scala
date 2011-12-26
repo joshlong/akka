@@ -1,12 +1,38 @@
 package akka.spring.config.util
 
-import reflect.BeanProperty
 import java.lang.reflect.Method
 
 
 class HandlerMetadata {
-  @BeanProperty var method: Method = _
-  @BeanProperty var selfReference: Option[Argument] = None
-  @BeanProperty var actorContextReference: Option[Argument] = None
-  @BeanProperty var payload: Option[Argument] = None
+
+  var _method: Method = _
+  var _selfReference: Option[Argument] = None
+  var _actorContextReference: Option[Argument] = None
+  var _payload: Option[Argument] =  None
+
+  def method = this._method
+
+  def selfReference = this._selfReference
+
+  def actorContextReference = this._actorContextReference
+
+  def payload = this._payload
+
+  def method_=(m: Method) {
+    this._method = m
+  }
+
+  def selfReference_=(arg: Option[Argument]) {
+    this._selfReference = arg
+  }
+
+
+  def actorContextReference_=(arg: Option[Argument]) {
+    this._actorContextReference = arg
+  }
+
+  def payload_=(arg: Option[Argument]) {
+    this._payload = arg
+  }
+
 }
