@@ -1,4 +1,4 @@
-package akka.spring.config.util
+package akka.spring.implementation
 
 import java.lang.reflect.Method
 

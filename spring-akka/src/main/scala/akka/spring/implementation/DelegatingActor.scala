@@ -1,9 +1,8 @@
-package akka.spring.config
+package akka.spring.implementation
 
 import akka.actor.{ActorRef, ActorContext, Actor}
-import util.Log._
+import akka.spring.config.util.Log._
 import collection.mutable.HashMap
-import akka.spring.config.util.{Argument, HandlerMetadata}
 import org.springframework.util.ReflectionUtils
 import java.lang.reflect.Method
 import java.lang.annotation.Annotation
@@ -20,7 +19,8 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
   protected def doReceive(msg: AnyRef) {
     val c: ActorContext = this.context
     val s: ActorRef = this.self
-    log("inside the doReceive method about to invoke a handler method " + this.handlers.length);
+    
+    log( String.format("about to invoke handler with message '%s'", msg.toString) );
 
     this.handlers.foreach((handler: HandlerMetadata) => {
 
@@ -29,13 +29,12 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
       handler.payload.get match {
         case null => throw new RuntimeException("You must have a parameter that accepts the payload of the message! ")
         case ar: Argument => {
-          // build a map that takes integer arg poisitions as keys
+          // build a map that takes integer arg positions as keys
           // then find the highest integer key, N
           // then iterate through, 0->N, and add the values for those keys to an Array
           // then use the array to invoke the handler receive method
 
-          log("handler's payload class: " + ar.argumentType.getName + "; actual message class: " + msg.getClass.getName)
-
+          // when a message arrives, is it of the same class as this handler's @Payload argument? If so, then try to further qualify 
           if ((ar.argumentType).isAssignableFrom(msg.getClass)) {
             // then this is the handler method we should call!
             mapOfArgs += ar.argumentPosition -> msg;
@@ -62,15 +61,16 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
             })
 
             val argsForInvocation = args.reverse;
-            log(argsForInvocation.toString())
-            // todo fix me
-
             try {
-
+              // todo insert logic for transactions here 
               ActorLocalStorage.current.get() match {
                 case null => ActorLocalStorage.current.set(new ActorLocalStorage(s, c))
               }
+              
+              log( String.format( "about to invoke a handler %s with arguments %s", this.delegate.toString, argsForInvocation.toString()))
+              
               handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
+              
             } finally {
               ActorLocalStorage.current.remove()
             }
@@ -98,22 +98,24 @@ private class HandlerResolvingMethodCallback(annotation: Class[_ <: Annotation])
     val paramTypes: Array[Class[_]] = m.getParameterTypes
     val paramAnnotations: Array[Array[Annotation]] = m.getParameterAnnotations
     var ctr: Int = 0
-
+    
     paramTypes.foreach((c: Class[_]) => {
-
-      log("we have found parameter type : " + c.getName + "; the annotation type were looking for is " + annotationType.getName)
+      
       val annotationsForParam: Array[Annotation] = paramAnnotations(ctr)
+      
       val matched: Option[Annotation] = annotationsForParam.find((a: Annotation) => {
         annotationType.isAssignableFrom(a.getClass)
-      })
+      });
+      
       matched.getOrElse(null) match {
         case null => null
         case a: T => {
-          log("found a paramter with an annotation of type " + annotationType.getName)
           callback(ctr, c, me, a)
         }
       }
+      
       ctr += 1
+      
     });
   }
 
@@ -122,6 +124,10 @@ private class HandlerResolvingMethodCallback(annotation: Class[_ <: Annotation])
 
       val hm = new HandlerMetadata()
       hm.method = m
+
+      doWithParameterType(m, hm, classOf[akka.spring.Context], (argPosition: Int, argType: Class[_], handlerMetadData: HandlerMetadata, annotationForParam: akka.spring.Context) => {
+        hm.actorContextReference = Some(new Argument(argType, argPosition, annotationForParam))
+      });
 
       doWithParameterType(m, hm, classOf[akka.spring.Payload], (argPosition: Int, argType: Class[_], handlerMetadData: HandlerMetadata, annotationForParam: akka.spring.Payload) => {
         hm.payload = Some(new Argument(argType, argPosition, annotationForParam))

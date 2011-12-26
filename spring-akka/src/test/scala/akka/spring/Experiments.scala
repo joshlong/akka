@@ -1,50 +1,46 @@
 package akka.spring
 
-
 import akka.spring.config.util.Log._
 import config.util.Log
-import config.DelegatingActorContextFactoryBean
 import org.springframework.context.annotation.{AnnotationConfigApplicationContext, Configuration, Bean}
 import akka.actor.{ActorContext, ActorRef, ActorSystem}
 import org.springframework.beans.factory.annotation.Autowired
 
 
-case class Order(amount: Int)
+
 
 object Experiments extends App {
 
- /* val system = ActorSystem()
+  /* val system = ActorSystem()
+  
+    val bfpp = new ActorBeanPostProcessor
+  
+    val bn = "myactor";
+  
+    var actor: AnyRef = new MyActor
+    actor = bfpp.postProcessBeforeInitialization(actor, bn)
+    actor = bfpp.postProcessAfterInitialization(actor, bn)
+  
+    val ma: ActorRef = actor.asInstanceOf[ActorRef];
+    ma ! Order(242)
+  */
 
-  val bfpp = new ActorBeanPostProcessor
-
-  val bn = "myactor";
-
-  var actor: AnyRef = new MyActor
-  actor = bfpp.postProcessBeforeInitialization(actor, bn)
-  actor = bfpp.postProcessAfterInitialization(actor, bn)
-
-  val ma: ActorRef = actor.asInstanceOf[ActorRef];
-  ma ! Order(242)
-*/    
-
-  def spring () {
+  def spring() {
     val ac = new AnnotationConfigApplicationContext()
     ac.register(classOf[SimpleConfiguration])
-    ac.addBeanFactoryPostProcessor( new AkkaBeanFactoryPostProcessor)
-    ac.refresh()      
+    ac.addBeanFactoryPostProcessor(new AkkaBeanFactoryPostProcessor)
+    ac.refresh()
+
     val actorRef = ac.getBean(classOf[ActorRef])
-    actorRef ! Order(24)
+
+    val o = Order(24)
+    val sc = ShoppingCart(List(o))
+
+    actorRef ! sc
+    actorRef ! o
+
   }
 
-
-
-  def actorContext()  {
-    val acfb = new DelegatingActorContextFactoryBean
-    val ac : ActorContext = acfb.getObject 
-    log("analysing the created actor context")
-    ac.self
-  } 
- 
   spring()
 
   ///val delegatingActor = bfpp.postProcessBeforeInitialization( myActor, "myActor").asInstanceOf[akka.actor.ActorRef]
@@ -56,23 +52,40 @@ object Experiments extends App {
 @akka.spring.Actor
 class MyActor {
 
-  @Autowired 
-  var actorContext :ActorContext = _
+  @Autowired
+  var actorContext: ActorContext = _
+
+  @Receive
+  def handleShoppingCart (@Payload sc:ShoppingCart){
+    Log.log("shopping cart:"+ sc.toString)
+  }
   
   @Receive
-  def handleOrder(@Self self: ActorRef, @Payload o: Order) {
-    
-    Log.log ("i can call the ActorContext " + this.actorContext.self)
+  def handleOrder(@Self self: ActorRef,
+                  @Context ac: ActorContext,
+                  @Payload o: Order) {
+
+    Log.log("i can call the ActorContext " + this.actorContext.self.toString())
     Log.log("received an order " + o.toString + " for the 'self' " + self.toString())
   }
- 
+
 }
 
 @Configuration
 class SimpleConfiguration {
-  
+
   @Bean def actorSystem = ActorSystem()
 
-  @Bean def myActor = new MyActor 
+  @Bean def myActor = new MyActor
 
 }
+
+case class Order(amount: Int) 
+
+case class ShoppingCart(orders: List[Order])
+
+/*
+object Free {
+  val shoppingCart = new ShoppingCart
+  shoppingCart.orders =  { new Order(242) :: shoppingCart.orders };
+}*/

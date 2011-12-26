@@ -1,16 +1,10 @@
 package akka.spring
 
 import akka.spring.config.util.Log._
-import config.{ActorSystemFactoryBean, DelegatingActorContextFactoryBean, ActorBeanPostProcessor}
+import implementation.{ActorBeanPostProcessor, ActorSystemFactoryBean, DelegatingActorContextFactoryBean}
 import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory, BeanFactoryPostProcessor}
 import org.springframework.beans.factory.support.{GenericBeanDefinition, BeanDefinitionRegistry}
 
-/**
- *
- * This BFPP installs all the objects that you need to start using Spring with Akka
- *
- * @author Josh Long
- */
 class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
 
   def registerBeanIfItDoesntExist[T](bdf: BeanDefinitionRegistry, clazz: Class[T], callback: (String, GenericBeanDefinition) => Unit) {

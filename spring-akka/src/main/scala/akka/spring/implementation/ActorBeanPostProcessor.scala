@@ -1,6 +1,4 @@
-package akka.spring.config
-
-
+package akka.spring.implementation
 import akka.spring.config.util.Log.log
 
 import akka.japi.Creator
@@ -10,14 +8,6 @@ import org.springframework.beans.factory.InitializingBean
 import org.springframework.beans.factory.config.BeanPostProcessor
 
 
-/**
- *
- * A simple Spring BeanPostProcessor that finds all beans that have the Actor stereotype annotation
- * and inspects them for particular handler methods.
- *
- * TOOD it would be ideal if this could be built on top of the typed actor implementation.
- *
- */
 class ActorBeanPostProcessor extends BeanPostProcessor with InitializingBean {
 
   type A = akka.actor.Actor

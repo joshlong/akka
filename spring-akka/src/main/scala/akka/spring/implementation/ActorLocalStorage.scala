@@ -1,4 +1,4 @@
-package akka.spring.config
+package akka.spring.implementation
 
 import akka.actor.{ActorContext, ActorRef}
 

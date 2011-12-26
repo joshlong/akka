@@ -1,6 +1,5 @@
-package akka.spring.config.util
 
-
+package akka.spring.implementation;
 import java.lang.annotation.Annotation
 
 /**
@@ -32,6 +31,7 @@ class Argument(at: Class[_], ap: Int, aa: Annotation) {
   def argumentAnnotation_(a: Annotation) {
     this._argumentAnnotation = a
   }
+
 
 
 }
