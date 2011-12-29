@@ -44,11 +44,3 @@ private class ActorReferenceInjectedElement(as: ActorSystem, member: Member, pd:
   }
 }
 
-
-/*
- //  Provides a reference to a [[akka.actor.ActorSystem]] for all sites where [[akka.spring.ActorRef]] is found.
-class ActorReferenceAnnotationReferenceProvider(as: ActorSystem) extends ReferenceProvidingPostProcessor[akka.actor.ActorRef, akka.spring.ActorRef](classOf[akka.spring.ActorRef], (arAnnotationReference: akka.spring.ActorRef) => {
-  val selectorString = arAnnotationReference.value()
-  as.actorFor(selectorString)
-})
-*/

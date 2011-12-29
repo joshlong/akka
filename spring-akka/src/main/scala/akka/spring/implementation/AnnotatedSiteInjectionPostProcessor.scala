@@ -9,6 +9,7 @@ import org.springframework.beans.PropertyValues
 import java.util.LinkedList
 import java.lang.{String, Class}
 import java.lang.reflect.{Method, Field, Member, Modifier}
+import org.apache.commons.logging.LogFactory
 
 /**
  *
@@ -18,10 +19,12 @@ import java.lang.reflect.{Method, Field, Member, Modifier}
  *
  * @author Josh Long
  */
-class AnnotatedSiteInjectionPostProcessor[T <: AnyRef, X <: java.lang.annotation.Annotation](annotation: Class[X],
-                                                                                             fieldMetadataCallback: (X, Field) => InjectionMetadata.InjectedElement,
-                                                                                             methodMetadataCallback: (X, Method) => InjectionMetadata.InjectedElement)
+class AnnotatedSiteInjectionPostProcessor [T <: AnyRef, X <: java.lang.annotation.Annotation]
+  (annotation: Class[X], fieldMetadataCallback: (X, Field) => InjectionMetadata.InjectedElement, methodMetadataCallback: (X, Method) => InjectionMetadata.InjectedElement)
   extends InstantiationAwareBeanPostProcessor with MergedBeanDefinitionPostProcessor {
+  
+  
+  val logger = LogFactory.getLog(getClass)
 
   def postProcessBeforeInstantiation(beanClass: Class[_], beanName: String) = null
 
@@ -40,7 +43,11 @@ class AnnotatedSiteInjectionPostProcessor[T <: AnyRef, X <: java.lang.annotation
 
   def postProcessPropertyValues(pvs: PropertyValues, pds: Array[PropertyDescriptor], bean: AnyRef, beanName: String): PropertyValues = {
     try {
-      findInjectionSiteMetadata(bean.getClass).inject(bean, beanName, pvs)
+     // var s = ""
+     // pds.foreach( st => s += st.getWriteMethod.toString )
+      logger.info("about to attempt injection for class "+ bean.getClass )
+      val metadata = findInjectionSiteMetadata(bean.getClass)
+      metadata.inject(bean, beanName, pvs)
     } catch {
       case ex: Throwable =>
         throw new BeanCreationException(beanName, "Injection of persistence dependencies failed", ex)
@@ -58,7 +65,6 @@ class AnnotatedSiteInjectionPostProcessor[T <: AnyRef, X <: java.lang.annotation
 
   private def findInjectionSiteMetadata(clazz: Class[_]): InjectionMetadata = {
 
-    val elements = new LinkedList[InjectionMetadata.InjectedElement]
     val currElements = new LinkedList[InjectionMetadata.InjectedElement]
 
     doWithMembers[Field](clazz, f => !Modifier.isStatic(f.getModifiers) && f.getAnnotation(annotation) != null, c => c.getDeclaredFields, f => {
@@ -73,7 +79,7 @@ class AnnotatedSiteInjectionPostProcessor[T <: AnyRef, X <: java.lang.annotation
       currElements.add(injectedElement)
     })
 
-    new InjectionMetadata(clazz, elements)
+    new InjectionMetadata(clazz, currElements)
 
   }
 
