@@ -7,10 +7,21 @@ import org.springframework.util.ReflectionUtils
 import org.springframework.util.ReflectionUtils.{MethodFilter, MethodCallback, FieldFilter, FieldCallback}
 import org.springframework.beans.BeanUtils
 import java.lang.reflect.{AccessibleObject, Method, Field}
+import org.springframework.beans.factory.annotation.InjectionMetadata
+import org.springframework.beans.factory.support.{MergedBeanDefinitionPostProcessor, RootBeanDefinition}
 
 
 // provides a default, algorithmic approach to injecting references qualified by an annotation
-class ReferenceProvidingPostProcessor[T <: AnyRef, X <: java.lang.annotation.Annotation](annotation: Class[X], factory: (X) => T) extends BeanPostProcessor {
+class ReferenceProvidingPostProcessor [T <: AnyRef, X <: java.lang.annotation.Annotation] (annotation: Class[X], factory: (X) => T) extends BeanPostProcessor {
+
+  private def findActorRefMetadata( beanType : Class[_]) : InjectionMetadata = null
+
+  def postProcessMergedBeanDefinition(beanDefinition: RootBeanDefinition, beanType: Class[_], beanName: String) {
+    if (beanType != null) {
+      var metadata : InjectionMetadata = findActorRefMetadata(beanType)
+      metadata.checkConfigMembers(beanDefinition)
+    }
+  }
 
   val fieldFilter = new FieldFilter {
     def matches(f: Field) = f.getAnnotation(annotation) != null

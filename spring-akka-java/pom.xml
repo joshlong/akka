@@ -5,7 +5,7 @@
     <groupId>com.typesafe.akka</groupId>
     <artifactId>spring-akka-java</artifactId>
     <packaging>jar</packaging>
-    <version>0.2.RELEASE-SNAPSHOT</version>
+    <version>2.0-M1</version>
     <name>Akka support for Spring</name>
     <inceptionYear>2011</inceptionYear>
 
@@ -24,24 +24,26 @@
             <distribution>repo</distribution>
         </license>
     </licenses>
+
     <properties>
         <spring.framework.version>3.1.0.RC1</spring.framework.version>
         <scala.version>2.9.1</scala.version>
         <akka.version>2.0-M1</akka.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <spring.integration.framework.version>2.1.0.RC2</spring.integration.framework.version>
     </properties>
     <repositories>
-          <repository>
-               <id>org.springframework.maven.milestone</id>
-               <name>Spring Maven Milestone Repository</name>
-               <url>http://maven.springframework.org/milestone</url>
-               <releases>
-                   <enabled>true</enabled>
-               </releases>
-               <snapshots>
-                   <enabled>true</enabled>
-               </snapshots>
-           </repository>
+        <repository>
+            <id>org.springframework.maven.milestone</id>
+            <name>Spring Maven Milestone Repository</name>
+            <url>http://maven.springframework.org/milestone</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>true</enabled>
+            </snapshots>
+        </repository>
         <repository>
             <id>scala-tools.org</id>
             <name>Scala-tools Maven2 Repository</name>
@@ -63,23 +65,16 @@
             <artifactId>scala-library</artifactId>
             <version>${scala.version}</version>
         </dependency>
-
-        <dependency>
-            <groupId>com.typesafe.akka</groupId>
-            <artifactId>spring-akka-java</artifactId>
-            <version>0.2.RELEASE-SNAPSHOT</version>
-        </dependency>
-        <dependency>
-            <groupId>com.typesafe.akka</groupId>
-            <artifactId>akka-remote</artifactId>
-            <version>${akka.version}</version>
-        </dependency>
         <dependency>
             <groupId>com.typesafe.akka</groupId>
             <artifactId>akka-actor</artifactId>
             <version>${akka.version}</version>
         </dependency>
-
+        <dependency>
+            <groupId>javax.inject</groupId>
+            <artifactId>javax.inject</artifactId>
+            <version>1</version>
+        </dependency>
         <dependency>
             <groupId>org.scalaj</groupId>
             <artifactId>scalaj-collection_${scala.version}</artifactId>
@@ -93,9 +88,15 @@
         </dependency>
         <dependency>
             <groupId>org.springframework</groupId>
-            <artifactId>spring-jdbc</artifactId>
+            <artifactId>spring-orm</artifactId>
             <version>${spring.framework.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.integration</groupId>
+            <artifactId>spring-integration-core</artifactId>
+            <version>${spring.integration.framework.version}</version>
+        </dependency>
+
         <!-- Testing dependencies -->
         <dependency>
             <groupId>org.scalatest</groupId>
@@ -110,16 +111,18 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-<build>
 
-     <plugins>
-      <plugin>
-        <artifactId>maven-compiler-plugin</artifactId>
-        <configuration>
-          <source>1.5</source>
-          <target>1.5</target>
-        </configuration>
-      </plugin>
-    </plugins>
-</build>
+
+    <build>
+
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>1.5</source>
+                    <target>1.5</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

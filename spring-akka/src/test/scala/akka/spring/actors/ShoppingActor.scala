@@ -10,7 +10,7 @@ class ShoppingActor {
 
   @Autowired var actorContext: ActorContext = _
 
-  @akka.spring.ActorRef("noisyActor") var actorRef: akka.actor.ActorRef = _
+  @akka.spring.ActorReference ("noisyActor") var actorRef: akka.actor.ActorRef = _
 
   val logger = LogFactory.getLog(getClass)
 

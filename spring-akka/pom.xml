@@ -5,7 +5,7 @@
     <groupId>com.typesafe.akka</groupId>
     <artifactId>spring-akka</artifactId>
     <packaging>jar</packaging>
-    <version>0.2.RELEASE-SNAPSHOT</version>
+    <version>2.0-M1</version>
     <name>Akka support for Spring</name>
     <inceptionYear>2011</inceptionYear>
 
@@ -97,7 +97,7 @@
         <dependency>
             <groupId>com.typesafe.akka</groupId>
             <artifactId>spring-akka-java</artifactId>
-            <version>0.2.RELEASE-SNAPSHOT</version>
+            <version>${akka.version}</version>
         </dependency>
         <dependency>
             <groupId>com.typesafe.akka</groupId>
