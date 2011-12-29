@@ -5,12 +5,31 @@ import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory
 import org.springframework.beans.factory.support.{BeanDefinitionBuilder, BeanDefinitionRegistry}
 import java.lang.{Class, String}
 
-/// todo support @ActorRef( selectorString)
-/// todo support Futures and so on
 
+// todo support Futures and so on
+
+/**
+ *
+ * This class installs all the support for working with Akka from the Spring component model, including support
+ * for injection of other Actors with the [[akka.spring.ActorReference]] annotation,
+ * the creation of Akka Actors using the [[akka.spring.Actor]] annotation and the designation of 
+ * Actor handler methods with the [[akka.spring.Receive]] annotation.
+ *
+ * This [[org.springframework.beans.factory.config.BeanFactoryPostProcessor]] does not install the Akka
+ * transaction manager, an implementation of [[org.springframework.transaction.PlatformTransactionManager]], but
+ * you can easily by simply instantiating it and decorating your [[akka.actor.Actor]] actor handler methods with
+ * [[org.springframework.transaction.annotation.Transactional]].
+ * 
+ * @author Josh Long 
+ */
 class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
-  //with MergedBeanDefinitionPostProcessor {
 
+  def postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
+    if (beanFactory.isInstanceOf[BeanDefinitionRegistry]) {
+      val registry: BeanDefinitionRegistry = beanFactory.asInstanceOf[BeanDefinitionRegistry]
+      registerBeans(registry)
+    }
+  }
 
   private def registerBeanIfItDoesNotExist[T](beanDefinitionRegistry: BeanDefinitionRegistry, clazz: Class[T], callback: (String, BeanDefinitionBuilder) => Unit): String = {
 
@@ -37,12 +56,12 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
   private def registerBeans(beanDefinitionRegistry: BeanDefinitionRegistry) {
 
     // register the ActorSystem
-    val as = registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorSystemFactoryBean], (name: String, beanDefinition: BeanDefinitionBuilder) => {
+    val actorSystemBeanName = registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorSystemFactoryBean], (name: String, beanDefinition: BeanDefinitionBuilder) => {
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
     registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorReferenceAnnotatedSiteInjectPostProcessor], (name: String, beanDefinition: BeanDefinitionBuilder) => {
-      beanDefinition.addConstructorArgReference(as)
+      beanDefinition.addConstructorArgReference(actorSystemBeanName)
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
@@ -53,16 +72,9 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
 
     // register the component model mechanism itself
     registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorBeanPostProcessor], (name: String, beanDefinition: BeanDefinitionBuilder) => {
-      beanDefinition.addConstructorArgReference(as)
+      beanDefinition.addConstructorArgReference(actorSystemBeanName)
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
-  }
-
-  def postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
-    if (beanFactory.isInstanceOf[BeanDefinitionRegistry]) {
-      val registry: BeanDefinitionRegistry = beanFactory.asInstanceOf[BeanDefinitionRegistry]
-      registerBeans(registry)
-    }
   }
 
 }
