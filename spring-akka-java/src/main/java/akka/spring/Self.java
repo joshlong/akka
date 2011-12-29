@@ -6,7 +6,7 @@ import java.lang.annotation.*;
 
 
 /**
- * Annotation that signals that a reference to the "self" ActorRef should be specified
+ * Annotation that signals that a reference to the "self" ActorReference should be specified
  *
  * @author Josh Long
  */

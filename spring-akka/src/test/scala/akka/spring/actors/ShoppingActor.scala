@@ -1,14 +1,16 @@
 package akka.spring.actors
 
-import akka.spring.{Context, Self, Payload, Receive}
 import org.springframework.beans.factory.annotation.Autowired
 import org.apache.commons.logging.LogFactory
-import akka.actor.{ActorRef, ActorContext}
+import akka.actor.{ActorRef => AR, ActorContext}
+import akka.spring._
 
 @akka.spring.Actor("shoppingActor")
 class ShoppingActor {
 
   @Autowired var actorContext: ActorContext = _
+
+  @akka.spring.ActorRef("noisyActor") var actorRef: akka.actor.ActorRef = _
 
   val logger = LogFactory.getLog(getClass)
 
@@ -18,7 +20,7 @@ class ShoppingActor {
   }
 
   @Receive
-  def handleOrder(@Self self: ActorRef,
+  def handleOrder(@Self self: AR,
                   @Context ac: ActorContext,
                   @Payload o: Order) {
 

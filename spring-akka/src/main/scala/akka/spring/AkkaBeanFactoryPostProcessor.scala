@@ -4,6 +4,10 @@ import implementation._
 import org.springframework.beans.factory.support.{BeanDefinitionBuilder, BeanDefinitionRegistry}
 import java.lang.String
 import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory, BeanFactoryPostProcessor}
+import akka.actor.ActorSystem
+
+/// todo support @ActorRef( selectorString)
+/// todo support Futures and so on
 
 class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
 
@@ -36,6 +40,11 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
+    registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorReferenceAnnotationReferenceProvider], (name: String, beanDefinition: BeanDefinitionBuilder) => {
+      beanDefinition.addConstructorArgReference(as)
+      beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
+    })
+
     // register the thread safe ActorContext
     registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[DelegatingActorContextFactoryBean], (name: String, beanDefinition: BeanDefinitionBuilder) => {
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
@@ -54,6 +63,13 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
       registerBeans(registry)
     }
   }
+
 }
 
-class ActorRefReferenceProvidingPostProcessor () extends ReferenceProvidingPostProcessor( classOf[akka.spring.ActorRef] )
+/**
+ * Provides a reference to a [[akka.actor.ActorSystem]] for all sites where [[akka.spring.ActorRef]] is found.
+ */
+class ActorReferenceAnnotationReferenceProvider(as: ActorSystem) extends ReferenceProvidingPostProcessor[akka.actor.ActorRef, akka.spring.ActorRef](classOf[akka.spring.ActorRef], (arAnnotationReference: akka.spring.ActorRef) => {
+  val selectorString = arAnnotationReference.value()
+  as.actorFor(selectorString)
+})
