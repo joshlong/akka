@@ -1,54 +1,57 @@
 package akka.spring
 
-import akka.spring.config.util.Log._
-import implementation.{ActorBeanPostProcessor, ActorSystemFactoryBean, DelegatingActorContextFactoryBean}
+import implementation._
+import org.springframework.beans.factory.support.{BeanDefinitionBuilder, BeanDefinitionRegistry}
+import java.lang.String
 import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory, BeanFactoryPostProcessor}
-import org.springframework.beans.factory.support.{GenericBeanDefinition, BeanDefinitionRegistry}
 
 class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
 
-  def registerBeanIfItDoesntExist[T](bdf: BeanDefinitionRegistry, clazz: Class[T], callback: (String, GenericBeanDefinition) => Unit) {
-    val namingFunction = (n: Class[_]) => {
-      n.getName.toLowerCase
-    }
-    bdf.getBeanDefinitionNames.find((beanDefinitionName: String) => {
-      val beanDef = bdf.getBeanDefinition(beanDefinitionName)
+  private def registerBeanIfItDoesNotExist[T](beanDefinitionRegistry: BeanDefinitionRegistry, clazz: Class[T], callback: (String, BeanDefinitionBuilder) => Unit): String = {
+
+    var currentBeanName: String = null
+    var beanName: String = null
+    val namingFunction = (clazzToGenerateANameFor: Class[_]) => clazzToGenerateANameFor.getName.toLowerCase
+
+    beanDefinitionRegistry.getBeanDefinitionNames.find((beanDefinitionName: String) => {
+      currentBeanName = beanDefinitionName
+      val beanDef = beanDefinitionRegistry.getBeanDefinition(beanDefinitionName)
       val beanClassName = beanDef.getBeanClassName
       beanClassName != null && beanClassName.equals(clazz.toString)
     }).isDefined match {
+      case true => beanName = currentBeanName
       case false => {
-        val beanDef = new GenericBeanDefinition()
-        beanDef.setBeanClass(clazz)
-        callback(namingFunction(clazz), beanDef)
+        beanName = namingFunction(clazz)
+        val bdf = BeanDefinitionBuilder.genericBeanDefinition(clazz)
+        callback(beanName, bdf)
       }
     }
-
+    beanName
   }
 
-  protected def registerBeans(bdf: BeanDefinitionRegistry) {
+  private def registerBeans(beanDefinitionRegistry: BeanDefinitionRegistry) {
 
-    // then register the thread safe ActorContext
-    registerBeanIfItDoesntExist(bdf, classOf[DelegatingActorContextFactoryBean], (name: String, beanDefinition: GenericBeanDefinition) => {
-      bdf.registerBeanDefinition(name, beanDefinition)
-    });
-
-    // then register the ActorSystem
-    registerBeanIfItDoesntExist(bdf, classOf[ActorSystemFactoryBean], (name: String, beanDef: GenericBeanDefinition) => {
-      bdf.registerBeanDefinition(name, beanDef)
+    // register the ActorSystem
+    val as = registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorSystemFactoryBean], (name: String, beanDefinition: BeanDefinitionBuilder) => {
+      beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
-    // first register the BPP
-    registerBeanIfItDoesntExist(bdf, classOf[ActorBeanPostProcessor], (name: String, beanDefinition: GenericBeanDefinition) => {
-      bdf.registerBeanDefinition(name, beanDefinition)
+    // register the thread safe ActorContext
+    registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[DelegatingActorContextFactoryBean], (name: String, beanDefinition: BeanDefinitionBuilder) => {
+      beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
+    })
+
+    // register the component model mechanism itself
+    registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorBeanPostProcessor], (name: String, beanDefinition: BeanDefinitionBuilder) => {
+      beanDefinition.addConstructorArgReference(as)
+      beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
   }
 
   def postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
-    log("inside the " + getClass.getName)
     if (beanFactory.isInstanceOf[BeanDefinitionRegistry]) {
       val registry: BeanDefinitionRegistry = beanFactory.asInstanceOf[BeanDefinitionRegistry]
       registerBeans(registry)
     }
-
   }
 }

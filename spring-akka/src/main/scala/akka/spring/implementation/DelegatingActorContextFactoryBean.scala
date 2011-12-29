@@ -1,13 +1,16 @@
 package akka.spring.implementation
 
-import akka.actor.ActorContext
 import org.springframework.beans.factory.{BeanFactory, BeanFactoryAware, FactoryBean}
 import org.springframework.aop.framework.ProxyFactoryBean
 import org.springframework.util.ClassUtils
 import org.aopalliance.intercept.{MethodInvocation, MethodInterceptor}
-import akka.spring.config.util.Log
+import akka.actor.{ActorRef, ActorContext}
+import org.apache.log4j.Logger
+import org.apache.commons.logging.LogFactory
 
 class DelegatingActorContextFactoryBean extends FactoryBean[ActorContext] with BeanFactoryAware {
+
+  val logger = LogFactory.getLog(getClass)
 
   var cachedBeanFactory: BeanFactory = _
 
@@ -33,7 +36,7 @@ class DelegatingActorContextFactoryBean extends FactoryBean[ActorContext] with B
     def invoke(invocation: MethodInvocation): AnyRef = {
       val actorContext = ActorLocalStorage.current.get().context
       val args = invocation.getArguments
-      Log.log("invoking "+getClass+ "#"+ invocation.getMethod.getName + " with arguments "+ args.toString)
+      logger.info( "invoking "+getClass+ "#"+ invocation.getMethod.getName + " with arguments "+ args.toString)
       invocation.getMethod.invoke(actorContext, args : _* )
     }
   }

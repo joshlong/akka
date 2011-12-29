@@ -1,14 +1,17 @@
 package akka.spring.implementation
 
 import akka.actor.{ActorRef, ActorContext, Actor}
-import akka.spring.config.util.Log._
 import collection.mutable.HashMap
 import org.springframework.util.ReflectionUtils
 import java.lang.reflect.Method
 import java.lang.annotation.Annotation
+import java.util.logging.Logger
+import org.apache.commons.logging.LogFactory
 
 
 class DelegatingActor(delegate: AnyRef) extends Actor {
+
+  val logger = LogFactory.getLog(getClass)
 
   val handlers: List[HandlerMetadata] = {
     val methodCallback = new HandlerResolvingMethodCallback(classOf[akka.spring.Receive]);
@@ -20,7 +23,7 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
     val c: ActorContext = this.context
     val s: ActorRef = this.self
     
-    log( String.format("about to invoke handler with message '%s'", msg.toString) );
+    logger.debug( String.format("about to invoke handler with message '%s'", msg.toString) );
 
     this.handlers.foreach((handler: HandlerMetadata) => {
 
@@ -66,8 +69,8 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
               ActorLocalStorage.current.get() match {
                 case null => ActorLocalStorage.current.set(new ActorLocalStorage(s, c))
               }
-              
-              log( String.format( "about to invoke a handler %s with arguments %s", this.delegate.toString, argsForInvocation.toString()))
+
+              logger.debug( String.format( "about to invoke a handler %s with arguments %s", this.delegate.toString, argsForInvocation.toString()))
               
               handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
               
@@ -81,7 +84,6 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
 
     });
   }
-
 
   protected def receive = {
     case e: AnyRef => doReceive(e)
