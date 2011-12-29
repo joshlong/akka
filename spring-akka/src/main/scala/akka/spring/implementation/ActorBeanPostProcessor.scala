@@ -8,7 +8,6 @@ import org.springframework.beans.factory.InitializingBean
 import org.springframework.beans.factory.config.BeanPostProcessor
 import org.apache.commons.logging.LogFactory
 
-
 class ActorBeanPostProcessor(@BeanProperty var system: ActorSystem) extends BeanPostProcessor with InitializingBean {
 
   val logger = LogFactory.getLog(getClass)

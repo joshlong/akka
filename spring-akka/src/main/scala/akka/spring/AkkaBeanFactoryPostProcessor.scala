@@ -55,3 +55,5 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
     }
   }
 }
+
+class ActorRefReferenceProvidingPostProcessor () extends ReferenceProvidingPostProcessor( classOf[akka.spring.ActorRef] )

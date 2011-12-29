@@ -8,7 +8,7 @@ class HandlerMetadata {
   var _method: Method = _
   var _selfReference: Option[Argument] = None
   var _actorContextReference: Option[Argument] = None
-  var _payload: Option[Argument] =  None
+  var _payload: Option[Argument] = None
 
   def method = this._method
 

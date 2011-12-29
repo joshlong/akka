@@ -5,7 +5,6 @@ import collection.mutable.HashMap
 import org.springframework.util.ReflectionUtils
 import java.lang.reflect.Method
 import java.lang.annotation.Annotation
-import java.util.logging.Logger
 import org.apache.commons.logging.LogFactory
 
 
@@ -22,8 +21,8 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
   protected def doReceive(msg: AnyRef) {
     val c: ActorContext = this.context
     val s: ActorRef = this.self
-    
-    logger.debug( String.format("about to invoke handler with message '%s'", msg.toString) );
+
+    logger.debug(String.format("about to invoke handler with message '%s'", msg.toString));
 
     this.handlers.foreach((handler: HandlerMetadata) => {
 
@@ -70,10 +69,10 @@ class DelegatingActor(delegate: AnyRef) extends Actor {
                 case null => ActorLocalStorage.current.set(new ActorLocalStorage(s, c))
               }
 
-              logger.debug( String.format( "about to invoke a handler %s with arguments %s", this.delegate.toString, argsForInvocation.toString()))
-              
+              logger.debug(String.format("about to invoke a handler %s with arguments %s", this.delegate.toString, argsForInvocation.toString()))
+
               handler.method.invoke(this.delegate, argsForInvocation: _*) // the '_*' tells scala that we want to use this sequence as a varargs expansion
-              
+
             } finally {
               ActorLocalStorage.current.remove()
             }
@@ -100,24 +99,24 @@ private class HandlerResolvingMethodCallback(annotation: Class[_ <: Annotation])
     val paramTypes: Array[Class[_]] = m.getParameterTypes
     val paramAnnotations: Array[Array[Annotation]] = m.getParameterAnnotations
     var ctr: Int = 0
-    
+
     paramTypes.foreach((c: Class[_]) => {
-      
+
       val annotationsForParam: Array[Annotation] = paramAnnotations(ctr)
-      
+
       val matched: Option[Annotation] = annotationsForParam.find((a: Annotation) => {
         annotationType.isAssignableFrom(a.getClass)
       });
-      
+
       matched.getOrElse(null) match {
         case null => null
         case a: T => {
           callback(ctr, c, me, a)
         }
       }
-      
+
       ctr += 1
-      
+
     });
   }
 

@@ -5,7 +5,6 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.apache.commons.logging.LogFactory
 import akka.actor.ActorRef
 
-
 object Experiments extends App {
 
   val logger = LogFactory.getLog(getClass)

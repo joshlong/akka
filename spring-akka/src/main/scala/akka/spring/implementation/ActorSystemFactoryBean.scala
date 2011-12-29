@@ -1,5 +1,6 @@
+package akka.spring.implementation
 
-package akka.spring.implementation;
+;
 
 import akka.actor._
 import org.springframework.beans.factory.FactoryBean
