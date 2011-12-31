@@ -1,5 +1,6 @@
 package akka.spring
 
+import _root_..
 import implementation._
 import org.springframework.beans.factory.config.{ConfigurableListableBeanFactory, BeanFactoryPostProcessor}
 import org.springframework.beans.factory.support.{BeanDefinitionBuilder, BeanDefinitionRegistry}

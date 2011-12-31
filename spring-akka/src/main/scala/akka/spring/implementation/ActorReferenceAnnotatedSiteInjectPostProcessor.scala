@@ -1,5 +1,6 @@
 package akka.spring.implementation
 
+import _root_..
 import java.beans.PropertyDescriptor
 import org.springframework.beans.factory.annotation.InjectionMetadata
 import akka.spring.ActorReference

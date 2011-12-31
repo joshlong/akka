@@ -34,8 +34,9 @@
     </properties>
     <repositories>
         <repository>
-        <id>akka.io</id><url>http://akka.io/releases/</url>
-    </repository>
+            <id>akka.io</id>
+            <url>http://akka.io/releases/</url>
+        </repository>
         <repository>
             <id>org.springframework.maven.milestone</id>
             <name>Spring Maven Milestone Repository</name>
@@ -46,6 +47,12 @@
             <snapshots>
                 <enabled>true</enabled>
             </snapshots>
+        </repository>
+        <repository>
+            <id>scala-tools.org.snapshots</id>
+            <name>Scala-Tools Maven2 Repository - snapshots</name>
+            <url>http://scala-tools.org/repo-snapshots</url>
+            <snapshots/>
         </repository>
         <repository>
             <id>scala-tools.org</id>
@@ -88,6 +95,11 @@
         </plugins>
     </build>
     <dependencies>
+        <dependency>
+            <groupId>org.scala-tools</groupId>
+            <artifactId>scala-stm_2.9.1</artifactId>
+            <version>0.4-SNAPSHOT</version>
+        </dependency>
         <!-- Scala dependencies -->
         <dependency>
             <groupId>org.scala-lang</groupId>
@@ -110,7 +122,9 @@
             <version>${akka.version}</version>
         </dependency>
         <dependency>
-            <groupId>javax.inject</groupId><artifactId>javax.inject</artifactId><version>1</version>
+            <groupId>javax.inject</groupId>
+            <artifactId>javax.inject</artifactId>
+            <version>1</version>
         </dependency>
         <dependency>
             <groupId>org.scalaj</groupId>
