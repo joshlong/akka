@@ -15,7 +15,7 @@ class ActorBeanPostProcessor(@BeanProperty var system: ActorSystem) extends Bean
   type A = akka.actor.Actor
   type AR = akka.actor.ActorRef
 
-  @BeanProperty var props: Props = Props()
+  @BeanProperty var properties = Props()
 
   def postProcessAfterInitialization(bean: AnyRef, beanName: String): AnyRef = bean
 
@@ -23,7 +23,7 @@ class ActorBeanPostProcessor(@BeanProperty var system: ActorSystem) extends Bean
     val isActor = bean.getClass.getAnnotation(classOf[akka.spring.Actor]) != null
 
     if (isActor) {
-      val props = this.props.withCreator(new Creator[Actor] {
+      val props = this.properties.withCreator(new Creator[Actor] {
         def create(): Actor = new DelegatingActor(bean)
       });
       return system.actorOf(props, beanName);

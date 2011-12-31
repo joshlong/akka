@@ -16,31 +16,13 @@ import akka.actor.{ActorRef, ActorSystem}
 class ActorReferenceAnnotatedSiteInjectPostProcessor(actorSystem: ActorSystem)
   extends AnnotatedSiteInjectionPostProcessor[ActorRef, ActorReference](
     classOf[akka.spring.ActorReference],
-    (ar: ActorReference, f: Field) => new ActorReferenceInjectedElement(actorSystem, f, null),
-    (ar: ActorReference, m: Method) => new ActorReferenceInjectedElement(actorSystem, m, BeanUtils.findPropertyForMethod(m)))
+    (ar: ActorReference, f: Field) => new ActorReferenceInjectedElement(actorSystem, ar, f, null),
+    (ar: ActorReference, m: Method) => new ActorReferenceInjectedElement(actorSystem, ar, m, BeanUtils.findPropertyForMethod(m)))
 
 
-private class ActorReferenceInjectedElement(as: ActorSystem, member: Member, pd: PropertyDescriptor) extends InjectionMetadata.InjectedElement(member, pd) {
-
-  private val actorPath: String = {
-
-    val a: ActorReference = {
-      if (member.getClass.isAssignableFrom(classOf[Field])) {
-        val f = member.asInstanceOf[Field]
-        f.getAnnotation(classOf[ActorReference])
-      }
-      else if (member.getClass.isAssignableFrom(classOf[Method])) {
-        val m = member.asInstanceOf[Method]
-        m.getAnnotation(classOf[ActorReference])
-      }
-      else
-        throw new RuntimeException("We couldn't retreive the @ActorReference annotation from the class member " + member.toString)
-    }
-    a.value()
-  }
-
-  override def getResourceToInject(target: AnyRef, requestingBeanName: String) = {
-    as.actorFor(this.actorPath)
-  }
+class ActorReferenceInjectedElement(actorSystem: ActorSystem, annotation:ActorReference, member: Member, propertyDescriptor: PropertyDescriptor) extends InjectionMetadata.InjectedElement(member, propertyDescriptor) {
+  override def getResourceToInject(target: AnyRef, requestingBeanName: String) = actorSystem.actorFor(annotation.value() )
 }
+
+
 

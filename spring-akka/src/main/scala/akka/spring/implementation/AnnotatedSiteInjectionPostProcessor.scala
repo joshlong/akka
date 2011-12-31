@@ -22,8 +22,7 @@ import org.apache.commons.logging.LogFactory
 class AnnotatedSiteInjectionPostProcessor [T <: AnyRef, X <: java.lang.annotation.Annotation]
   (annotation: Class[X], fieldMetadataCallback: (X, Field) => InjectionMetadata.InjectedElement, methodMetadataCallback: (X, Method) => InjectionMetadata.InjectedElement)
   extends InstantiationAwareBeanPostProcessor with MergedBeanDefinitionPostProcessor {
-  
-  
+
   val logger = LogFactory.getLog(getClass)
 
   def postProcessBeforeInstantiation(beanClass: Class[_], beanName: String) = null
@@ -43,9 +42,7 @@ class AnnotatedSiteInjectionPostProcessor [T <: AnyRef, X <: java.lang.annotatio
 
   def postProcessPropertyValues(pvs: PropertyValues, pds: Array[PropertyDescriptor], bean: AnyRef, beanName: String): PropertyValues = {
     try {
-     // var s = ""
-     // pds.foreach( st => s += st.getWriteMethod.toString )
-      logger.info("about to attempt injection for class "+ bean.getClass )
+      logger.debug("about to attempt injection for class "+ bean.getClass )
       val metadata = findInjectionSiteMetadata(bean.getClass)
       metadata.inject(bean, beanName, pvs)
     } catch {

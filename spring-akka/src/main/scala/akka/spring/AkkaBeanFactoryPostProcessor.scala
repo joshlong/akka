@@ -60,6 +60,7 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
+    // register the @ActorReference
     registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorReferenceAnnotatedSiteInjectPostProcessor], (name: String, beanDefinition: BeanDefinitionBuilder) => {
       beanDefinition.addConstructorArgReference(actorSystemBeanName)
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
@@ -70,7 +71,7 @@ class AkkaBeanFactoryPostProcessor extends BeanFactoryPostProcessor {
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
     })
 
-    // register the component model mechanism itself
+    // register the component model mechanism itself (@Actor, and @Receive)
     registerBeanIfItDoesNotExist(beanDefinitionRegistry, classOf[ActorBeanPostProcessor], (name: String, beanDefinition: BeanDefinitionBuilder) => {
       beanDefinition.addConstructorArgReference(actorSystemBeanName)
       beanDefinitionRegistry.registerBeanDefinition(name, beanDefinition.getBeanDefinition)
