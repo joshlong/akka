@@ -5,7 +5,7 @@ import org.springframework.beans.factory.ObjectFactory
 
 
 /**
- * A simple scope that lets you bind values to the current Actor <code>receive</CODE> block.
+ * A stm scope that lets you bind values to the current Actor <code>receive</CODE> block.
  */
 class ActorScope extends Scope {
   def get(name: String, objectFactory: ObjectFactory[_]) = null

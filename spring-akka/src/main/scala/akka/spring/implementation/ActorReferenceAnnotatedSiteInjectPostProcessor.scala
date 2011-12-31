@@ -1,12 +1,12 @@
 package akka.spring.implementation
 
-import _root_..
 import java.beans.PropertyDescriptor
 import org.springframework.beans.factory.annotation.InjectionMetadata
 import akka.spring.ActorReference
 import java.lang.reflect.{Method, Field, Member}
 import org.springframework.beans.BeanUtils
 import akka.actor.{ActorRef, ActorSystem}
+import util.AnnotatedSiteInjectionPostProcessor
 
 /**
  * the [[akka.spring.ActorReference]] annotation marks properties and fields that designate sites where references to [[akka.actor.ActorRef]]s should be injected.

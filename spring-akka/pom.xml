@@ -26,9 +26,11 @@
     </licenses>
 
     <properties>
-        <spring.framework.version>3.1.0.RC1</spring.framework.version>
+        <spring.framework.version>3.1.0.RELEASE</spring.framework.version>
         <scala.version>2.9.1</scala.version>
-        <akka.version>2.0-M1</akka.version>
+        <spring.akka.version>2.0-M2</spring.akka.version>
+        <!--<akka.version>2.0-M1</akka.version>-->
+        <akka.version>2.0-M2</akka.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring.integration.framework.version>2.1.0.RC2</spring.integration.framework.version>
     </properties>
@@ -100,7 +102,6 @@
             <artifactId>scala-stm_2.9.1</artifactId>
             <version>0.4-SNAPSHOT</version>
         </dependency>
-        <!-- Scala dependencies -->
         <dependency>
             <groupId>org.scala-lang</groupId>
             <artifactId>scala-library</artifactId>
@@ -109,6 +110,11 @@
         <dependency>
             <groupId>com.typesafe.akka</groupId>
             <artifactId>spring-akka-java</artifactId>
+            <version>${spring.akka.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.typesafe.akka</groupId>
+            <artifactId>akka-transactor</artifactId>
             <version>${akka.version}</version>
         </dependency>
         <dependency>
@@ -131,10 +137,14 @@
             <artifactId>scalaj-collection_${scala.version}</artifactId>
             <version>1.2</version>
         </dependency>
-        <!-- Spring dependencies -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-webmvc</artifactId>
+            <version>${spring.framework.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-aop</artifactId>
             <version>${spring.framework.version}</version>
         </dependency>
         <dependency>
@@ -147,8 +157,6 @@
             <artifactId>spring-integration-core</artifactId>
             <version>${spring.integration.framework.version}</version>
         </dependency>
-
-        <!-- Testing dependencies -->
         <dependency>
             <groupId>org.scalatest</groupId>
             <artifactId>scalatest_${scala.version}</artifactId>
