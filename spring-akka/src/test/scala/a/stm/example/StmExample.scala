@@ -13,7 +13,7 @@ object CoordinatedRegistry {
 object StmExample extends App {
 
   def doInTransaction[T](callback: (Coordinated) => T) {
-    val coordinated = Coordinated()
+    ///val coordinated = Coordinated()
   }
 
   val system = ActorSystem()

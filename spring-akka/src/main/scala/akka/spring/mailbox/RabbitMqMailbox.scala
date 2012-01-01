@@ -1,13 +1,13 @@
 package akka.spring.mailbox
 
-import akka.actor.{ActorContext, ActorRef}
-import akka.dispatch._
-import org.springframework.amqp.rabbit.connection._
-import org.springframework.beans.factory.InitializingBean
+import org.springframework.amqp.rabbit.connection.ConnectionFactory
+import org.springframework.amqp.core.{Message, MessagePostProcessor}
 import org.springframework.amqp.rabbit.core.RabbitTemplate
-import scala.None
 import org.springframework.transaction.support.{TransactionCallback, TransactionTemplate}
 import org.springframework.transaction.{TransactionStatus, PlatformTransactionManager}
+import akka.actor.{ActorRef, ActorContext}
+import akka.dispatch.{SystemMessage, Envelope, MessageQueue, CustomMailbox}
+import org.springframework.amqp.rabbit.transaction.RabbitTransactionManager
 
 
 /**
@@ -17,62 +17,46 @@ import org.springframework.transaction.{TransactionStatus, PlatformTransactionMa
  *
  * @author Josh Long
  */
-class RabbitMqMailbox(val owner: ActorContext,
-                      val routingKey: String, // to sed messages
-                      val exchange: String, // to send messages
-                      val queue: String, // from which to receive
-                      val rabbitConnection: ConnectionFactory, val transactionManager: Option[PlatformTransactionManager] = None)
-  extends CustomMailbox(owner) with MessageQueue with InitializingBean {
+class RabbitMqMailbox( owner: ActorContext,
+                       routingKey: String = "",
+                       exchange: String,
+                       queue: String,
+                       rabbitConnection: ConnectionFactory,
+                       var transactionManager: PlatformTransactionManager ,
+                       messagePostProcessor: MessagePostProcessor = new MessagePostProcessor {
+                         def postProcessMessage(message: Message) = message
+                       })
+  extends CustomMailbox(owner) with MessageQueue {
 
-  protected def serialise(msg: AnyRef) = msg // todo  
 
-  private val rabbitTemplate = {
-    /*
-    if (rt.getMessageConverter == null ){
-      // todo peerhaps we can register a specific Akka Envelope message converter?
-    }
-    * */
+  if (transactionManager == null)
+    transactionManager = new RabbitTransactionManager( rabbitConnection)
+
+  val transactionTemplate = new TransactionTemplate(transactionManager)
+
+  val sendFunction = rabbitTemplate.convertAndSend(this.exchange, this.routingKey, _: Any, this.messagePostProcessor)
+
+  val rabbitTemplate = {
     val rt = new RabbitTemplate(this.rabbitConnection)
     rt.afterPropertiesSet()
     rt
   }
 
-  private val transactionTemplate: TransactionTemplate =
-    transactionManager.getOrElse(null) match {
-      case txMan: PlatformTransactionManager => new TransactionTemplate(txMan)
-      case null => null
-    }
-
-
-  private def doInTransaction[T](callback: () => T): T = {
-    val transactionCallback = new TransactionCallback[T] {
-      def doInTransaction(p1: TransactionStatus) = callback()
-    }
-    val resultOfTransaction = if (transactionTemplate == null) {
-      transactionTemplate.execute(transactionCallback)
-    } else {
-      transactionCallback.doInTransaction(null)
-    }
-    resultOfTransaction
+  private def doInTransaction[T](callback: => T): T = {
+    transactionTemplate.execute(new TransactionCallback[T] {
+      def doInTransaction(p1: TransactionStatus) = callback
+    })
   }
 
   def enqueue(receiver: ActorRef, handle: Envelope) {
-    doInTransaction( () => {
-      if (exchange != null)
-        rabbitTemplate.convertAndSend(exchange, routingKey, handle)
-      else {
-        rabbitTemplate.convertAndSend(routingKey, handle)
-      }
-    })
-
+    doInTransaction(sendFunction(handle));
   }
 
-  def dequeue() = new Envelope(rabbitTemplate.receive(this.queueName), owner.self)
+  def dequeue() = doInTransaction[Envelope](rabbitTemplate.receiveAndConvert(this.queue).asInstanceOf[Envelope])
 
+  def numberOfMessages = -1 // is there a safer way to do this?   
 
-  def numberOfMessages = 0
-
-  def hasMessages = false
+  def hasMessages = numberOfMessages > 1 || numberOfMessages == -1
 
   def systemEnqueue(receiver: ActorRef, message: SystemMessage) {}
 
@@ -80,7 +64,5 @@ class RabbitMqMailbox(val owner: ActorContext,
 
   def hasSystemMessages = false
 
-  def afterPropertiesSet() {
 
-  }
 }

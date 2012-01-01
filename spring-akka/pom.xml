@@ -16,7 +16,6 @@
             <name>Josh Long</name>
         </developer>
     </developers>
-
     <licenses>
         <license>
             <name>The Apache Software License, Version 2.0</name>
@@ -24,7 +23,6 @@
             <distribution>repo</distribution>
         </license>
     </licenses>
-
     <properties>
         <spring.framework.version>3.1.0.RELEASE</spring.framework.version>
         <scala.version>2.9.1</scala.version>
@@ -96,7 +94,40 @@
             </plugin>
         </plugins>
     </build>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-webmvc</artifactId>
+                <version>${spring.framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-core</artifactId>
+                <version>${spring.framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-tx</artifactId>
+                <version>${spring.framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-aop</artifactId>
+                <version>${spring.framework.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-orm</artifactId>
+                <version>${spring.framework.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
     <dependencies>
+
+
+
         <dependency>
             <groupId>org.scala-tools</groupId>
             <artifactId>scala-stm_2.9.1</artifactId>

@@ -1,6 +1,7 @@
 package akka.spring
 
 import akka.actor._
+import mailbox.{DelegatingUnmanagedMailboxType, DelegatingUnmanagedMailbox}
 import org.springframework.core.io.Resource
 import org.springframework.util.Assert._
 import org.springframework.beans.factory.{InitializingBean, FactoryBean}
@@ -8,6 +9,7 @@ import com.typesafe.config.{ConfigFactory, Config}
 import reflect.BeanProperty
 import java.io.{Reader, InputStreamReader}
 import org.springframework.util.StringUtils
+import akka.dispatch.Mailbox
 
 /**
  *
@@ -17,7 +19,7 @@ import org.springframework.util.StringUtils
  * @author Josh Long
  * @since 2.0
  */
-class ActorSystemFactoryBean extends FactoryBean[ActorSystem] with InitializingBean {
+class ActorSystemFactoryBean extends FactoryBean[ActorSystem] with InitializingBean   {
 
   private var config: Config = _
 
@@ -26,32 +28,45 @@ class ActorSystemFactoryBean extends FactoryBean[ActorSystem] with InitializingB
     isTrue(StringUtils.hasText(this.configurationString) || StringUtils.hasText(resourceBaseName) || this.configuration != null,
       "you must specify the 'configurationString' or a 'resourceBaseName' or a 'configuration' property (but only one!)")
 
-    if (configuration == null) {
-      notNull(configurationString, "the configurationString can't be null")
-      hasText(configurationString, "the configurationString, if specified, should not be empty")
+    if (this.configurationString == null)
+      this.configurationString = "";
+
+    if (this.mailbox != null) {
+      DelegatingUnmanagedMailbox.mailbox = this.mailbox
+      val extraConfigurationString = String.format("""
+        akka { 
+          actor  { 
+           default-dispatcher { 
+              mailboxType = "%s"
+           } 
+          }
+        } 
+      """, classOf[DelegatingUnmanagedMailboxType].getName);
+      this.configurationString += extraConfigurationString
     }
-    this.config =
-      if (StringUtils.hasText(this.resourceBaseName)) {
-        ConfigFactory.load(this.resourceBaseName)
+
+    // first one has just the defaults
+    this.config = ConfigFactory.load();
+
+    if (StringUtils.hasText(this.resourceBaseName)) {
+      this.config.withFallback(ConfigFactory.load(this.resourceBaseName))
+    }
+
+    if (this.configuration != null) {
+      // load the Spring io.Resource as a configuration file
+      var is: Reader = null
+      try {
+        is = new InputStreamReader(this.configuration.getInputStream)
+        this.config.withFallback( ConfigFactory.parseReader(is))
+      } finally {
+        if (is != null)
+          is.close()
       }
-      else if (this.configuration != null) {
-        // load the Spring io.Resource as a configuration file
-        var is: Reader = null
-        try {
-          is = new InputStreamReader(this.configuration.getInputStream)
-          ConfigFactory.parseReader(is)
-        } finally {
-          if (is != null)
-            is.close()
-        }
-      } else if (StringUtils.hasText(this.configurationString)) {
-        // load the configuration string
-        ConfigFactory.parseString(this.configurationString)
-      }
-      else {
-        // fallback case
-        ConfigFactory.load()
-      }
+    }
+
+    if (StringUtils.hasText(this.configurationString)) {
+      config.withFallback(ConfigFactory.parseString(this.configurationString))
+    }
   }
 
   /**
@@ -75,6 +90,11 @@ class ActorSystemFactoryBean extends FactoryBean[ActorSystem] with InitializingB
    * The name of the configuration itself
    */
   @BeanProperty var configName = getClass.getSimpleName + "Config"
+
+  /**
+   * A reference to a mailbox. the only reason you should configure the mailbox here instead of specifying the FQCN in the config file format
+   */
+  @BeanProperty var mailbox: Mailbox = _
 
 
   def isSingleton = true
