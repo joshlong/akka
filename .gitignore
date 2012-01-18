@@ -11,10 +11,10 @@ lib_managed
 etags
 tags
 .tags
+.tags_sorted_by_file
 TAGS
 akka.tmproj
 reports
-dist
 target
 deploy/*.jar
 .history
@@ -61,3 +61,5 @@ akka.sublime-workspace
 .target
 .multi-jvm
 _mb
+schoir.props
+worker*.log

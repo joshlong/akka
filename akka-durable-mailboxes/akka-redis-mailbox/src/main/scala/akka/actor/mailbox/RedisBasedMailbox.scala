@@ -4,16 +4,21 @@
 package akka.actor.mailbox
 
 import com.redis._
-import akka.actor.LocalActorRef
 import akka.AkkaException
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
 
 class RedisBasedMailboxException(message: String) extends AkkaException(message)
 
-class RedisBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class RedisBasedMailboxType(config: Config) extends MailboxType {
+  override def create(owner: ActorContext) = new RedisBasedMailbox(owner)
+}
+
+class RedisBasedMailbox(val owner: ActorContext) extends DurableMailbox(owner) with DurableMessageSerialization {
 
   private val settings = RedisBasedMailboxExtension(owner.system)
 

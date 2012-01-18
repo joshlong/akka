@@ -4,20 +4,25 @@
 package akka.actor.mailbox
 
 import java.util.concurrent.TimeUnit.MILLISECONDS
-import akka.actor.LocalActorRef
 import akka.util.Duration
 import akka.AkkaException
 import org.I0Itec.zkclient.serialize._
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.cluster.zookeeper.AkkaZkClient
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.cluster.zookeeper.ZooKeeperQueue
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
 
 class ZooKeeperBasedMailboxException(message: String) extends AkkaException(message)
 
-class ZooKeeperBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class ZooKeeperBasedMailboxType(config: Config) extends MailboxType {
+  override def create(owner: ActorContext) = new ZooKeeperBasedMailbox(owner)
+}
+
+class ZooKeeperBasedMailbox(val owner: ActorContext) extends DurableMailbox(owner) with DurableMessageSerialization {
 
   private val settings = ZooKeeperBasedMailboxExtension(owner.system)
   val queueNode = "/queues"

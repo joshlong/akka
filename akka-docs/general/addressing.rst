@@ -3,11 +3,20 @@
 Actor References, Paths and Addresses
 =====================================
 
+.. sidebar:: Contents
+
+   .. contents:: :local:
+
 This chapter describes how actors are identified and located within a possibly
 distributed actor system. It ties into the central idea that
 :ref:`actor-systems` form intrinsic supervision hierarchies as well as that
 communication between actors is transparent with respect to their placement
 across multiple network nodes.
+
+.. image:: ActorPath.png
+
+The above image displays the relationship between the most important entities
+within an actor system, please read on for the details.
 
 What is an Actor Reference?
 ---------------------------
@@ -45,7 +54,7 @@ depending on the configuration of the actor system:
     the purpose of being completed by the response from an actor; it is created 
     by the :meth:`ActorRef.ask` invocation.
   - :class:`DeadLetterActorRef` is the default implementation of the dead 
-    letters service, where all messages are re-routed whose targets are shut 
+    letters service, where all messages are re-routed whose routees are shut
     down or non-existent.
 
 - And then there are some one-off internal implementations which you should 
@@ -75,6 +84,14 @@ the name “path” to refer to it. As in some real file-systems there also are
 where all but one involve some translation which decouples part of the path 
 from the actor’s actual supervision ancestor line; these specialities are 
 described in the sub-sections to follow.
+
+An actor path consists of an anchor, which identifies the actor system,
+followed by the concatenation of the path elements, from root guardian to the
+designated actor; the path elements are the names of the traversed actors and
+are separated by slashes.
+
+Actor Path Anchors
+^^^^^^^^^^^^^^^^^^
 
 Each actor path has an address component, describing the protocol and location 
 by which the corresponding actor is reachable, followed by the names of the 
@@ -158,7 +175,7 @@ Looking up Actors by Concrete Path
 In addition, actor references may be looked up using the
 :meth:`ActorSystem.actorFor` method, which returns an (unverified) local,
 remote or clustered actor reference. Sending messages to such a reference or
-attempting to observe its livelyhood will traverse the actor hierarchy of the
+attempting to observe its liveness will traverse the actor hierarchy of the
 actor system from top to bottom by passing messages from parent to child until
 either the target is reached or failure is certain, i.e. a name in the path
 does not exist (in practice this process will be optimized using caches, but it
@@ -212,21 +229,40 @@ extracting the sender references, and then watch all discovered concrete
 actors. This scheme of resolving a selection may be improved upon in a future 
 release.
 
+.. _actorOf-vs-actorFor:
+
+Summary: ``actorOf`` vs. ``actorFor``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. note::
+
+  What the above sections described in some detail can be summarized and
+  memorized easily as follows:
+
+  - ``actorOf`` only ever creates a new actor, and it creates it as a direct
+    child of the context on which this method is invoked (which may be any
+    actor or actor system).
+
+  - ``actorFor`` only ever looks up an existing actor, i.e. does not create
+    one.
+
 The Interplay with Remote Deployment
 ------------------------------------
 
-When an actor creates a child, the actor system’s deployer will decide whether 
-the new actor resides in the same JVM or on another node. In the second case, 
-creation of the actor will be triggered via a network connection to happen in a 
-different JVM and consequently within a different actor system. The remote 
-system will place the new actor below a special path reserved for this purpose 
-and the supervisor of the new actor will be a remote actor reference 
-(representing that actor which triggered its creation). In this case, 
-:meth:`parent` (the supervisor reference) and :meth:`context.path.parent` (the 
-parent node in the actor’s path) do not represent the same actor. However, 
-looking up the child’s name within the supervisor will find it on the remote 
-node, preserving logical structure e.g. when sending to an unresolved actor 
-reference.
+When an actor creates a child, the actor system’s deployer will decide whether
+the new actor resides in the same JVM or on another node. In the second case,
+creation of the actor will be triggered via a network connection to happen in a
+different JVM and consequently within a different actor system. The remote
+system will place the new actor below a special path reserved for this purpose
+and the supervisor of the new actor will be a remote actor reference
+(representing that actor which triggered its creation). In this case,
+:meth:`context.parent` (the supervisor reference) and
+:meth:`context.path.parent` (the parent node in the actor’s path) do not
+represent the same actor. However, looking up the child’s name within the
+supervisor will find it on the remote node, preserving logical structure e.g.
+when sending to an unresolved actor reference.
+
+.. image:: RemoteDeployment.png
 
 The Interplay with Clustering **(Future Extension)**
 ----------------------------------------------------

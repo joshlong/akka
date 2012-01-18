@@ -6,20 +6,25 @@ package akka.actor.mailbox
 import com.surftools.BeanstalkClient._
 import com.surftools.BeanstalkClientImpl._
 import java.util.concurrent.TimeUnit.MILLISECONDS
-import akka.actor.LocalActorRef
 import akka.util.Duration
 import akka.AkkaException
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
 
 class BeanstalkBasedMailboxException(message: String) extends AkkaException(message) {}
+
+class BeanstalkBasedMailboxType(config: Config) extends MailboxType {
+  override def create(owner: ActorContext) = new BeanstalkBasedMailbox(owner)
+}
 
 /**
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-class BeanstalkBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class BeanstalkBasedMailbox(val owner: ActorContext) extends DurableMailbox(owner) with DurableMessageSerialization {
 
   private val settings = BeanstalkBasedMailboxExtension(owner.system)
   private val messageSubmitDelaySeconds = settings.MessageSubmitDelay.toSeconds.toInt
@@ -78,7 +83,7 @@ class BeanstalkBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) 
     // TODO PN: Why volatile on local variable?
     @volatile
     var connected = false
-    // TODO PN: attempts is not used. Should we have maxAttempts check? Note that this is called from ThreadLocal.initialValue 
+    // TODO PN: attempts is not used. Should we have maxAttempts check? Note that this is called from ThreadLocal.initialValue
     var attempts = 0
     var client: Client = null
     while (!connected) {

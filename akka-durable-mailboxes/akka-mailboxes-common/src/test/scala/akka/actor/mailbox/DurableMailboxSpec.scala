@@ -1,15 +1,16 @@
+/**
+ *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.actor.mailbox
 
-import java.util.concurrent.TimeUnit
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-import org.scalatest.{ BeforeAndAfterEach, BeforeAndAfterAll }
-import akka.actor._
-import akka.actor.Actor._
-import java.util.concurrent.CountDownLatch
-import akka.dispatch.MessageDispatcher
+import akka.actor.Actor
+import akka.actor.ActorRef
+import akka.actor.PoisonPill
+import akka.actor.Props
+import akka.dispatch.Await
 import akka.testkit.AkkaSpec
-import akka.dispatch.Dispatchers
+import akka.testkit.TestLatch
+import akka.util.duration._
 
 object DurableMailboxSpecActorFactory {
 
@@ -17,42 +18,43 @@ object DurableMailboxSpecActorFactory {
     def receive = { case "sum" ⇒ sender ! "sum" }
   }
 
-  class Sender(latch: CountDownLatch) extends Actor {
+  class Sender(latch: TestLatch) extends Actor {
     def receive = { case "sum" ⇒ latch.countDown() }
   }
 
 }
 
-abstract class DurableMailboxSpec(val backendName: String, val mailboxType: DurableMailboxType) extends AkkaSpec with BeforeAndAfterEach {
+/**
+ * Subclass must define dispatcher in the supplied config for the specific backend.
+ * The id of the dispatcher must be the same as the `<backendName>-dispatcher`.
+ */
+abstract class DurableMailboxSpec(val backendName: String, config: String) extends AkkaSpec(config) {
   import DurableMailboxSpecActorFactory._
 
-  implicit val dispatcher = system.dispatcherFactory.newDispatcher(backendName, throughput = 1, mailboxType = mailboxType).build
-
-  def createMailboxTestActor(id: String)(implicit dispatcher: MessageDispatcher): ActorRef =
-    system.actorOf(Props(new MailboxTestActor).withDispatcher(dispatcher))
+  def createMailboxTestActor(id: String): ActorRef =
+    system.actorOf(Props(new MailboxTestActor).withDispatcher(backendName + "-dispatcher"))
 
   "A " + backendName + " based mailbox backed actor" must {
 
     "handle reply to ! for 1 message" in {
-      val latch = new CountDownLatch(1)
+      val latch = new TestLatch(1)
       val queueActor = createMailboxTestActor(backendName + " should handle reply to !")
       val sender = system.actorOf(Props(new Sender(latch)))
 
       queueActor.!("sum")(sender)
-      latch.await(10, TimeUnit.SECONDS) must be(true)
+      Await.ready(latch, 10 seconds)
       queueActor ! PoisonPill
       sender ! PoisonPill
     }
 
-    // FIXME ignored due to zookeeper issue, ticket #1423
-    "handle reply to ! for multiple messages" ignore {
-      val latch = new CountDownLatch(5)
+    "handle reply to ! for multiple messages" in {
+      val latch = new TestLatch(5)
       val queueActor = createMailboxTestActor(backendName + " should handle reply to !")
       val sender = system.actorOf(Props(new Sender(latch)))
 
       for (i ← 1 to 10) queueActor.!("sum")(sender)
 
-      latch.await(10, TimeUnit.SECONDS) must be(true)
+      Await.ready(latch, 10 seconds)
       queueActor ! PoisonPill
       sender ! PoisonPill
     }

@@ -16,7 +16,6 @@ import akka.AkkaException
 import scala.reflect.BeanProperty
 import scala.util.control.NoStackTrace
 import com.eaio.uuid.UUID
-import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.TimeUnit
 import java.util.{ Collection ⇒ JCollection }
 import java.util.regex.Pattern
@@ -26,7 +25,16 @@ import java.util.regex.Pattern
  */
 trait AutoReceivedMessage extends Serializable
 
+/**
+ * Marker trait to indicate that a message might be potentially harmful,
+ * this is used to block messages coming in over remoting.
+ */
 trait PossiblyHarmful
+
+/**
+ * Marker trait to signal that this class should not be verified for serializability.
+ */
+trait NoSerializationVerificationNeeded
 
 case class Failed(cause: Throwable) extends AutoReceivedMessage with PossiblyHarmful
 
@@ -89,19 +97,9 @@ case class ActorInterruptedException private[akka] (cause: Throwable)
   with NoStackTrace
 
 /**
- * This message is thrown by default when an Actors behavior doesn't match a message
+ * This message is published to the EventStream whenever an Actor receives a message it doesn't understand
  */
-case class UnhandledMessageException(msg: Any, ref: ActorRef = null) extends RuntimeException {
-
-  def this(msg: String) = this(msg, null)
-
-  // constructor with 'null' ActorRef needed to work with client instantiation of remote exception
-  override def getMessage =
-    if (ref ne null) "Actor [%s] does not handle [%s]".format(ref, msg)
-    else "Actor does not handle [%s]".format(msg)
-
-  override def fillInStackTrace() = this //Don't waste cycles generating stack trace
-}
+case class UnhandledMessage(@BeanProperty message: Any, @BeanProperty sender: ActorRef, @BeanProperty recipient: ActorRef)
 
 /**
  * Classes for passing status back to the sender.
@@ -114,7 +112,7 @@ object Status {
 }
 
 trait ActorLogging { this: Actor ⇒
-  val log = akka.event.Logging(context.system.eventStream, context.self)
+  val log = akka.event.Logging(context.system, context.self)
 }
 
 object Actor {
@@ -250,7 +248,7 @@ trait Actor {
    * up of resources before Actor is terminated.
    */
   def preRestart(reason: Throwable, message: Option[Any]) {
-    context.children foreach (context.stop(_))
+    context.children foreach context.stop
     postStop()
   }
 
@@ -266,13 +264,13 @@ trait Actor {
    * <p/>
    * Is called when a message isn't handled by the current behavior of the actor
    * by default it fails with either a [[akka.actor.DeathPactException]] (in
-   * case of an unhandled [[akka.actor.Terminated]] message) or a
-   * [[akka.actor.UnhandledMessageException]].
+   * case of an unhandled [[akka.actor.Terminated]] message) or publishes an [[akka.actor.UnhandledMessage]]
+   * to the actor's system's [[akka.event.EventStream]]
    */
   def unhandled(message: Any) {
     message match {
       case Terminated(dead) ⇒ throw new DeathPactException(dead)
-      case _                ⇒ throw new UnhandledMessageException(message, self)
+      case _                ⇒ context.system.eventStream.publish(UnhandledMessage(message, sender, self))
     }
   }
 
@@ -281,7 +279,6 @@ trait Actor {
   // =========================================
 
   private[akka] final def apply(msg: Any) = {
-    // FIXME this should all go into ActorCell
     val behaviorStack = context.asInstanceOf[ActorCell].hotswap
     msg match {
       case msg if behaviorStack.nonEmpty && behaviorStack.head.isDefinedAt(msg) ⇒ behaviorStack.head.apply(msg)

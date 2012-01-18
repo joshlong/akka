@@ -9,6 +9,7 @@ Java API
    untyped-actors
    typed-actors
    logging
+   event-bus
    scheduler
    futures
    dataflow
@@ -17,5 +18,7 @@ Java API
    routing
    remoting
    serialization
-   extending-akka
+   stm
+   agents
    transactors
+   extending-akka

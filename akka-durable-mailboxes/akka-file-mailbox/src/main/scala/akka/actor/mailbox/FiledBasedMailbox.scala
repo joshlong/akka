@@ -5,12 +5,18 @@
 package akka.actor.mailbox
 
 import org.apache.commons.io.FileUtils
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
 
-class FileBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class FileBasedMailboxType(config: Config) extends MailboxType {
+  override def create(owner: ActorContext) = new FileBasedMailbox(owner)
+}
+
+class FileBasedMailbox(val owner: ActorContext) extends DurableMailbox(owner) with DurableMessageSerialization {
 
   val log = Logging(system, "FileBasedMailbox")
 
@@ -62,7 +68,7 @@ class FileBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with 
     queue.remove
     true
   } catch {
-    // FIXME catching all and continue isn't good for OOME, ticket #1418
+    // TODO catching all and continue isn't good for OOME, ticket #1418
     case e ⇒ false
   }
 

@@ -14,18 +14,26 @@ import akka.actor.{ Extension, ActorSystem, ActorSystemImpl }
 case class NoSerializerFoundException(m: String) extends AkkaException(m)
 
 object Serialization {
-
-  // TODO ensure that these are always set (i.e. withValue()) when doing deserialization
-  val currentSystem = new DynamicVariable[ActorSystemImpl](null)
+  /**
+   * This holds a reference to the current ActorSystem (the surrounding context)
+   * during serialization and deserialization.
+   *
+   * If you are using Serializers yourself, outside of SerializationExtension,
+   * you'll need to surround the serialization/deserialization with:
+   *
+   * currentSystem.withValue(system) {
+   *   ...code...
+   * }
+   */
+  val currentSystem = new DynamicVariable[ActorSystem](null)
 
   class Settings(val config: Config) {
 
     import scala.collection.JavaConverters._
     import config._
 
-    val Serializers: Map[String, String] = {
-      toStringMap(getConfig("akka.actor.serializers"))
-    }
+    val Serializers: Map[String, String] =
+      getConfig("akka.actor.serializers").root.unwrapped.asScala.toMap.map { case (k, v) ⇒ (k, v.toString) }
 
     val SerializationBindings: Map[String, Seq[String]] = {
       val configPath = "akka.actor.serialization-bindings"
@@ -40,9 +48,6 @@ object Serialization {
 
       }
     }
-
-    private def toStringMap(mapConfig: Config): Map[String, String] =
-      mapConfig.root.unwrapped.asScala.toMap.map { case (k, v) ⇒ (k, v.toString) }
   }
 }
 
@@ -55,27 +60,53 @@ class Serialization(val system: ActorSystemImpl) extends Extension {
 
   val settings = new Settings(system.settings.config)
 
-  //TODO document me
+  /**
+   * Serializes the given AnyRef/java.lang.Object according to the Serialization configuration
+   * to either an Array of Bytes or an Exception if one was thrown.
+   */
   def serialize(o: AnyRef): Either[Exception, Array[Byte]] =
     try { Right(findSerializerFor(o).toBinary(o)) } catch { case e: Exception ⇒ Left(e) }
 
-  //TODO document me
+  /**
+   * Deserializes the given array of bytes using the specified serializer id,
+   * using the optional type hint to the Serializer and the optional ClassLoader ot load it into.
+   * Returns either the resulting object or an Exception if one was thrown.
+   */
+  def deserialize(bytes: Array[Byte],
+                  serializerId: Int,
+                  clazz: Option[Class[_]],
+                  classLoader: Option[ClassLoader]): Either[Exception, AnyRef] =
+    try {
+      currentSystem.withValue(system) {
+        Right(serializerByIdentity(serializerId).fromBinary(bytes, clazz, classLoader))
+      }
+    } catch { case e: Exception ⇒ Left(e) }
+
+  /**
+   * Deserializes the given array of bytes using the specified type to look up what Serializer should be used.
+   * You can specify an optional ClassLoader to load the object into.
+   * Returns either the resulting object or an Exception if one was thrown.
+   */
   def deserialize(
     bytes: Array[Byte],
     clazz: Class[_],
     classLoader: Option[ClassLoader]): Either[Exception, AnyRef] =
     try {
-      currentSystem.withValue(system) {
-        Right(serializerFor(clazz).fromBinary(bytes, Some(clazz), classLoader))
-      }
+      currentSystem.withValue(system) { Right(serializerFor(clazz).fromBinary(bytes, Some(clazz), classLoader)) }
     } catch { case e: Exception ⇒ Left(e) }
 
+  /**
+   * Returns the Serializer configured for the given object, returns the NullSerializer if it's null,
+   * falls back to the Serializer named "default"
+   */
   def findSerializerFor(o: AnyRef): Serializer = o match {
     case null  ⇒ NullSerializer
     case other ⇒ serializerFor(other.getClass)
   }
 
-  //TODO document me
+  /**
+   * Returns the configured Serializer for the given Class, falls back to the Serializer named "default"
+   */
   def serializerFor(clazz: Class[_]): Serializer = //TODO fall back on BestMatchClass THEN default AND memoize the lookups
     serializerMap.get(clazz.getName).getOrElse(serializers("default"))
 
@@ -84,22 +115,6 @@ class Serialization(val system: ActorSystemImpl) extends Extension {
    */
   def serializerOf(serializerFQN: String): Either[Exception, Serializer] =
     ReflectiveAccess.createInstance(serializerFQN, ReflectiveAccess.noParams, ReflectiveAccess.noArgs)
-
-  private def serializerForBestMatchClass(cl: Class[_]): Either[Exception, Serializer] = {
-    if (bindings.isEmpty)
-      Left(NoSerializerFoundException("No mapping serializer found for " + cl))
-    else {
-      bindings find {
-        case (clazzName, _) ⇒
-          ReflectiveAccess.getClassFor(clazzName) match {
-            case Right(clazz) ⇒ clazz.isAssignableFrom(cl)
-            case _            ⇒ false
-          }
-      } map {
-        case (_, ser) ⇒ serializerOf(ser)
-      } getOrElse Left(NoSerializerFoundException("No mapping serializer found for " + cl))
-    }
-  }
 
   /**
    * A Map of serializer from alias to implementation (class implementing akka.serialization.Serializer)
@@ -116,14 +131,11 @@ class Serialization(val system: ActorSystemImpl) extends Extension {
    *  bindings is a Map whose keys = FQN of class that is serializable and values = the alias of the serializer to be used
    */
   lazy val bindings: Map[String, String] = {
-    val configBindings = settings.SerializationBindings
-    configBindings.foldLeft(Map[String, String]()) {
-      case (result, (k: String, vs: Seq[_])) ⇒
-        //All keys which are lists, take the Strings from them and Map them
-        result ++ (vs collect { case v: String ⇒ (v, k) })
-      case (result, x) ⇒
-        //For any other values, just skip them
-        result
+    settings.SerializationBindings.foldLeft(Map[String, String]()) {
+      //All keys which are lists, take the Strings from them and Map them
+      case (result, (k: String, vs: Seq[_])) ⇒ result ++ (vs collect { case v: String ⇒ (v, k) })
+      //For any other values, just skip them
+      case (result, _)                       ⇒ result
     }
   }
 
@@ -133,9 +145,9 @@ class Serialization(val system: ActorSystemImpl) extends Extension {
   lazy val serializerMap: Map[String, Serializer] = bindings mapValues serializers
 
   /**
-   * Maps from a Serializer.Identifier (Byte) to a Serializer instance (optimization)
+   * Maps from a Serializer Identity (Int) to a Serializer instance (optimization)
    */
-  lazy val serializerByIdentity: Map[Serializer.Identifier, Serializer] =
+  lazy val serializerByIdentity: Map[Int, Serializer] =
     Map(NullSerializer.identifier -> NullSerializer) ++ serializers map { case (_, v) ⇒ (v.identifier, v) }
 }
 

@@ -14,6 +14,7 @@ import java.net.URISyntaxException
 import java.net.InetAddress
 import java.net.UnknownHostException
 import java.net.UnknownServiceException
+import akka.event.Logging
 
 /**
  * Interface for remote transports to encode their addresses. The three parts
@@ -32,11 +33,13 @@ trait ParsedTransportAddress extends RemoteTransportAddress
 
 case class RemoteNettyAddress(host: String, ip: Option[InetAddress], port: Int) extends ParsedTransportAddress {
   def protocol = "akka"
+
+  override def toString(): String = "akka://" + host + ":" + port
 }
 
 object RemoteNettyAddress {
   def apply(host: String, port: Int): RemoteNettyAddress = {
-    // FIXME this may BLOCK for extended periods of time!
+    // TODO ticket #1639
     val ip = try Some(InetAddress.getByName(host)) catch { case _: UnknownHostException ⇒ None }
     new RemoteNettyAddress(host, ip, port)
   }
@@ -133,7 +136,9 @@ trait RemoteModule {
 /**
  * Remote life-cycle events.
  */
-sealed trait RemoteLifeCycleEvent
+sealed trait RemoteLifeCycleEvent {
+  def logLevel: Logging.LogLevel
+}
 
 /**
  * Life-cycle events for RemoteClient.
@@ -145,29 +150,63 @@ trait RemoteClientLifeCycleEvent extends RemoteLifeCycleEvent {
 case class RemoteClientError[T <: ParsedTransportAddress](
   @BeanProperty cause: Throwable,
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.ErrorLevel
+  override def toString =
+    "RemoteClientError@" +
+      remoteAddress +
+      ": Error[" +
+      (if (cause ne null) cause.getClass.getName + ": " + cause.getMessage else "unknown") +
+      "]"
+}
 
 case class RemoteClientDisconnected[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.DebugLevel
+  override def toString =
+    "RemoteClientDisconnected@" + remoteAddress
+}
 
 case class RemoteClientConnected[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.DebugLevel
+  override def toString =
+    "RemoteClientConnected@" + remoteAddress
+}
 
 case class RemoteClientStarted[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.InfoLevel
+  override def toString =
+    "RemoteClientStarted@" + remoteAddress
+}
 
 case class RemoteClientShutdown[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.InfoLevel
+  override def toString =
+    "RemoteClientShutdown@" + remoteAddress
+}
 
 case class RemoteClientWriteFailed[T <: ParsedTransportAddress](
   @BeanProperty request: AnyRef,
   @BeanProperty cause: Throwable,
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent
+  @BeanProperty remoteAddress: T) extends RemoteClientLifeCycleEvent {
+  override def logLevel = Logging.WarningLevel
+  override def toString =
+    "RemoteClientWriteFailed@" +
+      remoteAddress +
+      ": MessageClass[" +
+      (if (request ne null) request.getClass.getName else "no message") +
+      "] Error[" +
+      (if (cause ne null) cause.getClass.getName + ": " + cause.getMessage else "unknown") +
+      "]"
+}
 
 /**
  *  Life-cycle events for RemoteServer.
@@ -175,26 +214,84 @@ case class RemoteClientWriteFailed[T <: ParsedTransportAddress](
 trait RemoteServerLifeCycleEvent extends RemoteLifeCycleEvent
 
 case class RemoteServerStarted[T <: ParsedTransportAddress](
-  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.InfoLevel
+  override def toString =
+    "RemoteServerStarted@" + remote.name
+}
+
 case class RemoteServerShutdown[T <: ParsedTransportAddress](
-  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.InfoLevel
+  override def toString =
+    "RemoteServerShutdown@" + remote.name
+}
+
 case class RemoteServerError[T <: ParsedTransportAddress](
   @BeanProperty val cause: Throwable,
-  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty remote: RemoteSupport[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.ErrorLevel
+  override def toString =
+    "RemoteServerError@" +
+      remote.name +
+      ": Error[" +
+      (if (cause ne null) cause.getClass.getName + ": " + cause.getMessage else "unknown") +
+      "]"
+}
+
 case class RemoteServerClientConnected[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.DebugLevel
+  override def toString =
+    "RemoteServerClientConnected@" +
+      remote.name +
+      ": Client[" +
+      (if (clientAddress.isDefined) clientAddress.get else "no address") +
+      "]"
+}
+
 case class RemoteServerClientDisconnected[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.DebugLevel
+  override def toString =
+    "RemoteServerClientDisconnected@" +
+      remote.name +
+      ": Client[" +
+      (if (clientAddress.isDefined) clientAddress.get else "no address") +
+      "]"
+}
+
 case class RemoteServerClientClosed[T <: ParsedTransportAddress](
   @BeanProperty remote: RemoteSupport[T],
-  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty val clientAddress: Option[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.DebugLevel
+  override def toString =
+    "RemoteServerClientClosed@" +
+      remote.name +
+      ": Client[" +
+      (if (clientAddress.isDefined) clientAddress.get else "no address") +
+      "]"
+}
+
 case class RemoteServerWriteFailed[T <: ParsedTransportAddress](
   @BeanProperty request: AnyRef,
   @BeanProperty cause: Throwable,
-  @BeanProperty server: RemoteSupport[T],
-  @BeanProperty remoteAddress: Option[T]) extends RemoteServerLifeCycleEvent
+  @BeanProperty remote: RemoteSupport[T],
+  @BeanProperty remoteAddress: Option[T]) extends RemoteServerLifeCycleEvent {
+  override def logLevel = Logging.WarningLevel
+  override def toString =
+    "RemoteServerWriteFailed@" +
+      remote +
+      ": ClientAddress[" +
+      remoteAddress +
+      "] MessageClass[" +
+      (if (request ne null) request.getClass.getName else "no message") +
+      "] Error[" +
+      (if (cause ne null) cause.getClass.getName + ": " + cause.getMessage else "unknown") +
+      "]"
+}
 
 /**
  * Thrown for example when trying to send a message using a RemoteClient that is either not started or shut down.
@@ -203,22 +300,6 @@ class RemoteClientException[T <: ParsedTransportAddress] private[akka] (
   message: String,
   @BeanProperty val client: RemoteSupport[T],
   val remoteAddress: T, cause: Throwable = null) extends AkkaException(message, cause)
-
-/**
- * Thrown when the remote server actor dispatching fails for some reason.
- */
-class RemoteServerException private[akka] (message: String) extends AkkaException(message)
-
-/**
- * Thrown when a remote exception sent over the wire cannot be loaded and instantiated
- */
-case class CannotInstantiateRemoteExceptionDueToRemoteProtocolParsingErrorException private[akka] (cause: Throwable, originalClassName: String, originalMessage: String)
-  extends AkkaException("\nParsingError[%s]\nOriginalException[%s]\nOriginalMessage[%s]"
-    .format(cause.toString, originalClassName, originalMessage)) {
-  override def printStackTrace = cause.printStackTrace
-  override def printStackTrace(printStream: PrintStream) = cause.printStackTrace(printStream)
-  override def printStackTrace(printWriter: PrintWriter) = cause.printStackTrace(printWriter)
-}
 
 abstract class RemoteSupport[-T <: ParsedTransportAddress](val system: ActorSystemImpl) {
   /**
@@ -253,7 +334,10 @@ abstract class RemoteSupport[-T <: ParsedTransportAddress](val system: ActorSyst
                            recipient: RemoteActorRef,
                            loader: Option[ClassLoader]): Unit
 
-  protected[akka] def notifyListeners(message: RemoteLifeCycleEvent): Unit = system.eventStream.publish(message)
+  protected[akka] def notifyListeners(message: RemoteLifeCycleEvent): Unit = {
+    system.eventStream.publish(message)
+    system.log.log(message.logLevel, "REMOTE: {}", message)
+  }
 
   override def toString = name
 }

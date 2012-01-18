@@ -6,19 +6,30 @@ package akka.dispatch
 
 import java.util.concurrent._
 import akka.event.Logging.Error
-import akka.util.{ Duration, Switch, ReentrantGuard }
-import atomic.{ AtomicInteger, AtomicLong }
-import java.util.concurrent.ThreadPoolExecutor.{ AbortPolicy, CallerRunsPolicy, DiscardOldestPolicy, DiscardPolicy }
+import akka.util.Duration
 import akka.actor._
 import akka.actor.ActorSystem
-import locks.ReentrantLock
 import scala.annotation.tailrec
 import akka.event.EventStream
-import akka.actor.ActorSystem.Settings
 import com.typesafe.config.Config
+import akka.util.ReflectiveAccess
+import akka.serialization.SerializationExtension
 
-final case class Envelope(val message: Any, val sender: ActorRef) {
-  if (message.isInstanceOf[AnyRef] && (message.asInstanceOf[AnyRef] eq null)) throw new InvalidMessageException("Message is null")
+final case class Envelope(val message: Any, val sender: ActorRef)(system: ActorSystem) {
+  if (message.isInstanceOf[AnyRef]) {
+    val msg = message.asInstanceOf[AnyRef]
+    if (msg eq null) throw new InvalidMessageException("Message is null")
+    if (system.settings.SerializeAllMessages && !msg.isInstanceOf[NoSerializationVerificationNeeded]) {
+      val ser = SerializationExtension(system)
+      ser.serialize(msg) match { //Verify serializability
+        case Left(t) ⇒ throw t
+        case Right(bytes) ⇒ ser.deserialize(bytes, msg.getClass, None) match { //Verify deserializability
+          case Left(t) ⇒ throw t
+          case _       ⇒ //All good
+        }
+      }
+    }
+  }
 }
 
 object SystemMessage {
@@ -63,17 +74,50 @@ case class ChildTerminated(child: ActorRef) extends SystemMessage // sent to sup
 case class Link(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.watch
 case class Unlink(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.unwatch
 
-final case class TaskInvocation(eventStream: EventStream, function: () ⇒ Unit, cleanup: () ⇒ Unit) extends Runnable {
+final case class TaskInvocation(eventStream: EventStream, runnable: Runnable, cleanup: () ⇒ Unit) extends Runnable {
   def run() {
     try {
-      function()
+      runnable.run()
     } catch {
-      // FIXME catching all and continue isn't good for OOME, ticket #1418
-      case e ⇒ eventStream.publish(Error(e, "TaskInvocation", e.getMessage))
+      // TODO catching all and continue isn't good for OOME, ticket #1418
+      case e ⇒ eventStream.publish(Error(e, "TaskInvocation", this.getClass, e.getMessage))
     } finally {
       cleanup()
     }
   }
+}
+
+object ExecutionContext {
+  implicit def defaultExecutionContext(implicit system: ActorSystem): ExecutionContext = system.dispatcher
+
+  /**
+   * Creates an ExecutionContext from the given ExecutorService
+   */
+  def fromExecutorService(e: ExecutorService): ExecutionContext = new WrappedExecutorService(e)
+
+  /**
+   * Creates an ExecutionContext from the given Executor
+   */
+  def fromExecutor(e: Executor): ExecutionContext = new WrappedExecutor(e)
+
+  private class WrappedExecutorService(val executor: ExecutorService) extends ExecutorServiceDelegate with ExecutionContext
+
+  private class WrappedExecutor(val executor: Executor) extends Executor with ExecutionContext {
+    override final def execute(runnable: Runnable): Unit = executor.execute(runnable)
+  }
+}
+
+/**
+ * An ExecutionContext is essentially the same thing as a java.util.concurrent.Executor
+ * This interface/trait exists to decouple the concept of execution from Actors & MessageDispatchers
+ * It is also needed to provide a fallback implicit default instance (in the companion object).
+ */
+trait ExecutionContext {
+
+  /**
+   * Submits the runnable for execution
+   */
+  def execute(runnable: Runnable): Unit
 }
 
 object MessageDispatcher {
@@ -81,10 +125,10 @@ object MessageDispatcher {
   val SCHEDULED = 1
   val RESCHEDULED = 2
 
-  implicit def defaultDispatcher(implicit system: ActorSystem) = system.dispatcher
+  implicit def defaultDispatcher(implicit system: ActorSystem): MessageDispatcher = system.dispatcher
 }
 
-abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) extends AbstractMessageDispatcher with Serializable {
+abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) extends AbstractMessageDispatcher with Serializable with Executor with ExecutionContext {
 
   import MessageDispatcher._
   import AbstractMessageDispatcher.{ inhabitantsUpdater, shutdownScheduleUpdater }
@@ -101,6 +145,12 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
   def name: String
 
   /**
+   * Identifier of this dispatcher, corresponds to the full key
+   * of the dispatcher configuration.
+   */
+  def id: String
+
+  /**
    * Attaches the specified actor instance to this dispatcher
    */
   final def attach(actor: ActorCell): Unit = register(actor)
@@ -114,8 +164,8 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
     ifSensibleToDoSoThenScheduleShutdown()
   }
 
-  protected[akka] final def dispatchTask(block: () ⇒ Unit) {
-    val invocation = TaskInvocation(eventStream, block, taskCleanup)
+  final def execute(runnable: Runnable) {
+    val invocation = TaskInvocation(eventStream, runnable, taskCleanup)
     inhabitantsUpdater.incrementAndGet(this)
     try {
       executeTask(invocation)
@@ -158,8 +208,6 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    */
   protected[akka] def register(actor: ActorCell) {
     inhabitantsUpdater.incrementAndGet(this)
-    // ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
-    systemDispatch(actor, Create()) //FIXME should this be here or moved into ActorCell.start perhaps?
   }
 
   /**
@@ -195,7 +243,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
 
   /**
    * When the dispatcher no longer has any actors registered, how long will it wait until it shuts itself down,
-   * defaulting to your akka configs "akka.actor.dispatcher-shutdown-timeout" or default specified in
+   * defaulting to your akka configs "akka.actor.default-dispatcher.shutdown-timeout" or default specified in
    * reference.conf
    */
   protected[akka] def shutdownTimeout: Duration
@@ -249,39 +297,51 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
    * Must be idempotent
    */
   protected[akka] def shutdown(): Unit
-
-  /**
-   * Returns the size of the mailbox for the specified actor
-   */
-  def mailboxSize(actor: ActorCell): Int = actor.mailbox.numberOfMessages
-
-  /**
-   * Returns the "current" emptiness status of the mailbox for the specified actor
-   */
-  def mailboxIsEmpty(actor: ActorCell): Boolean = !actor.mailbox.hasMessages
 }
 
 /**
- * Trait to be used for hooking in new dispatchers into Dispatchers.from(cfg: Config)
+ * Base class to be used for hooking in new dispatchers into Dispatchers.
  */
-abstract class MessageDispatcherConfigurator() {
-  /**
-   * Returns an instance of MessageDispatcher given a Configuration
-   */
-  def configure(config: Config, settings: Settings, prerequisites: DispatcherPrerequisites): MessageDispatcher
+abstract class MessageDispatcherConfigurator(val config: Config, val prerequisites: DispatcherPrerequisites) {
 
-  def mailboxType(config: Config, settings: Settings): MailboxType = {
-    val capacity = config.getInt("mailbox-capacity")
-    if (capacity < 1) UnboundedMailbox()
-    else {
-      val duration = Duration(config.getNanoseconds("mailbox-push-timeout-time"), TimeUnit.NANOSECONDS)
-      BoundedMailbox(capacity, duration)
+  /**
+   * Returns an instance of MessageDispatcher given the configuration.
+   * Depending on the needs the implementation may return a new instance for
+   * each invocation or return the same instance every time.
+   */
+  def dispatcher(): MessageDispatcher
+
+  /**
+   * Returns a factory for the [[akka.dispatch.Mailbox]] given the configuration.
+   * Default implementation instantiate the [[akka.dispatch.MailboxType]] specified
+   * as FQCN in mailboxType config property. If mailboxType is unspecified (empty)
+   * then [[akka.dispatch.UnboundedMailbox]] is used when capacity is < 1,
+   * otherwise [[akka.dispatch.BoundedMailbox]].
+   */
+  def mailboxType(): MailboxType = {
+    config.getString("mailboxType") match {
+      case "" ⇒
+        val capacity = config.getInt("mailbox-capacity")
+        if (capacity < 1) UnboundedMailbox()
+        else {
+          val duration = Duration(config.getNanoseconds("mailbox-push-timeout-time"), TimeUnit.NANOSECONDS)
+          BoundedMailbox(capacity, duration)
+        }
+      case fqcn ⇒
+        val constructorSignature = Array[Class[_]](classOf[Config])
+        ReflectiveAccess.createInstance[MailboxType](fqcn, constructorSignature, Array[AnyRef](config)) match {
+          case Right(instance) ⇒ instance
+          case Left(exception) ⇒
+            throw new IllegalArgumentException(
+              ("Cannot instantiate MailboxType [%s], defined in [%s], " +
+                "make sure it has constructor with a [com.typesafe.config.Config] parameter")
+                .format(fqcn, config.getString("id")), exception)
+        }
     }
   }
 
   def configureThreadPool(
     config: Config,
-    settings: Settings,
     createDispatcher: ⇒ (ThreadPoolConfig) ⇒ MessageDispatcher): ThreadPoolConfigDispatcherBuilder = {
     import ThreadPoolConfigDispatcherBuilder.conf_?
 

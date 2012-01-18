@@ -7,13 +7,19 @@ import akka.AkkaException
 import com.mongodb.async._
 import com.mongodb.async.futures.RequestFutures
 import org.bson.collection._
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.event.Logging
 import akka.actor.ActorRef
 import akka.dispatch.{ Await, Promise, Envelope, DefaultPromise }
 import java.util.concurrent.TimeoutException
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
 
 class MongoBasedMailboxException(message: String) extends AkkaException(message)
+
+class MongoBasedMailboxType(config: Config) extends MailboxType {
+  override def create(owner: ActorContext) = new MongoBasedMailbox(owner)
+}
 
 /**
  * A "naive" durable mailbox which uses findAndRemove; it's possible if the actor crashes
@@ -26,7 +32,7 @@ class MongoBasedMailboxException(message: String) extends AkkaException(message)
  *
  * @author <a href="http://evilmonkeylabs.com">Brendan W. McAdams</a>
  */
-class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
+class MongoBasedMailbox(val owner: ActorContext) extends DurableMailbox(owner) {
   // this implicit object provides the context for reading/writing things as MongoDurableMessage
   implicit val mailboxBSONSer = new BSONSerializableMailbox(system)
   implicit val safeWrite = WriteConcern.Safe // TODO - Replica Safe when appropriate!
@@ -66,7 +72,7 @@ class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
       doc match {
         case Some(msg) ⇒ {
           log.debug("DEQUEUING message in mongo-based mailbox [{}]", msg)
-          envelopePromise.success(msg.envelope())
+          envelopePromise.success(msg.envelope(system))
           log.debug("DEQUEUING messageInvocation in mongo-based mailbox [{}]", envelopePromise)
         }
         case None ⇒

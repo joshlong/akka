@@ -16,6 +16,7 @@ import akka.actor.CreateChild
 import akka.actor.DeadLetter
 import java.util.concurrent.TimeoutException
 import akka.dispatch.{ Await, MessageDispatcher }
+import akka.dispatch.Dispatchers
 
 object TimingTest extends Tag("timing")
 
@@ -74,8 +75,8 @@ abstract class AkkaSpec(_system: ActorSystem)
 
   protected def atTermination() {}
 
-  def spawn(body: ⇒ Unit)(implicit dispatcher: MessageDispatcher) {
-    system.actorOf(Props(ctx ⇒ { case "go" ⇒ try body finally ctx.stop(ctx.self) }).withDispatcher(dispatcher)) ! "go"
+  def spawn(dispatcherId: String = Dispatchers.DefaultDispatcherId)(body: ⇒ Unit) {
+    system.actorOf(Props(ctx ⇒ { case "go" ⇒ try body finally ctx.stop(ctx.self) }).withDispatcher(dispatcherId)) ! "go"
   }
 }
 
@@ -107,7 +108,7 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
 
       system.actorFor("/") ! PoisonPill
 
-      latch.await(2 seconds)
+      Await.ready(latch, 2 seconds)
     }
 
     "must enqueue unread messages from testActor to deadLetters" in {
@@ -129,7 +130,7 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
         probe.ref ! 42
         /*
        * this will ensure that the message is actually received, otherwise it
-       * may happen that the system.stop() suspends the testActor before it had 
+       * may happen that the system.stop() suspends the testActor before it had
        * a chance to put the message into its private queue
        */
         probe.receiveWhile(1 second) {
@@ -139,7 +140,7 @@ class AkkaSpecSpec extends WordSpec with MustMatchers {
         val latch = new TestLatch(1)(system)
         system.registerOnTermination(latch.countDown())
         system.shutdown()
-        latch.await(2 seconds)
+        Await.ready(latch, 2 seconds)
         Await.result(davyJones ? "Die!", timeout.duration) must be === "finally gone"
 
         // this will typically also contain log messages which were sent after the logger shutdown

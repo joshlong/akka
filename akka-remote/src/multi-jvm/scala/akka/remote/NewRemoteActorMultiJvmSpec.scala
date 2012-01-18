@@ -7,42 +7,29 @@ import akka.testkit._
 import akka.util.duration._
 import akka.dispatch.Await
 
-object NewRemoteActorMultiJvmSpec {
-  val NrOfNodes = 2
+object NewRemoteActorMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
+  override def NrOfNodes = 2
 
   class SomeActor extends Actor with Serializable {
     def receive = {
-      case "identify" ⇒ sender ! context.system.nodename
+      case "identify" ⇒ sender ! self.path.address.hostPort
     }
   }
 
   import com.typesafe.config.ConfigFactory
-  val commonConfig = ConfigFactory.parseString("""
+  override def commonConfig = ConfigFactory.parseString("""
     akka {
       loglevel = "WARNING"
       actor {
         provider = "akka.remote.RemoteActorRefProvider"
         deployment {
-          /service-hello.remote = "akka://AkkaRemoteSpec@localhost:9991"
+          /service-hello.remote = %s
         }
       }
-      remote.server.hostname = "localhost"
-    }""")
-
-  val node1Config = ConfigFactory.parseString("""
-    akka {
-      remote.server.port = "9991"
-      cluster.nodename = "node1"
-    }""") withFallback commonConfig
-
-  val node2Config = ConfigFactory.parseString("""
-    akka {
-      remote.server.port = "9992"
-      cluster.nodename = "node2"
-    }""") withFallback commonConfig
+    }""" format specString(1))
 }
 
-class NewRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(NewRemoteActorMultiJvmSpec.node1Config) {
+class NewRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(NewRemoteActorMultiJvmSpec.nodeConfigs(0)) {
 
   import NewRemoteActorMultiJvmSpec._
 
@@ -57,7 +44,7 @@ class NewRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(NewRemoteActorMultiJvmS
   }
 }
 
-class NewRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(NewRemoteActorMultiJvmSpec.node2Config) with DefaultTimeout {
+class NewRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(NewRemoteActorMultiJvmSpec.nodeConfigs(1)) with DefaultTimeout {
 
   import NewRemoteActorMultiJvmSpec._
 
@@ -68,7 +55,7 @@ class NewRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(NewRemoteActorMultiJvmS
       barrier("start")
 
       val actor = system.actorOf(Props[SomeActor], "service-hello")
-      Await.result(actor ? "identify", timeout.duration) must equal("node1")
+      Await.result(actor ? "identify", timeout.duration) must equal("AkkaRemoteSpec@localhost:9991")
 
       barrier("done")
     }

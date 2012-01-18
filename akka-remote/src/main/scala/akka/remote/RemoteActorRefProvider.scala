@@ -11,8 +11,6 @@ import akka.util.Timeout
 import akka.config.ConfigurationException
 import akka.event.{ DeathWatch, Logging }
 import akka.serialization.Compression.LZF
-import akka.remote.RemoteProtocol._
-import akka.remote.RemoteProtocol.RemoteSystemDaemonMessageType._
 import com.google.protobuf.ByteString
 import akka.event.EventStream
 import akka.dispatch.Promise
@@ -29,16 +27,11 @@ class RemoteActorRefProvider(
   val scheduler: Scheduler,
   _deadLetters: InternalActorRef) extends ActorRefProvider {
 
-  val log = Logging(eventStream, "RemoteActorRefProvider")
-
   val remoteSettings = new RemoteSettings(settings.config, systemName)
 
-  def deathWatch = local.deathWatch
   def rootGuardian = local.rootGuardian
   def guardian = local.guardian
   def systemGuardian = local.systemGuardian
-  def nodename = remoteSettings.NodeName
-  def clustername = remoteSettings.ClusterName
   def terminationFuture = local.terminationFuture
   def dispatcher = local.dispatcher
 
@@ -47,15 +40,19 @@ class RemoteActorRefProvider(
   val remote = new Remote(settings, remoteSettings)
   implicit val transports = remote.transports
 
+  val log = Logging(eventStream, "RemoteActorRefProvider(" + remote.remoteAddress + ")")
+
   val rootPath: ActorPath = RootActorPath(remote.remoteAddress)
 
   private val local = new LocalActorRefProvider(systemName, settings, eventStream, scheduler, _deadLetters, rootPath, deployer)
+
+  val deathWatch = new RemoteDeathWatch(local.deathWatch, this)
 
   def init(system: ActorSystemImpl) {
     local.init(system)
     remote.init(system, this)
     local.registerExtraNames(Map(("remote", remote.remoteDaemon)))
-    terminationFuture.onComplete(_ ⇒ remote.server.shutdown())
+    terminationFuture.onComplete(_ ⇒ remote.transport.shutdown())
   }
 
   def actorOf(system: ActorSystemImpl, props: Props, supervisor: InternalActorRef, path: ActorPath, systemService: Boolean, deploy: Option[Deploy]): InternalActorRef = {
@@ -105,7 +102,7 @@ class RemoteActorRefProvider(
       })
 
       deployment match {
-        case Some(Deploy(_, _, _, _, RemoteScope(address))) ⇒
+        case Some(Deploy(_, _, _, RemoteScope(address))) ⇒
           // FIXME RK this should be done within the deployer, i.e. the whole parsing business
           address.parse(remote.transports) match {
             case Left(x) ⇒
@@ -115,7 +112,7 @@ class RemoteActorRefProvider(
               else {
                 val rpath = RootActorPath(addr) / "remote" / rootPath.address.hostPort / path.elements
                 useActorOnNode(rpath, props.creator, supervisor)
-                new RemoteActorRef(this, remote.server, rpath, supervisor, None)
+                new RemoteActorRef(this, remote.transport, rpath, supervisor, None)
               }
           }
 
@@ -126,14 +123,14 @@ class RemoteActorRefProvider(
 
   def actorFor(path: ActorPath): InternalActorRef = path.root match {
     case `rootPath` ⇒ actorFor(rootGuardian, path.elements)
-    case RootActorPath(_: RemoteSystemAddress[_], _) ⇒ new RemoteActorRef(this, remote.server, path, Nobody, None)
+    case RootActorPath(_: RemoteSystemAddress[_], _) ⇒ new RemoteActorRef(this, remote.transport, path, Nobody, None)
     case _ ⇒ local.actorFor(path)
   }
 
   def actorFor(ref: InternalActorRef, path: String): InternalActorRef = path match {
     case ParsedActorPath(address, elems) ⇒
       if (address == rootPath.address) actorFor(rootGuardian, elems)
-      else new RemoteActorRef(this, remote.server, new RootActorPath(address) / elems, Nobody, None)
+      else new RemoteActorRef(this, remote.transport, new RootActorPath(address) / elems, Nobody, None)
     case _ ⇒ local.actorFor(ref, path)
   }
 
@@ -147,22 +144,13 @@ class RemoteActorRefProvider(
   def useActorOnNode(path: ActorPath, actorFactory: () ⇒ Actor, supervisor: ActorRef) {
     log.debug("[{}] Instantiating Remote Actor [{}]", rootPath, path)
 
-    val actorFactoryBytes =
-      remote.serialization.serialize(actorFactory) match {
-        case Left(error)  ⇒ throw error
-        case Right(bytes) ⇒ if (remoteSettings.ShouldCompressData) LZF.compress(bytes) else bytes
-      }
-
-    val command = RemoteSystemDaemonMessageProtocol.newBuilder
-      .setMessageType(USE)
-      .setActorPath(path.toString)
-      .setPayload(ByteString.copyFrom(actorFactoryBytes))
-      .setSupervisor(supervisor.path.toString)
-      .build()
-
     // we don’t wait for the ACK, because the remote end will process this command before any other message to the new actor
-    actorFor(RootActorPath(path.address) / "remote") ! command
+    actorFor(RootActorPath(path.address) / "remote") ! DaemonMsgCreate(actorFactory, path.toString, supervisor)
   }
+}
+
+trait RemoteRef extends ActorRefScope {
+  final def isLocal = false
 }
 
 /**
@@ -175,7 +163,7 @@ private[akka] class RemoteActorRef private[akka] (
   val path: ActorPath,
   val getParent: InternalActorRef,
   loader: Option[ClassLoader])
-  extends InternalActorRef {
+  extends InternalActorRef with RemoteRef {
 
   def getChild(name: Iterator[String]): InternalActorRef = {
     val s = name.toStream
@@ -216,4 +204,26 @@ private[akka] class RemoteActorRef private[akka] (
 
   @throws(classOf[java.io.ObjectStreamException])
   private def writeReplace(): AnyRef = SerializedActorRef(path.toString)
+}
+
+class RemoteDeathWatch(val local: LocalDeathWatch, val provider: RemoteActorRefProvider) extends DeathWatch {
+
+  def subscribe(watcher: ActorRef, watched: ActorRef): Boolean = watched match {
+    case r: RemoteRef ⇒
+      val ret = local.subscribe(watcher, watched)
+      provider.actorFor(r.path.root / "remote") ! DaemonMsgWatch(watcher, watched)
+      ret
+    case l: LocalRef ⇒
+      local.subscribe(watcher, watched)
+    case _ ⇒
+      provider.log.error("unknown ActorRef type {} as DeathWatch target", watched.getClass)
+      false
+  }
+
+  def unsubscribe(watcher: ActorRef, watched: ActorRef): Boolean = local.unsubscribe(watcher, watched)
+
+  def unsubscribe(watcher: ActorRef): Unit = local.unsubscribe(watcher)
+
+  def publish(event: Terminated): Unit = local.publish(event)
+
 }

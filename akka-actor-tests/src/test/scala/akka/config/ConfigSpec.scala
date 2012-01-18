@@ -24,6 +24,7 @@ class ConfigSpec extends AkkaSpec(ConfigFactory.defaultReference) {
       settings.ConfigVersion must equal("2.0-SNAPSHOT")
 
       getString("akka.actor.default-dispatcher.type") must equal("Dispatcher")
+      getString("akka.actor.default-dispatcher.name") must equal("default-dispatcher")
       getMilliseconds("akka.actor.default-dispatcher.keep-alive-time") must equal(60 * 1000)
       getDouble("akka.actor.default-dispatcher.core-pool-size-factor") must equal(8.0)
       getDouble("akka.actor.default-dispatcher.max-pool-size-factor") must equal(8.0)
@@ -32,12 +33,10 @@ class ConfigSpec extends AkkaSpec(ConfigFactory.defaultReference) {
       getBoolean("akka.actor.default-dispatcher.allow-core-timeout") must equal(true)
       getInt("akka.actor.default-dispatcher.mailbox-capacity") must equal(-1)
       getMilliseconds("akka.actor.default-dispatcher.mailbox-push-timeout-time") must equal(10 * 1000)
-      getMilliseconds("akka.actor.dispatcher-shutdown-timeout") must equal(1 * 1000)
-      settings.DispatcherDefaultShutdown must equal(1 second)
+      getString("akka.actor.default-dispatcher.mailboxType") must be("")
+      getMilliseconds("akka.actor.default-dispatcher.shutdown-timeout") must equal(1 * 1000)
       getInt("akka.actor.default-dispatcher.throughput") must equal(5)
-      settings.DispatcherThroughput must equal(5)
       getMilliseconds("akka.actor.default-dispatcher.throughput-deadline-time") must equal(0)
-      settings.DispatcherThroughputDeadlineTime must equal(Duration.Zero)
       getBoolean("akka.actor.serialize-messages") must equal(false)
       settings.SerializeAllMessages must equal(false)
 

@@ -4,18 +4,28 @@
 
 package akka.actor
 
-import org.scalatest.BeforeAndAfterEach
 import akka.testkit._
 import akka.util.duration._
 import java.util.concurrent.atomic._
 import akka.dispatch.Await
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class DeathWatchSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitSender with DefaultTimeout {
-  def startWatching(target: ActorRef) = system.actorOf(Props(new Actor {
+class LocalDeathWatchSpec extends AkkaSpec with ImplicitSender with DefaultTimeout with DeathWatchSpec
+
+object DeathWatchSpec {
+  def props(target: ActorRef, testActor: ActorRef) = Props(new Actor {
     context.watch(target)
     def receive = { case x ⇒ testActor forward x }
-  }))
+  })
+}
+
+trait DeathWatchSpec { this: AkkaSpec with ImplicitSender with DefaultTimeout ⇒
+
+  import DeathWatchSpec._
+
+  lazy val supervisor = system.actorOf(Props[Supervisor], "watchers")
+
+  def startWatching(target: ActorRef) = Await.result((supervisor ? props(target, testActor)).mapTo[ActorRef], 3 seconds)
 
   "The Death Watch" must {
     def expectTerminationOf(actorRef: ActorRef) = expectMsgPF(5 seconds, actorRef + ": Stopped or Already terminated when linking") {
@@ -23,19 +33,26 @@ class DeathWatchSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitSende
     }
 
     "notify with one Terminated message when an Actor is stopped" in {
-      val terminal = system.actorOf(Props(context ⇒ { case _ ⇒ }))
-      startWatching(terminal)
-
-      testActor ! "ping"
-      expectMsg("ping")
+      val terminal = system.actorOf(Props.empty)
+      startWatching(terminal) ! "hallo"
+      expectMsg("hallo") // this ensures that the DaemonMsgWatch has been received before we send the PoisonPill
 
       terminal ! PoisonPill
 
       expectTerminationOf(terminal)
     }
 
+    "notify with one Terminated message when an Actor is already dead" in {
+      val terminal = system.actorOf(Props.empty)
+
+      terminal ! PoisonPill
+
+      startWatching(terminal)
+      expectTerminationOf(terminal)
+    }
+
     "notify with all monitors with one Terminated message when an Actor is stopped" in {
-      val terminal = system.actorOf(Props(context ⇒ { case _ ⇒ }))
+      val terminal = system.actorOf(Props.empty)
       val monitor1, monitor2, monitor3 = startWatching(terminal)
 
       terminal ! PoisonPill
@@ -50,7 +67,7 @@ class DeathWatchSpec extends AkkaSpec with BeforeAndAfterEach with ImplicitSende
     }
 
     "notify with _current_ monitors with one Terminated message when an Actor is stopped" in {
-      val terminal = system.actorOf(Props(context ⇒ { case _ ⇒ }))
+      val terminal = system.actorOf(Props.empty)
       val monitor1, monitor3 = startWatching(terminal)
       val monitor2 = system.actorOf(Props(new Actor {
         context.watch(terminal)

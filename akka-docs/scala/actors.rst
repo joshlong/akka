@@ -28,6 +28,10 @@ its syntax from Erlang.
 Creating Actors
 ===============
 
+Since Akka enforces parental supervision every actor is supervised and
+(potentially) the supervisor of its children; it is advisable that you
+familiarize yourself with :ref:`actor-systems` and :ref:`supervision` and it
+may also help to read :ref:`actorOf-vs-actorFor`.
 
 Defining an Actor class
 -----------------------
@@ -47,8 +51,8 @@ Please note that the Akka Actor ``receive`` message loop is exhaustive, which is
 different compared to Erlang and Scala Actors. This means that you need to
 provide a pattern match for all messages that it can accept and if you want to
 be able to handle unknown messages then you need to have a default case as in
-the example above. Otherwise an ``UnhandledMessageException`` will be
-thrown and the actor is restarted when an unknown message is received.
+the example above. Otherwise an ``akka.actor.UnhandledMessage(message, sender, recipient)`` will be
+published to the ``ActorSystem``'s ``EventStream``.
 
 Creating Actors with default constructor
 ----------------------------------------
@@ -141,8 +145,10 @@ Actor API
 The :class:`Actor` trait defines only one abstract method, the above mentioned
 :meth:`receive`, which implements the behavior of the actor.
 
-If the current actor behavior does not match a received message, :meth:`unhandled`
-is called, which by default throws an :class:`UnhandledMessageException`.
+If the current actor behavior does not match a received message,
+:meth:`unhandled` is called, which by default publishes an
+``akka.actor.UnhandledMessage(message, sender, recipient)`` on the actor
+system’s event stream.
 
 In addition, it offers:
 
@@ -154,6 +160,7 @@ In addition, it offers:
   * system that the actor belongs to
   * parent supervisor
   * supervised children
+  * lifecycle monitoring
   * hotswap behavior stack as described in :ref:`Actor.HotSwap`
 
 You can import the members in the :obj:`context` to avoid prefixing access with ``context.``
@@ -174,6 +181,35 @@ described in the following::
 The implementations shown above are the defaults provided by the :class:`Actor`
 trait.
 
+.. _deathwatch-scala:
+
+Lifecycle Monitoring aka DeathWatch
+-----------------------------------
+
+In order to be notified when another actor terminates (i.e. stops permanently,
+not temporary failure and restart), an actor may register itself for reception
+of the :class:`Terminated` message dispatched by the other actor upon
+termination (see `Stopping Actors`_). This service is provided by the
+:class:`DeathWatch` component of the actor system.
+
+Registering a monitor is easy:
+
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#watch
+
+It should be noted that the :class:`Terminated` message is generated
+independent of the order in which registration and termination occur.
+Registering multiple times does not necessarily lead to multiple messages being
+generated, but there is no guarantee that only exactly one such message is
+received: if termination of the watched actor has generated and queued the
+message, and another registration is done before this message has been
+processed, then a second message will be queued, because registering for
+monitoring of an already terminated actor leads to the immediate generation of
+the :class:`Terminated` message.
+
+It is also possible to deregister from watching another actor’s liveliness
+using ``context.unwatch(target)``, but obviously this cannot guarantee
+non-reception of the :class:`Terminated` message because that may already have
+been queued.
 
 Start Hook
 ----------
@@ -225,7 +261,6 @@ to run after message queuing has been disabled for this actor, i.e. messages
 sent to a stopped actor will be redirected to the :obj:`deadLetters` of the
 :obj:`ActorSystem`.
 
-
 Identifying Actors
 ==================
 
@@ -242,15 +277,23 @@ result::
   context.actorFor("/user/serviceA/aggregator") // will look up this absolute path
   context.actorFor("../joe")                    // will look up sibling beneath same supervisor
 
+The supplied path is parsed as a :class:`java.net.URI`, which basically means
+that it is split on ``/`` into path elements. If the path starts with ``/``, it
+is absolute and the look-up starts at the root guardian (which is the parent of
+``"/user"``); otherwise it starts at the current actor. If a path element equals
+``..``, the look-up will take a step “up” towards the supervisor of the
+currently traversed actor, otherwise it will step “down” to the named child.
 It should be noted that the ``..`` in actor paths here always means the logical
-structure, i.e. the supervisor. Remote actor addresses may also be looked up,
-if remoting is enabled::
+structure, i.e. the supervisor.
+
+Remote actor addresses may also be looked up, if remoting is enabled::
 
   context.actorFor("akka://app@otherhost:1234/user/serviceB")
 
 These look-ups return a (possibly remote) actor reference immediately, so you
 will have to send to it and await a reply in order to verify that ``serviceB``
-is actually reachable and running.
+is actually reachable and running. An example demonstrating actor look-up is
+given in :ref:`remote-lookup-sample-scala`.
 
 Messages and immutability
 =========================
@@ -310,7 +353,8 @@ Ask: Send-And-Receive-Future
 ----------------------------
 
 Using ``?`` will send a message to the receiving Actor asynchronously and
-will immediately return a :class:`Future`:
+will immediately return a :class:`Future` which will be completed with
+an ``akka.actor.AskTimeoutException`` after the specified timeout:
 
 .. code-block:: scala
 
@@ -328,16 +372,13 @@ message.
 If the actor does not complete the future, it will expire after the timeout period,
 which is taken from one of the following locations in order of precedence:
 
-#. explicitly given timeout as in ``actor.?("hello")(timeout = 12 millis)``
-#. implicit argument of type :class:`akka.actor.Timeout`, e.g.
+1. explicitly given timeout as in:
 
-   ::
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#using-explicit-timeout
 
-     import akka.actor.Timeout
-     import akka.util.duration._
+2. implicit argument of type :class:`akka.util.Timeout`, e.g.
 
-     implicit val timeout = Timeout(12 millis)
-     val future = actor ? "hello"
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#using-implicit-timeout
 
 See :ref:`futures-scala` for more information on how to await or query a
 future.
@@ -436,6 +477,7 @@ object.
 
 .. includecode:: code/akka/docs/actor/ActorDocSpec.scala#receive-timeout
 
+.. _stopping-actors-scala:
 
 Stopping actors
 ===============
@@ -451,18 +493,41 @@ but additional messages in the mailbox will not be processed. By default these
 messages are sent to the :obj:`deadLetters` of the :obj:`ActorSystem`, but that
 depends on the mailbox implementation.
 
-When stop is called then a call to the ``def postStop`` callback method will
-take place. The ``Actor`` can use this callback to implement shutdown behavior.
+Termination of an actor proceeds in two steps: first the actor suspends its
+mailbox processing and sends a stop command to all its children, then it keeps
+processing the termination messages from its children until the last one is
+gone, finally terminating itself (invoking :meth:`postStop`, dumping mailbox,
+publishing :class:`Terminated` on the :ref:`DeathWatch <deathwatch-scala>`, telling
+its supervisor). This procedure ensures that actor system sub-trees terminate
+in an orderly fashion, propagating the stop command to the leaves and
+collecting their confirmation back to the stopped supervisor. If one of the
+actors does not respond (i.e. processing a message for extended periods of time
+and therefore not receiving the stop command), this whole process will be
+stuck.
+
+It is possible to disregard specific children with respect to shutdown
+confirmation by stopping them explicitly before issuing the
+``context.stop(self)``::
+
+  context.stop(someChild)
+  context.stop(self)
+
+In this case ``someChild`` will be stopped asynchronously and re-parented to
+the :class:`Locker`, where :class:`DavyJones` will keep tabs and dispose of it
+eventually.
+
+Upon :meth:`ActorSystem.shutdown()`, the system guardian actors will be
+stopped, and the aforementioned process will ensure proper termination of the
+whole system.
+
+The :meth:`postStop()` hook is invoked after an actor is fully stopped. This
+enables cleaning up of resources:
 
 .. code-block:: scala
 
   override def postStop() = {
-    ... // clean up resources
+    // close some file or database connection
   }
-
-All Actors are stopped when the ``ActorSystem`` is stopped.
-Supervised actors are stopped when the supervisor is stopped, i.e. children are stopped
-when parent is stopped.
 
 
 PoisonPill
@@ -473,8 +538,13 @@ stop the actor when the message is processed. ``PoisonPill`` is enqueued as
 ordinary messages and will be handled after messages that were already queued
 in the mailbox.
 
-If the ``PoisonPill`` was sent with ``?``, the ``Future`` will be completed with an
-``akka.actor.ActorKilledException("PoisonPill")``.
+Graceful Stop
+-------------
+
+:meth:`gracefulStop` is useful if you need to wait for termination or compose ordered
+termination of several actors:
+
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#gracefulStop
 
 
 .. _Actor.HotSwap:

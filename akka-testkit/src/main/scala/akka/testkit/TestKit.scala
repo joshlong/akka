@@ -102,9 +102,9 @@ class TestKit(_system: ActorSystem) {
    * registration as message target.
    */
   lazy val testActor: ActorRef = {
-    val impl = system.asInstanceOf[ActorSystemImpl]
+    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
     impl.systemActorOf(Props(new TestActor(queue))
-      .copy(dispatcher = new CallingThreadDispatcher(system.dispatcherFactory.prerequisites)),
+      .withDispatcher(CallingThreadDispatcher.Id),
       "testActor" + TestKit.testActorId.incrementAndGet)
   }
 

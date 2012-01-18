@@ -1,16 +1,20 @@
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.dispatcher
 
 import org.scalatest.{ BeforeAndAfterAll, WordSpec }
 import org.scalatest.matchers.MustMatchers
 import akka.testkit.AkkaSpec
-import akka.dispatch.PriorityGenerator
 import akka.actor.Props
 import akka.actor.Actor
-import akka.dispatch.UnboundedPriorityMailbox
 import akka.event.Logging
 import akka.event.LoggingAdapter
 import akka.util.duration._
 import akka.actor.PoisonPill
+import akka.dispatch.MessageDispatcherConfigurator
+import akka.dispatch.MessageDispatcher
+import akka.dispatch.DispatcherPrerequisites
 
 object DispatcherDocSpec {
   val config = """
@@ -37,10 +41,8 @@ object DispatcherDocSpec {
       type = Dispatcher
       core-pool-size-factor = 8.0
       max-pool-size-factor  = 16.0
-      # Specifies the bounded capacity of the task queue
-      task-queue-size = 100
-      # Specifies which type of task queue will be used, can be "array" or "linked" (default)
-      task-queue-type = "array"
+      # Specifies the bounded capacity of the mailbox queue
+      mailbox-capacity = 100
       throughput = 3
     }
     //#my-bounded-config
@@ -50,7 +52,35 @@ object DispatcherDocSpec {
       type = BalancingDispatcher
     }
     //#my-balancing-config
+
+    //#prio-dispatcher-config
+    prio-dispatcher {
+      mailboxType = "akka.docs.dispatcher.DispatcherDocSpec$PrioMailbox"
+    }
+    //#prio-dispatcher-config
+
+    //#prio-dispatcher-config-java
+    prio-dispatcher-java {
+      mailboxType = "akka.docs.dispatcher.DispatcherDocTestBase$PrioMailbox"
+    }
+    //#prio-dispatcher-config-java
   """
+
+  //#prio-mailbox
+  import akka.dispatch.PriorityGenerator
+  import akka.dispatch.UnboundedPriorityMailbox
+  import com.typesafe.config.Config
+
+  val generator = PriorityGenerator { // Create a new PriorityGenerator, lower prio means more important
+    case 'highpriority ⇒ 0 // 'highpriority messages should be treated first if possible
+    case 'lowpriority  ⇒ 100 // 'lowpriority messages should be treated last if possible
+    case PoisonPill    ⇒ 1000 // PoisonPill when no other left
+    case otherwise     ⇒ 50 // We default to 50
+  }
+
+  // We create a new Priority dispatcher and seed it with the priority generator
+  class PrioMailbox(config: Config) extends UnboundedPriorityMailbox(generator)
+  //#prio-mailbox
 
   class MyActor extends Actor {
     def receive = {
@@ -66,35 +96,23 @@ class DispatcherDocSpec extends AkkaSpec(DispatcherDocSpec.config) {
   "defining dispatcher" in {
     //#defining-dispatcher
     import akka.actor.Props
-    val dispatcher = system.dispatcherFactory.lookup("my-dispatcher")
-    val myActor1 = system.actorOf(Props[MyActor].withDispatcher(dispatcher), name = "myactor1")
-    val myActor2 = system.actorOf(Props[MyActor].withDispatcher(dispatcher), name = "myactor2")
+    val myActor1 = system.actorOf(Props[MyActor].withDispatcher("my-dispatcher"), name = "myactor1")
+    val myActor2 = system.actorOf(Props[MyActor].withDispatcher("my-dispatcher"), name = "myactor2")
     //#defining-dispatcher
   }
 
   "defining dispatcher with bounded queue" in {
-    val dispatcher = system.dispatcherFactory.lookup("my-dispatcher-bounded-queue")
+    val dispatcher = system.dispatchers.lookup("my-dispatcher-bounded-queue")
   }
 
   "defining pinned dispatcher" in {
     //#defining-pinned-dispatcher
-    val name = "myactor"
-    val dispatcher = system.dispatcherFactory.newPinnedDispatcher(name)
-    val myActor = system.actorOf(Props[MyActor].withDispatcher(dispatcher), name)
+    val myActor = system.actorOf(Props[MyActor].withDispatcher("my-dispatcher"), name = "myactor")
     //#defining-pinned-dispatcher
   }
 
   "defining priority dispatcher" in {
     //#prio-dispatcher
-    val gen = PriorityGenerator { // Create a new PriorityGenerator, lower prio means more important
-      case 'highpriority ⇒ 0 // 'highpriority messages should be treated first if possible
-      case 'lowpriority  ⇒ 100 // 'lowpriority messages should be treated last if possible
-      case PoisonPill    ⇒ 1000 // PoisonPill when no other left
-      case otherwise     ⇒ 50 // We default to 50
-    }
-
-    // We create a new Priority dispatcher and seed it with the priority generator
-    val dispatcher = system.dispatcherFactory.newDispatcher("foo", 5, UnboundedPriorityMailbox(gen)).build
 
     val a = system.actorOf( // We create a new Actor that just prints out what it processes
       Props(new Actor {
@@ -112,7 +130,7 @@ class DispatcherDocSpec extends AkkaSpec(DispatcherDocSpec.config) {
         def receive = {
           case x ⇒ log.info(x.toString)
         }
-      }).withDispatcher(dispatcher))
+      }).withDispatcher("prio-dispatcher"))
 
     /*
     Logs:
@@ -130,7 +148,7 @@ class DispatcherDocSpec extends AkkaSpec(DispatcherDocSpec.config) {
   }
 
   "defining balancing dispatcher" in {
-    val dispatcher = system.dispatcherFactory.lookup("my-balancing-dispatcher")
+    val dispatcher = system.dispatchers.lookup("my-balancing-dispatcher")
   }
 
 }

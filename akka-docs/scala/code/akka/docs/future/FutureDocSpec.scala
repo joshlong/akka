@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.future
 
 import org.scalatest.{ BeforeAndAfterAll, WordSpec }
@@ -66,8 +69,6 @@ class FutureDocSpec extends AkkaSpec {
     import akka.dispatch.Await
     import akka.dispatch.Future
     import akka.util.duration._
-
-    implicit def dispatcher = system.dispatcher
 
     val future = Future {
       "Hello" + "World"

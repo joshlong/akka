@@ -281,7 +281,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
         " Use 'akka.serialization.Serialization.currentSystem.withValue(system) { ... }'"
     }
 
-    "must return deadLetters on deserialize if not present in actor hierarchy (and remoting is not enabled)" in {
+    "must return EmptyLocalActorRef on deserialize if not present in actor hierarchy (and remoting is not enabled)" in {
       import java.io._
 
       val baos = new ByteArrayOutputStream(8192 * 32)
@@ -297,7 +297,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
 
       Serialization.currentSystem.withValue(system.asInstanceOf[ActorSystemImpl]) {
         val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
-        in.readObject must be === system.deadLetters
+        in.readObject must be === new EmptyLocalActorRef(system.eventStream, system.dispatcher, system.actorFor("/").path / "non-existing")
       }
     }
 
@@ -334,7 +334,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
       clientRef ! "simple"
       clientRef ! "simple"
 
-      latch.await
+      Await.ready(latch, timeout.duration)
 
       latch.reset
 
@@ -343,7 +343,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
       clientRef ! "simple"
       clientRef ! "simple"
 
-      latch.await
+      Await.ready(latch, timeout.duration)
 
       system.stop(clientRef)
       system.stop(serverRef)
@@ -370,7 +370,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
 
     "restart when Kill:ed" in {
       filterException[ActorKilledException] {
-        val latch = new CountDownLatch(2)
+        val latch = TestLatch(2)
 
         val boss = system.actorOf(Props(new Actor {
 
@@ -385,7 +385,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
         }).withFaultHandler(OneForOneStrategy(List(classOf[Throwable]), 2, 1000)))
 
         boss ! "sendKill"
-        latch.await(5, TimeUnit.SECONDS) must be === true
+        Await.ready(latch, 5 seconds)
       }
     }
   }

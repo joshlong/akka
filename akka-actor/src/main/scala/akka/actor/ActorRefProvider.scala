@@ -5,17 +5,12 @@
 package akka.actor
 
 import java.util.concurrent.atomic.AtomicLong
-import org.jboss.netty.akka.util.{ TimerTask, HashedWheelTimer }
-import akka.util.Timeout
-import akka.util.Timeout.intToTimeout
 import akka.config.ConfigurationException
 import akka.dispatch._
 import akka.routing._
-import akka.util.Timeout
 import akka.AkkaException
-import akka.util.{ Duration, Switch, Helpers }
+import akka.util.{ Duration, Switch, Helpers, Timeout }
 import akka.event._
-import java.io.Closeable
 
 /**
  * Interface for all ActorRef providers to implement.
@@ -43,12 +38,6 @@ trait ActorRefProvider {
    * Reference to the death watch service.
    */
   def deathWatch: DeathWatch
-
-  // FIXME: remove/replace???
-  def nodename: String
-
-  // FIXME: remove/replace???
-  def clustername: String
 
   /**
    * The root path for all actors within this actor system, including remote
@@ -294,11 +283,7 @@ class LocalActorRefProvider(
       new RootActorPath(LocalAddress(_systemName)),
       new Deployer(settings))
 
-  // FIXME remove both
-  val nodename: String = "local"
-  val clustername: String = "local"
-
-  val log = Logging(eventStream, "LocalActorRefProvider")
+  val log = Logging(eventStream, "LocalActorRefProvider(" + rootPath.address + ")")
 
   /*
    * generate name for temporary actor refs
@@ -453,22 +438,33 @@ class LocalActorRefProvider(
 
   def actorFor(ref: InternalActorRef, path: String): InternalActorRef = path match {
     case RelativeActorPath(elems) ⇒
-      if (elems.isEmpty) deadLetters
-      else if (elems.head.isEmpty) actorFor(rootGuardian, elems.tail)
+      if (elems.isEmpty) {
+        log.debug("look-up of empty path string '{}' fails (per definition)", path)
+        deadLetters
+      } else if (elems.head.isEmpty) actorFor(rootGuardian, elems.tail)
       else actorFor(ref, elems)
     case LocalActorPath(address, elems) if address == rootPath.address ⇒ actorFor(rootGuardian, elems)
-    case _ ⇒ deadLetters
+    case _ ⇒
+      log.debug("look-up of unknown path '{}' failed", path)
+      deadLetters
   }
 
   def actorFor(path: ActorPath): InternalActorRef =
     if (path.root == rootPath) actorFor(rootGuardian, path.elements)
-    else deadLetters
+    else {
+      log.debug("look-up of foreign ActorPath '{}' failed", path)
+      deadLetters
+    }
 
   def actorFor(ref: InternalActorRef, path: Iterable[String]): InternalActorRef =
-    if (path.isEmpty) deadLetters
-    else ref.getChild(path.iterator) match {
-      case Nobody ⇒ deadLetters
-      case x      ⇒ x
+    if (path.isEmpty) {
+      log.debug("look-up of empty path sequence fails (per definition)")
+      deadLetters
+    } else ref.getChild(path.iterator) match {
+      case Nobody ⇒
+        log.debug("look-up of path sequence '{}' failed", path)
+        new EmptyLocalActorRef(eventStream, dispatcher, ref.path / path)
+      case x ⇒ x
     }
 
   def actorOf(system: ActorSystemImpl, props: Props, supervisor: InternalActorRef, path: ActorPath, systemService: Boolean, deploy: Option[Deploy]): InternalActorRef = {
@@ -485,15 +481,15 @@ class LocalActorRefProvider(
 
   def ask(within: Timeout): Option[AskActorRef] = {
     (if (within == null) settings.ActorTimeout else within) match {
-      case t if t.duration.length <= 0 ⇒
-        None
+      case t if t.duration.length <= 0 ⇒ None
       case t ⇒
         val path = tempPath()
         val name = path.name
         val a = new AskActorRef(path, tempContainer, dispatcher, deathWatch)
         tempContainer.addChild(name, a)
-        val f = dispatcher.prerequisites.scheduler.scheduleOnce(t.duration) { tempContainer.removeChild(name); a.stop() }
-        a.result onComplete { _ ⇒
+        val result = a.result
+        val f = dispatcher.prerequisites.scheduler.scheduleOnce(t.duration) { result.failure(new AskTimeoutException("Timed out")) }
+        result onComplete { _ ⇒
           try { a.stop(); f.cancel() }
           finally { tempContainer.removeChild(name) }
         }
@@ -515,119 +511,6 @@ class LocalDeathWatch(val mapSize: Int) extends DeathWatch with ActorClassificat
       subscriber ! Terminated(to)
       false
     } else true
-  }
-}
-
-/**
- * Scheduled tasks (Runnable and functions) are executed with the supplied dispatcher.
- * Note that dispatcher is by-name parameter, because dispatcher might not be initialized
- * when the scheduler is created.
- *
- * The HashedWheelTimer used by this class MUST throw an IllegalStateException
- * if it does not enqueue a task. Once a task is queued, it MUST be executed or
- * returned from stop().
- */
-class DefaultScheduler(hashedWheelTimer: HashedWheelTimer, log: LoggingAdapter, dispatcher: ⇒ MessageDispatcher) extends Scheduler with Closeable {
-
-  import org.jboss.netty.akka.util.{ Timeout ⇒ HWTimeout }
-
-  def schedule(initialDelay: Duration, delay: Duration, receiver: ActorRef, message: Any): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createContinuousTask(delay, receiver, message), initialDelay))
-
-  def schedule(initialDelay: Duration, delay: Duration)(f: ⇒ Unit): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createContinuousTask(delay, f), initialDelay))
-
-  def schedule(initialDelay: Duration, delay: Duration, runnable: Runnable): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createContinuousTask(delay, runnable), initialDelay))
-
-  def scheduleOnce(delay: Duration, runnable: Runnable): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createSingleTask(runnable), delay))
-
-  def scheduleOnce(delay: Duration, receiver: ActorRef, message: Any): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createSingleTask(receiver, message), delay))
-
-  def scheduleOnce(delay: Duration)(f: ⇒ Unit): Cancellable =
-    new DefaultCancellable(hashedWheelTimer.newTimeout(createSingleTask(f), delay))
-
-  private def createSingleTask(runnable: Runnable): TimerTask =
-    new TimerTask() {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        dispatcher.dispatchTask(() ⇒ runnable.run())
-      }
-    }
-
-  private def createSingleTask(receiver: ActorRef, message: Any): TimerTask =
-    new TimerTask {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        receiver ! message
-      }
-    }
-
-  private def createSingleTask(f: ⇒ Unit): TimerTask =
-    new TimerTask {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        dispatcher.dispatchTask(() ⇒ f)
-      }
-    }
-
-  private def createContinuousTask(delay: Duration, receiver: ActorRef, message: Any): TimerTask = {
-    new TimerTask {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        // Check if the receiver is still alive and kicking before sending it a message and reschedule the task
-        if (!receiver.isTerminated) {
-          receiver ! message
-          try timeout.getTimer.newTimeout(this, delay) catch {
-            case _: IllegalStateException ⇒ // stop recurring if timer is stopped
-          }
-        } else {
-          log.warning("Could not reschedule message to be sent because receiving actor has been terminated.")
-        }
-      }
-    }
-  }
-
-  private def createContinuousTask(delay: Duration, f: ⇒ Unit): TimerTask = {
-    new TimerTask {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        dispatcher.dispatchTask(() ⇒ f)
-        try timeout.getTimer.newTimeout(this, delay) catch {
-          case _: IllegalStateException ⇒ // stop recurring if timer is stopped
-        }
-      }
-    }
-  }
-
-  private def createContinuousTask(delay: Duration, runnable: Runnable): TimerTask = {
-    new TimerTask {
-      def run(timeout: org.jboss.netty.akka.util.Timeout) {
-        dispatcher.dispatchTask(() ⇒ runnable.run())
-        try timeout.getTimer.newTimeout(this, delay) catch {
-          case _: IllegalStateException ⇒ // stop recurring if timer is stopped
-        }
-      }
-    }
-  }
-
-  private def execDirectly(t: HWTimeout): Unit = {
-    try t.getTask.run(t) catch {
-      case e: InterruptedException ⇒ throw e
-      case e: Exception            ⇒ log.error(e, "exception while executing timer task")
-    }
-  }
-
-  def close() = {
-    import scala.collection.JavaConverters._
-    hashedWheelTimer.stop().asScala foreach execDirectly
-  }
-}
-
-class DefaultCancellable(val timeout: org.jboss.netty.akka.util.Timeout) extends Cancellable {
-  def cancel() {
-    timeout.cancel()
-  }
-
-  def isCancelled: Boolean = {
-    timeout.isCancelled
   }
 }
 

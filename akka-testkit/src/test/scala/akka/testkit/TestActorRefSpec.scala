@@ -56,9 +56,9 @@ object TestActorRefSpec {
 
   class WorkerActor() extends TActor {
     def receiveT = {
-      case "work"                ⇒ sender ! "workDone"; context.stop(self)
-      case replyTo: Promise[Any] ⇒ replyTo.success("complexReply")
-      case replyTo: ActorRef     ⇒ replyTo ! "complexReply"
+      case "work"              ⇒ sender ! "workDone"; context.stop(self)
+      case replyTo: Promise[_] ⇒ replyTo.asInstanceOf[Promise[Any]].success("complexReply")
+      case replyTo: ActorRef   ⇒ replyTo ! "complexReply"
     }
   }
 
@@ -81,7 +81,7 @@ object TestActorRefSpec {
     var count = 0
     var msg: String = _
     def receive = {
-      case Warning(_, m: String) ⇒ count += 1; msg = m
+      case Warning(_, _, m: String) ⇒ count += 1; msg = m
     }
   }
 

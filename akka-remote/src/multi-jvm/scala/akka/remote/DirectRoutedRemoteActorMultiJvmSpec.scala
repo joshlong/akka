@@ -6,42 +6,29 @@ import akka.actor.{ Actor, Props }
 import akka.testkit._
 import akka.dispatch.Await
 
-object DirectRoutedRemoteActorMultiJvmSpec {
-  val NrOfNodes = 2
+object DirectRoutedRemoteActorMultiJvmSpec extends AbstractRemoteActorMultiJvmSpec {
+  override def NrOfNodes = 2
 
   class SomeActor extends Actor with Serializable {
     def receive = {
-      case "identify" ⇒ sender ! context.system.nodename
+      case "identify" ⇒ sender ! self.path.address.hostPort
     }
   }
 
   import com.typesafe.config.ConfigFactory
-  val commonConfig = ConfigFactory.parseString("""
+  override def commonConfig = ConfigFactory.parseString("""
     akka {
       loglevel = "WARNING"
       actor {
         provider = "akka.remote.RemoteActorRefProvider"
         deployment {
-          /service-hello.remote = "akka://AkkaRemoteSpec@localhost:9991"
+          /service-hello.remote = %s
         }
       }
-      remote.server.hostname = "localhost"
-    }""")
-
-  val node1Config = ConfigFactory.parseString("""
-    akka {
-      remote.server.port = "9991"
-      cluster.nodename = "node1"
-    }""") withFallback commonConfig
-
-  val node2Config = ConfigFactory.parseString("""
-    akka {
-      remote.server.port = "9992"
-      cluster.nodename = "node2"
-    }""") withFallback commonConfig
+    }""" format specString(1))
 }
 
-class DirectRoutedRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(DirectRoutedRemoteActorMultiJvmSpec.node1Config) {
+class DirectRoutedRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(DirectRoutedRemoteActorMultiJvmSpec.nodeConfigs(0)) {
   import DirectRoutedRemoteActorMultiJvmSpec._
   val nodes = NrOfNodes
 
@@ -53,7 +40,7 @@ class DirectRoutedRemoteActorMultiJvmNode1 extends AkkaRemoteSpec(DirectRoutedRe
   }
 }
 
-class DirectRoutedRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(DirectRoutedRemoteActorMultiJvmSpec.node2Config) with DefaultTimeout {
+class DirectRoutedRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(DirectRoutedRemoteActorMultiJvmSpec.nodeConfigs(1)) with DefaultTimeout {
 
   import DirectRoutedRemoteActorMultiJvmSpec._
   val nodes = NrOfNodes
@@ -65,7 +52,7 @@ class DirectRoutedRemoteActorMultiJvmNode2 extends AkkaRemoteSpec(DirectRoutedRe
       val actor = system.actorOf(Props[SomeActor], "service-hello")
       actor.isInstanceOf[RemoteActorRef] must be(true)
 
-      Await.result(actor ? "identify", timeout.duration) must equal("node1")
+      Await.result(actor ? "identify", timeout.duration) must equal("AkkaRemoteSpec@localhost:9991")
 
       barrier("done")
     }

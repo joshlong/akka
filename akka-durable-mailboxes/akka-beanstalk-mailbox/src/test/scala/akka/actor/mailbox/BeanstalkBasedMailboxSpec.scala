@@ -1,4 +1,13 @@
 package akka.actor.mailbox
 
+object BeanstalkBasedMailboxSpec {
+  val config = """
+    Beanstalkd-dispatcher {
+      mailboxType = akka.actor.mailbox.BeanstalkBasedMailboxType
+      throughput = 1
+    }
+    """
+}
+
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class BeanstalkBasedMailboxSpec extends DurableMailboxSpec("Beanstalkd", BeanstalkDurableMailboxType)
+class BeanstalkBasedMailboxSpec extends DurableMailboxSpec("Beanstalkd", BeanstalkBasedMailboxSpec.config)

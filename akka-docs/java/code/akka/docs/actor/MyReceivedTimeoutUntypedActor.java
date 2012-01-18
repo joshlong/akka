@@ -1,9 +1,11 @@
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor;
 
 //#receive-timeout
 import akka.actor.Actors;
 import akka.actor.ReceiveTimeout;
-import akka.actor.UnhandledMessageException;
 import akka.actor.UntypedActor;
 import akka.util.Duration;
 
@@ -19,7 +21,7 @@ public class MyReceivedTimeoutUntypedActor extends UntypedActor {
     } else if (message == Actors.receiveTimeout()) {
       throw new RuntimeException("received timeout");
     } else {
-      throw new UnhandledMessageException(message, getSelf());
+      unhandled(message);
     }
   }
 }

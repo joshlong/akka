@@ -4,12 +4,33 @@
 
 package akka.serialization
 
-import akka.serialization.Serialization._
-import scala.reflect._
 import akka.testkit.AkkaSpec
 import com.typesafe.config.ConfigFactory
 import akka.actor._
 import java.io._
+import akka.dispatch.Await
+import akka.util.Timeout
+import akka.util.duration._
+import scala.reflect.BeanInfo
+import com.google.protobuf.Message
+
+class ProtobufSerializer extends Serializer {
+  val ARRAY_OF_BYTE_ARRAY = Array[Class[_]](classOf[Array[Byte]])
+  def includeManifest: Boolean = true
+  def identifier = 2
+
+  def toBinary(obj: AnyRef): Array[Byte] = {
+    if (!obj.isInstanceOf[Message]) throw new IllegalArgumentException(
+      "Can't serialize a non-protobuf message using protobuf [" + obj + "]")
+    obj.asInstanceOf[Message].toByteArray
+  }
+
+  def fromBinary(bytes: Array[Byte], clazz: Option[Class[_]], classLoader: Option[ClassLoader] = None): AnyRef = {
+    if (!clazz.isDefined) throw new IllegalArgumentException(
+      "Need a protobuf message class to be able to serialize bytes using protobuf")
+    clazz.get.getDeclaredMethod("parseFrom", ARRAY_OF_BYTE_ARRAY: _*).invoke(null, bytes).asInstanceOf[Message]
+  }
+}
 
 object SerializeSpec {
 
@@ -18,14 +39,10 @@ object SerializeSpec {
       actor {
         serializers {
           java = "akka.serialization.JavaSerializer"
-          proto = "akka.testing.ProtobufSerializer"
-          sjson = "akka.testing.SJSONSerializer"
-          default = "akka.serialization.JavaSerializer"
         }
     
         serialization-bindings {
-          java = ["akka.serialization.SerializeSpec$Address", "akka.serialization.MyJavaSerializableActor", "akka.serialization.MyStatelessActorWithMessagesInMailbox", "akka.serialization.MyActorWithProtobufMessagesInMailbox"]
-          sjson = ["akka.serialization.SerializeSpec$Person"]
+          java = ["akka.serialization.SerializeSpec$Person", "akka.serialization.SerializeSpec$Address", "akka.serialization.MyJavaSerializableActor", "akka.serialization.MyStatelessActorWithMessagesInMailbox", "akka.serialization.MyActorWithProtobufMessagesInMailbox"]
           proto = ["com.google.protobuf.Message", "akka.actor.ProtobufProtocol$MyMessage"]
         }
       }
@@ -54,7 +71,7 @@ class SerializeSpec extends AkkaSpec(SerializeSpec.serializationConf) {
 
     "have correct bindings" in {
       ser.bindings(addr.getClass.getName) must be("java")
-      ser.bindings(person.getClass.getName) must be("sjson")
+      ser.bindings("akka.actor.ProtobufProtocol$MyMessage") must be("proto")
     }
 
     "serialize Address" in {
@@ -127,5 +144,67 @@ class SerializeSpec extends AkkaSpec(SerializeSpec.serializationConf) {
         a.shutdown()
       }
     }
+  }
+}
+
+object VerifySerializabilitySpec {
+  val conf = ConfigFactory.parseString("""
+    akka {
+      actor {
+        serialize-messages = on
+
+        serialize-creators = on
+
+        serializers {
+          java = "akka.serialization.JavaSerializer"
+          proto = "akka.serialization.ProtobufSerializer"
+          default = "akka.serialization.JavaSerializer"
+        }
+
+        serialization-bindings {
+          java = ["akka.serialization.SerializeSpec$Address", "akka.serialization.MyJavaSerializableActor", "akka.serialization.MyStatelessActorWithMessagesInMailbox", "akka.serialization.MyActorWithProtobufMessagesInMailbox"]
+          proto = ["com.google.protobuf.Message", "akka.actor.ProtobufProtocol$MyMessage"]
+        }
+      }
+    }
+  """)
+
+  class FooActor extends Actor {
+    def receive = {
+      case s: String ⇒ sender ! s
+    }
+  }
+
+  class NonSerializableActor(system: ActorSystem) extends Actor {
+    def receive = {
+      case s: String ⇒ sender ! s
+    }
+  }
+}
+
+class VerifySerializabilitySpec extends AkkaSpec(VerifySerializabilitySpec.conf) {
+  import VerifySerializabilitySpec._
+  implicit val timeout = Timeout(5 seconds)
+
+  "verify config" in {
+    system.settings.SerializeAllCreators must be(true)
+    system.settings.SerializeAllMessages must be(true)
+  }
+
+  "verify creators" in {
+    val a = system.actorOf(Props[FooActor])
+    intercept[NotSerializableException] {
+      Await.result(a ? new AnyRef, timeout.duration)
+    }
+    system stop a
+  }
+
+  "verify messages" in {
+    val a = system.actorOf(Props[FooActor])
+    Await.result(a ? "pigdog", timeout.duration) must be("pigdog")
+    intercept[java.io.NotSerializableException] {
+      val b = system.actorOf(Props(new NonSerializableActor(system)))
+    }
+    system stop a
   }
 }

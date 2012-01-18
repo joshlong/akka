@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor;
 
 //#testkit
@@ -36,6 +39,8 @@ public class FaultHandlingTestBase {
     public void onReceive(Object o) {
       if (o instanceof Props) {
         getSender().tell(getContext().actorOf((Props) o));
+      } else {
+        unhandled(o);
       }
     }
   }
@@ -46,6 +51,8 @@ public class FaultHandlingTestBase {
     public void onReceive(Object o) {
       if (o instanceof Props) {
         getSender().tell(getContext().actorOf((Props) o));
+      } else {
+        unhandled(o);
       }
     }
     
@@ -67,6 +74,8 @@ public class FaultHandlingTestBase {
         state = (Integer) o;
       } else if (o.equals("get")) {
         getSender().tell(state);
+      } else {
+        unhandled(o);
       }
     }
   }

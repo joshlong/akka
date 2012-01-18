@@ -19,7 +19,6 @@ import com.typesafe.config.ConfigFactory
 import com.typesafe.config.ConfigParseOptions
 import com.typesafe.config.ConfigResolveOptions
 import com.typesafe.config.ConfigException
-import java.lang.reflect.InvocationTargetException
 import akka.util.{ Helpers, Duration, ReflectiveAccess }
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.{ CountDownLatch, Executors, ConcurrentHashMap }
@@ -59,9 +58,9 @@ object ActorSystem {
   def create(): ActorSystem = apply()
   def apply(): ActorSystem = apply("default")
 
-  class Settings(cfg: Config, val name: String) {
+  class Settings(cfg: Config, final val name: String) {
 
-    val config: Config = {
+    final val config: Config = {
       val config = cfg.withFallback(ConfigFactory.defaultReference)
       config.checkValid(ConfigFactory.defaultReference, "akka")
       config
@@ -70,86 +69,38 @@ object ActorSystem {
     import scala.collection.JavaConverters._
     import config._
 
-    val ConfigVersion = getString("akka.version")
+    final val ConfigVersion = getString("akka.version")
 
-    val ProviderClass = getString("akka.actor.provider")
+    final val ProviderClass = getString("akka.actor.provider")
 
-    val CreationTimeout = Timeout(Duration(getMilliseconds("akka.actor.creation-timeout"), MILLISECONDS))
-    val ReaperInterval = Duration(getMilliseconds("akka.actor.reaper-interval"), MILLISECONDS)
-    val ActorTimeout = Timeout(Duration(getMilliseconds("akka.actor.timeout"), MILLISECONDS))
-    val SerializeAllMessages = getBoolean("akka.actor.serialize-messages")
+    final val CreationTimeout = Timeout(Duration(getMilliseconds("akka.actor.creation-timeout"), MILLISECONDS))
+    final val ReaperInterval = Duration(getMilliseconds("akka.actor.reaper-interval"), MILLISECONDS)
+    final val ActorTimeout = Timeout(Duration(getMilliseconds("akka.actor.timeout"), MILLISECONDS))
+    final val SerializeAllMessages = getBoolean("akka.actor.serialize-messages")
+    final val SerializeAllCreators = getBoolean("akka.actor.serialize-creators")
 
-    val LogLevel = getString("akka.loglevel")
-    val StdoutLogLevel = getString("akka.stdout-loglevel")
-    val EventHandlers: Seq[String] = getStringList("akka.event-handlers").asScala
-    val LogConfigOnStart = config.getBoolean("akka.logConfigOnStart")
-    val AddLoggingReceive = getBoolean("akka.actor.debug.receive")
-    val DebugAutoReceive = getBoolean("akka.actor.debug.autoreceive")
-    val DebugLifecycle = getBoolean("akka.actor.debug.lifecycle")
-    val FsmDebugEvent = getBoolean("akka.actor.debug.fsm")
-    val DebugEventStream = getBoolean("akka.actor.debug.event-stream")
+    final val LogLevel = getString("akka.loglevel")
+    final val StdoutLogLevel = getString("akka.stdout-loglevel")
+    final val EventHandlers: Seq[String] = getStringList("akka.event-handlers").asScala
+    final val LogConfigOnStart = config.getBoolean("akka.logConfigOnStart")
+    final val AddLoggingReceive = getBoolean("akka.actor.debug.receive")
+    final val DebugAutoReceive = getBoolean("akka.actor.debug.autoreceive")
+    final val DebugLifecycle = getBoolean("akka.actor.debug.lifecycle")
+    final val FsmDebugEvent = getBoolean("akka.actor.debug.fsm")
+    final val DebugEventStream = getBoolean("akka.actor.debug.event-stream")
 
-    val DispatcherThroughput = getInt("akka.actor.default-dispatcher.throughput")
-    val DispatcherDefaultShutdown = Duration(getMilliseconds("akka.actor.dispatcher-shutdown-timeout"), MILLISECONDS)
-    val MailboxCapacity = getInt("akka.actor.default-dispatcher.mailbox-capacity")
-    val MailboxPushTimeout = Duration(getNanoseconds("akka.actor.default-dispatcher.mailbox-push-timeout-time"), NANOSECONDS)
-    val DispatcherThroughputDeadlineTime = Duration(getNanoseconds("akka.actor.default-dispatcher.throughput-deadline-time"), NANOSECONDS)
-
-    val Home = config.getString("akka.home") match {
+    final val Home = config.getString("akka.home") match {
       case "" ⇒ None
       case x  ⇒ Some(x)
     }
 
-    val SchedulerTickDuration = Duration(getMilliseconds("akka.scheduler.tickDuration"), MILLISECONDS)
-    val SchedulerTicksPerWheel = getInt("akka.scheduler.ticksPerWheel")
+    final val SchedulerTickDuration = Duration(getMilliseconds("akka.scheduler.tickDuration"), MILLISECONDS)
+    final val SchedulerTicksPerWheel = getInt("akka.scheduler.ticksPerWheel")
 
     if (ConfigVersion != Version)
       throw new ConfigurationException("Akka JAR version [" + Version + "] does not match the provided config version [" + ConfigVersion + "]")
 
     override def toString: String = config.root.render
-  }
-
-  // TODO move to migration kit
-  object OldConfigurationLoader {
-
-    val defaultConfig: Config = {
-      val cfg = fromProperties orElse fromClasspath orElse fromHome getOrElse emptyConfig
-      cfg.withFallback(ConfigFactory.defaultReference).resolve(ConfigResolveOptions.defaults)
-    }
-
-    // file extensions (.conf, .json, .properties), are handled by parseFileAnySyntax
-    val defaultLocation: String = (systemMode orElse envMode).map("akka." + _).getOrElse("akka")
-
-    private def envMode = System.getenv("AKKA_MODE") match {
-      case null | "" ⇒ None
-      case value     ⇒ Some(value)
-    }
-
-    private def systemMode = System.getProperty("akka.mode") match {
-      case null | "" ⇒ None
-      case value     ⇒ Some(value)
-    }
-
-    private def configParseOptions = ConfigParseOptions.defaults.setAllowMissing(false)
-
-    private def fromProperties = try {
-      val property = Option(System.getProperty("akka.config"))
-      property.map(p ⇒
-        ConfigFactory.systemProperties.withFallback(
-          ConfigFactory.parseFileAnySyntax(new File(p), configParseOptions)))
-    } catch { case _ ⇒ None }
-
-    private def fromClasspath = try {
-      Option(ConfigFactory.systemProperties.withFallback(
-        ConfigFactory.parseResourcesAnySyntax(ActorSystem.getClass, "/" + defaultLocation, configParseOptions)))
-    } catch { case _ ⇒ None }
-
-    private def fromHome = try {
-      Option(ConfigFactory.systemProperties.withFallback(
-        ConfigFactory.parseFileAnySyntax(new File(GlobalHome.get + "/config/" + defaultLocation), configParseOptions)))
-    } catch { case _ ⇒ None }
-
-    private def emptyConfig = ConfigFactory.systemProperties
   }
 }
 
@@ -167,12 +118,12 @@ object ActorSystem {
  * system.actorOf(props)
  *
  * // Scala
- * system.actorOf(Props[MyActor]("name")
- * system.actorOf(Props[MyActor]
- * system.actorOf(Props(new MyActor(...))
+ * system.actorOf(Props[MyActor], "name")
+ * system.actorOf(Props[MyActor])
+ * system.actorOf(Props(new MyActor(...)))
  *
  * // Java
- * system.actorOf(classOf[MyActor]);
+ * system.actorOf(MyActor.class);
  * system.actorOf(Props(new Creator<MyActor>() {
  *   public MyActor create() { ... }
  * });
@@ -201,16 +152,6 @@ abstract class ActorSystem extends ActorRefFactory {
    * Log the configuration.
    */
   def logConfiguration(): Unit
-
-  /**
-   * The logical node name where this actor system resides.
-   */
-  def nodename: String
-
-  /**
-   * The logical name of the cluster this actor system belongs to.
-   */
-  def clustername: String
 
   /**
    * Construct a path below the application guardian to be used with [[ActorSystem.actorFor]].
@@ -270,10 +211,9 @@ abstract class ActorSystem extends ActorRefFactory {
   //#scheduler
 
   /**
-   * Helper object for creating new dispatchers and passing in all required
-   * information.
+   * Helper object for looking up configured dispatchers.
    */
-  def dispatcherFactory: Dispatchers
+  def dispatchers: Dispatchers
 
   /**
    * Default dispatcher as configured. This dispatcher is used for all actors
@@ -284,13 +224,15 @@ abstract class ActorSystem extends ActorRefFactory {
 
   /**
    * Register a block of code to run after all actors in this actor system have
-   * been stopped.
+   * been stopped. Multiple code blocks may be registered by calling this method multiple times; there is no
+   * guarantee that they will be executed in a particular order.
    */
   def registerOnTermination[T](code: ⇒ T)
 
   /**
    * Register a block of code to run after all actors in this actor system have
-   * been stopped (Java API).
+   * been stopped. Multiple code blocks may be registered by calling this method multiple times; there is no
+   * guarantee that they will be executed in a particular order (Java API).
    */
   def registerOnTermination(code: Runnable)
 
@@ -331,7 +273,7 @@ class ActorSystemImpl(val name: String, applicationConfig: Config) extends Actor
 
   import ActorSystem._
 
-  val settings = new Settings(applicationConfig, name)
+  final val settings = new Settings(applicationConfig, name)
 
   def logConfiguration(): Unit = log.info(settings.toString)
 
@@ -378,7 +320,11 @@ class ActorSystemImpl(val name: String, applicationConfig: Config) extends Actor
   // this provides basic logging (to stdout) until .start() is called below
   val eventStream = new EventStream(DebugEventStream)
   eventStream.startStdoutLogger(settings)
-  val log = new BusLogging(eventStream, "ActorSystem") // “this” used only for .getClass in tagging messages
+
+  // unfortunately we need logging before we know the rootpath address, which wants to be inserted here
+  @volatile
+  private var _log = new BusLogging(eventStream, "ActorSystem(" + name + ")", this.getClass)
+  def log = _log
 
   val scheduler = createScheduler()
 
@@ -409,22 +355,19 @@ class ActorSystemImpl(val name: String, applicationConfig: Config) extends Actor
     val values: Array[AnyRef] = arguments map (_._2) toArray
 
     ReflectiveAccess.createInstance[ActorRefProvider](providerClass, types, values) match {
-      case Left(e: InvocationTargetException) ⇒ throw e.getTargetException
-      case Left(e)                            ⇒ throw e
-      case Right(p)                           ⇒ p
+      case Left(e)  ⇒ throw e
+      case Right(p) ⇒ p
     }
   }
 
-  val dispatcherFactory = new Dispatchers(settings, DefaultDispatcherPrerequisites(eventStream, deadLetterMailbox, scheduler))
-  val dispatcher = dispatcherFactory.defaultGlobalDispatcher
+  val dispatchers = new Dispatchers(settings, DefaultDispatcherPrerequisites(eventStream, deadLetterMailbox, scheduler))
+  val dispatcher = dispatchers.defaultGlobalDispatcher
 
   def terminationFuture: Future[Unit] = provider.terminationFuture
   def lookupRoot: InternalActorRef = provider.rootGuardian
   def guardian: InternalActorRef = provider.guardian
   def systemGuardian: InternalActorRef = provider.systemGuardian
   def deathWatch: DeathWatch = provider.deathWatch
-  def nodename: String = provider.nodename
-  def clustername: String = provider.clustername
 
   def /(actorName: String): ActorPath = guardian.path / actorName
   def /(path: Iterable[String]): ActorPath = guardian.path / path
@@ -432,7 +375,8 @@ class ActorSystemImpl(val name: String, applicationConfig: Config) extends Actor
   private lazy val _start: this.type = {
     // the provider is expected to start default loggers, LocalActorRefProvider does this
     provider.init(this)
-    deadLetters.init(dispatcher, provider.rootPath)
+    _log = new BusLogging(eventStream, "ActorSystem(" + lookupRoot.path.address + ")", this.getClass)
+    deadLetters.init(dispatcher, lookupRoot.path / "deadLetters")
     // this starts the reaper actor and the user-configured logging subscribers, which are also actors
     registerOnTermination(stopScheduler())
     _locker = new Locker(scheduler, ReaperInterval, lookupRoot.path / "locker", deathWatch)
@@ -547,4 +491,6 @@ class ActorSystemImpl(val name: String, applicationConfig: Config) extends Actor
 
     }
   }
+
+  override def toString = lookupRoot.path.root.address.toString
 }

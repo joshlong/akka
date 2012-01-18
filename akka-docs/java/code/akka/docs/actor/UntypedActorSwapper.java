@@ -1,10 +1,12 @@
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor;
 
 import static akka.docs.actor.UntypedActorSwapper.Swap.SWAP;
 import akka.actor.ActorRef;
 import akka.actor.Props;
 import akka.actor.ActorSystem;
-import akka.actor.UnhandledMessageException;
 import akka.actor.UntypedActor;
 import akka.event.Logging;
 import akka.event.LoggingAdapter;
@@ -34,7 +36,7 @@ public class UntypedActorSwapper {
           }
         });
       } else {
-        throw new UnhandledMessageException(message, getSelf());
+        unhandled(message);
       }
     }
   }

@@ -10,6 +10,8 @@ import akka.actor.{ ActorCell, ActorRef }
 import java.util.concurrent._
 import annotation.tailrec
 import akka.event.Logging.Error
+import com.typesafe.config.Config
+import akka.actor.ActorContext
 
 class MessageQueueAppendFailedException(message: String, cause: Throwable = null) extends AkkaException(message, cause)
 
@@ -33,7 +35,24 @@ object Mailbox {
   final val debug = false
 }
 
-abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMessageQueue with Runnable {
+/**
+ * Custom mailbox implementations are implemented by extending this class.
+ * E.g.
+ * <pre<code>
+ * class MyMailbox(owner: ActorContext) extends CustomMailbox(owner)
+ *   with QueueBasedMessageQueue with UnboundedMessageQueueSemantics with DefaultSystemMessageQueue {
+ *   val queue = new ConcurrentLinkedQueue[Envelope]()
+ * }
+ * </code></pre>
+ */
+abstract class CustomMailbox(val actorContext: ActorContext) extends Mailbox(actorContext.asInstanceOf[ActorCell])
+
+/**
+ * Mailbox and InternalMailbox is separated in two classes because ActorCell is needed for implementation,
+ * but can't be exposed to user defined mailbox subclasses.
+ *
+ */
+private[akka] abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMessageQueue with Runnable {
   import Mailbox._
 
   @volatile
@@ -195,7 +214,7 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
       }
     } catch {
       case e ⇒
-        actor.system.eventStream.publish(Error(e, actor.self.path.toString, "exception during processing system messages, dropping " + SystemMessage.size(nextMessage) + " messages!"))
+        actor.system.eventStream.publish(Error(e, actor.self.path.toString, this.getClass, "exception during processing system messages, dropping " + SystemMessage.size(nextMessage) + " messages!"))
         throw e
     }
   }
@@ -208,27 +227,28 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
    * called when an actor is unregistered.
    * By default it dequeues all system messages + messages and ships them to the owning actors' systems' DeadLetterMailbox
    */
-  protected[dispatch] def cleanUp(): Unit = if (actor ne null) {
-    val dlq = actor.systemImpl.deadLetterMailbox
-    if (hasSystemMessages) {
-      var message = systemDrain()
-      while (message ne null) {
-        // message must be “virgin” before being able to systemEnqueue again
-        val next = message.next
-        message.next = null
-        dlq.systemEnqueue(actor.self, message)
-        message = next
+  protected[dispatch] def cleanUp(): Unit =
+    if (actor ne null) { // actor is null for the deadLetterMailbox
+      val dlq = actor.systemImpl.deadLetterMailbox
+      if (hasSystemMessages) {
+        var message = systemDrain()
+        while (message ne null) {
+          // message must be “virgin” before being able to systemEnqueue again
+          val next = message.next
+          message.next = null
+          dlq.systemEnqueue(actor.self, message)
+          message = next
+        }
       }
-    }
 
-    if (hasMessages) {
-      var envelope = dequeue
-      while (envelope ne null) {
-        dlq.enqueue(actor.self, envelope)
-        envelope = dequeue
+      if (hasMessages) {
+        var envelope = dequeue
+        while (envelope ne null) {
+          dlq.enqueue(actor.self, envelope)
+          envelope = dequeue
+        }
       }
     }
-  }
 }
 
 trait MessageQueue {
@@ -317,15 +337,15 @@ trait QueueBasedMessageQueue extends MessageQueue {
  * Mailbox configuration.
  */
 trait MailboxType {
-  def create(receiver: ActorCell): Mailbox
+  def create(receiver: ActorContext): Mailbox
 }
 
 /**
  * It's a case class for Java (new UnboundedMailbox)
  */
 case class UnboundedMailbox() extends MailboxType {
-  override def create(receiver: ActorCell) =
-    new Mailbox(receiver) with QueueBasedMessageQueue with UnboundedMessageQueueSemantics with DefaultSystemMessageQueue {
+  override def create(receiver: ActorContext) =
+    new Mailbox(receiver.asInstanceOf[ActorCell]) with QueueBasedMessageQueue with UnboundedMessageQueueSemantics with DefaultSystemMessageQueue {
       final val queue = new ConcurrentLinkedQueue[Envelope]()
     }
 }
@@ -335,16 +355,16 @@ case class BoundedMailbox( final val capacity: Int, final val pushTimeOut: Durat
   if (capacity < 0) throw new IllegalArgumentException("The capacity for BoundedMailbox can not be negative")
   if (pushTimeOut eq null) throw new IllegalArgumentException("The push time-out for BoundedMailbox can not be null")
 
-  override def create(receiver: ActorCell) =
-    new Mailbox(receiver) with QueueBasedMessageQueue with BoundedMessageQueueSemantics with DefaultSystemMessageQueue {
+  override def create(receiver: ActorContext) =
+    new Mailbox(receiver.asInstanceOf[ActorCell]) with QueueBasedMessageQueue with BoundedMessageQueueSemantics with DefaultSystemMessageQueue {
       final val queue = new LinkedBlockingQueue[Envelope](capacity)
       final val pushTimeOut = BoundedMailbox.this.pushTimeOut
     }
 }
 
 case class UnboundedPriorityMailbox( final val cmp: Comparator[Envelope]) extends MailboxType {
-  override def create(receiver: ActorCell) =
-    new Mailbox(receiver) with QueueBasedMessageQueue with UnboundedMessageQueueSemantics with DefaultSystemMessageQueue {
+  override def create(receiver: ActorContext) =
+    new Mailbox(receiver.asInstanceOf[ActorCell]) with QueueBasedMessageQueue with UnboundedMessageQueueSemantics with DefaultSystemMessageQueue {
       final val queue = new PriorityBlockingQueue[Envelope](11, cmp)
     }
 }
@@ -354,8 +374,8 @@ case class BoundedPriorityMailbox( final val cmp: Comparator[Envelope], final va
   if (capacity < 0) throw new IllegalArgumentException("The capacity for BoundedMailbox can not be negative")
   if (pushTimeOut eq null) throw new IllegalArgumentException("The push time-out for BoundedMailbox can not be null")
 
-  override def create(receiver: ActorCell) =
-    new Mailbox(receiver) with QueueBasedMessageQueue with BoundedMessageQueueSemantics with DefaultSystemMessageQueue {
+  override def create(receiver: ActorContext) =
+    new Mailbox(receiver.asInstanceOf[ActorCell]) with QueueBasedMessageQueue with BoundedMessageQueueSemantics with DefaultSystemMessageQueue {
       final val queue = new BoundedBlockingQueue[Envelope](capacity, new PriorityQueue[Envelope](11, cmp))
       final val pushTimeOut = BoundedPriorityMailbox.this.pushTimeOut
     }

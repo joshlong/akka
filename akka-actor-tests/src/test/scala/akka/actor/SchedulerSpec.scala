@@ -1,13 +1,11 @@
 package akka.actor
 
 import org.scalatest.BeforeAndAfterEach
-import akka.testkit.AkkaSpec
-import akka.testkit.EventFilter
 import akka.util.duration._
 import java.util.concurrent.{ CountDownLatch, ConcurrentLinkedQueue, TimeUnit }
-import akka.testkit.DefaultTimeout
-import akka.testkit.TestLatch
+import akka.testkit._
 import akka.dispatch.Await
+import java.util.concurrent.atomic.AtomicInteger
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
@@ -94,6 +92,36 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout
       assert(ticks.await(3, TimeUnit.SECONDS) == false) //No counting down should've been made
     }
 
+    "be cancellable during initial delay" in {
+      val ticks = new AtomicInteger
+
+      val initialDelay = 200.milliseconds.dilated
+      val delay = 10.milliseconds.dilated
+      val timeout = collectCancellable(system.scheduler.schedule(initialDelay, delay) {
+        ticks.incrementAndGet()
+      })
+      10.milliseconds.dilated.sleep()
+      timeout.cancel()
+      (initialDelay + 100.milliseconds.dilated).sleep()
+
+      ticks.get must be(0)
+    }
+
+    "be cancellable after initial delay" in {
+      val ticks = new AtomicInteger
+
+      val initialDelay = 20.milliseconds.dilated
+      val delay = 200.milliseconds.dilated
+      val timeout = collectCancellable(system.scheduler.schedule(initialDelay, delay) {
+        ticks.incrementAndGet()
+      })
+      (initialDelay + 100.milliseconds.dilated).sleep()
+      timeout.cancel()
+      (delay + 100.milliseconds.dilated).sleep()
+
+      ticks.get must be(1)
+    }
+
     /**
      * ticket #307
      */
@@ -103,7 +131,7 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout
       object Crash
 
       val restartLatch = new TestLatch
-      val pingLatch = new CountDownLatch(6)
+      val pingLatch = new TestLatch(6)
 
       val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(AllForOneStrategy(List(classOf[Exception]), 3, 1000)))
       val props = Props(new Actor {
@@ -122,13 +150,13 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout
         collectCancellable(system.scheduler.scheduleOnce(1000 milliseconds, actor, Crash))
       }
 
-      assert(restartLatch.await(2 seconds))
+      Await.ready(restartLatch, 2 seconds)
       // should be enough time for the ping countdown to recover and reach 6 pings
-      assert(pingLatch.await(4, TimeUnit.SECONDS))
+      Await.ready(pingLatch, 5 seconds)
     }
 
     "never fire prematurely" in {
-      val ticks = new CountDownLatch(300)
+      val ticks = new TestLatch(300)
 
       case class Msg(ts: Long)
 
@@ -147,11 +175,11 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout
         Thread.sleep(5)
       }
 
-      assert(ticks.await(3, TimeUnit.SECONDS) == true)
+      Await.ready(ticks, 3 seconds)
     }
 
     "schedule with different initial delay and frequency" in {
-      val ticks = new CountDownLatch(3)
+      val ticks = new TestLatch(3)
 
       case object Msg
 
@@ -162,12 +190,12 @@ class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout
       }))
 
       val startTime = System.nanoTime()
-      val cancellable = system.scheduler.schedule(1 second, 100 milliseconds, actor, Msg)
-      ticks.await(3, TimeUnit.SECONDS)
+      val cancellable = system.scheduler.schedule(1 second, 300 milliseconds, actor, Msg)
+      Await.ready(ticks, 3 seconds)
       val elapsedTimeMs = (System.nanoTime() - startTime) / 1000000
 
-      assert(elapsedTimeMs > 1200)
-      assert(elapsedTimeMs < 1500) // the precision is not ms exact
+      assert(elapsedTimeMs > 1600)
+      assert(elapsedTimeMs < 2000) // the precision is not ms exact
       cancellable.cancel()
     }
   }

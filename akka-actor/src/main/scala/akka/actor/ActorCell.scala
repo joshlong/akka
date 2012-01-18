@@ -13,6 +13,7 @@ import akka.event.Logging.{ Debug, Warning, Error }
 import akka.util.{ Duration, Helpers }
 import akka.japi.Procedure
 import java.io.{ NotSerializableException, ObjectOutputStream }
+import akka.serialization.SerializationExtension
 
 //TODO: everything here for current compatibility - could be limited more
 
@@ -214,6 +215,16 @@ private[akka] class ActorCell(
   final var childrenRefs: TreeMap[String, ChildRestartStats] = emptyChildrenRefs
 
   private def _actorOf(props: Props, name: String): ActorRef = {
+    if (system.settings.SerializeAllCreators && !props.creator.isInstanceOf[NoSerializationVerificationNeeded]) {
+      val ser = SerializationExtension(system)
+      ser.serialize(props.creator) match {
+        case Left(t) ⇒ throw t
+        case Right(bytes) ⇒ ser.deserialize(bytes, props.creator.getClass, None) match {
+          case Left(t) ⇒ throw t
+          case _       ⇒ //All good
+        }
+      }
+    }
     val actor = provider.actorOf(systemImpl, props, self, self.path / name, false, None)
     childrenRefs = childrenRefs.updated(name, ChildRestartStats(actor))
     actor
@@ -222,8 +233,13 @@ private[akka] class ActorCell(
   def actorOf(props: Props): ActorRef = _actorOf(props, randomName())
 
   def actorOf(props: Props, name: String): ActorRef = {
-    if (name == null || name == "" || name.charAt(0) == '$')
-      throw new InvalidActorNameException("actor name must not be null, empty or start with $")
+    import ActorPath.ElementRegex
+    name match {
+      case null           ⇒ throw new InvalidActorNameException("actor name must not be null")
+      case ""             ⇒ throw new InvalidActorNameException("actor name must not be empty")
+      case ElementRegex() ⇒ // this is fine
+      case _              ⇒ throw new InvalidActorNameException("illegal actor name '" + name + "', must conform to " + ElementRegex)
+    }
     if (childrenRefs contains name)
       throw new InvalidActorNameException("actor name " + name + " is not unique!")
     _actorOf(props, name)
@@ -252,13 +268,13 @@ private[akka] class ActorCell(
 
   //Not thread safe, so should only be used inside the actor that inhabits this ActorCell
   final protected def randomName(): String = {
-    val n = nextNameSequence + 1
-    nextNameSequence = n
+    val n = nextNameSequence
+    nextNameSequence = n + 1
     Helpers.base64(n)
   }
 
   @inline
-  final def dispatcher: MessageDispatcher = if (props.dispatcher == Props.defaultDispatcher) system.dispatcher else props.dispatcher
+  final def dispatcher: MessageDispatcher = system.dispatchers.lookup(props.dispatcher)
 
   /**
    * UntypedActorContext impl
@@ -272,6 +288,9 @@ private[akka] class ActorCell(
 
     // ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
     parent.sendSystemMessage(akka.dispatch.Supervise(self))
+
+    // ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
+    dispatcher.systemDispatch(this, Create())
 
     dispatcher.attach(this)
   }
@@ -308,7 +327,7 @@ private[akka] class ActorCell(
   }
 
   final def tell(message: Any, sender: ActorRef): Unit =
-    dispatcher.dispatch(this, Envelope(message, if (sender eq null) system.deadLetters else sender))
+    dispatcher.dispatch(this, Envelope(message, if (sender eq null) system.deadLetters else sender)(system))
 
   final def sender: ActorRef = currentMessage match {
     case null                      ⇒ system.deadLetters
@@ -342,12 +361,12 @@ private[akka] class ActorCell(
       actor = created
       created.preStart()
       checkReceiveTimeout
-      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "started (" + actor + ")"))
+      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(created), "started (" + created + ")"))
     } catch {
-      // FIXME catching all and continue isn't good for OOME, ticket #1418
+      // TODO catching all and continue isn't good for OOME, ticket #1418
       case e ⇒
         try {
-          system.eventStream.publish(Error(e, self.path.toString, "error while creating actor"))
+          system.eventStream.publish(Error(e, self.path.toString, clazz(actor), "error while creating actor"))
           // prevent any further messages to be processed until the actor has been restarted
           dispatcher.suspend(this)
         } finally {
@@ -357,7 +376,7 @@ private[akka] class ActorCell(
 
     def recreate(cause: Throwable): Unit = try {
       val failedActor = actor
-      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "restarting"))
+      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(failedActor), "restarting"))
       val freshActor = newActor()
       if (failedActor ne null) {
         val c = currentMessage //One read only plz
@@ -372,15 +391,15 @@ private[akka] class ActorCell(
       actor = freshActor // assign it here so if preStart fails, we can null out the sef-refs next call
       hotswap = Props.noHotSwap // Reset the behavior
       freshActor.postRestart(cause)
-      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "restarted"))
+      if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(freshActor), "restarted"))
 
       dispatcher.resume(this) //FIXME should this be moved down?
 
       props.faultHandler.handleSupervisorRestarted(cause, self, children)
     } catch {
-      // FIXME catching all and continue isn't good for OOME, ticket #1418
+      // TODO catching all and continue isn't good for OOME, ticket #1418
       case e ⇒ try {
-        system.eventStream.publish(Error(e, self.path.toString, "error while creating actor"))
+        system.eventStream.publish(Error(e, self.path.toString, clazz(actor), "error while creating actor"))
         // prevent any further messages to be processed until the actor has been restarted
         dispatcher.suspend(this)
       } finally {
@@ -401,7 +420,7 @@ private[akka] class ActorCell(
       else {
         // do not process normal messages while waiting for all children to terminate
         dispatcher suspend this
-        if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "stopping"))
+        if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(actor), "stopping"))
         // do not use stop(child) because that would dissociate the children from us, but we still want to wait for them
         for (child ← c) child.asInstanceOf[InternalActorRef].stop()
         stopping = true
@@ -412,12 +431,12 @@ private[akka] class ActorCell(
       childrenRefs.get(child.path.name) match {
         case None ⇒
           childrenRefs = childrenRefs.updated(child.path.name, ChildRestartStats(child))
-          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "now supervising " + child))
+          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(actor), "now supervising " + child))
         case Some(ChildRestartStats(`child`, _, _)) ⇒
           // this is the nominal case where we created the child and entered it in actorCreated() above
-          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "now supervising " + child))
+          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(actor), "now supervising " + child))
         case Some(ChildRestartStats(c, _, _)) ⇒
-          system.eventStream.publish(Warning(self.path.toString, "Already supervising other child with same name '" + child.path.name + "', old: " + c + " new: " + child))
+          system.eventStream.publish(Warning(self.path.toString, clazz(actor), "Already supervising other child with same name '" + child.path.name + "', old: " + c + " new: " + child))
       }
     }
 
@@ -432,10 +451,10 @@ private[akka] class ActorCell(
         case Recreate(cause) ⇒ recreate(cause)
         case Link(subject) ⇒
           system.deathWatch.subscribe(self, subject)
-          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "now monitoring " + subject))
+          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(actor), "now monitoring " + subject))
         case Unlink(subject) ⇒
           system.deathWatch.unsubscribe(self, subject)
-          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "stopped monitoring " + subject))
+          if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, clazz(actor), "stopped monitoring " + subject))
         case Suspend()              ⇒ suspend()
         case Resume()               ⇒ resume()
         case Terminate()            ⇒ terminate()
@@ -444,7 +463,7 @@ private[akka] class ActorCell(
       }
     } catch {
       case e ⇒ //Should we really catch everything here?
-        system.eventStream.publish(Error(e, self.path.toString, "error while processing " + message))
+        system.eventStream.publish(Error(e, self.path.toString, clazz(actor), "error while processing " + message))
         //TODO FIXME How should problems here be handled???
         throw e
     }
@@ -464,7 +483,7 @@ private[akka] class ActorCell(
           currentMessage = null // reset current message after successful invocation
         } catch {
           case e ⇒
-            system.eventStream.publish(Error(e, self.path.toString, e.getMessage))
+            system.eventStream.publish(Error(e, self.path.toString, clazz(actor), e.getMessage))
 
             // prevent any further messages to be processed until the actor has been restarted
             dispatcher.suspend(this)
@@ -484,7 +503,7 @@ private[akka] class ActorCell(
         }
       } catch {
         case e ⇒
-          system.eventStream.publish(Error(e, self.path.toString, e.getMessage))
+          system.eventStream.publish(Error(e, self.path.toString, clazz(actor), e.getMessage))
           throw e
       }
     }
@@ -514,7 +533,8 @@ private[akka] class ActorCell(
   }
 
   def autoReceiveMessage(msg: Envelope) {
-    if (system.settings.DebugAutoReceive) system.eventStream.publish(Debug(self.path.toString, "received AutoReceiveMessage " + msg))
+    if (system.settings.DebugAutoReceive)
+      system.eventStream.publish(Debug(self.path.toString, clazz(actor), "received AutoReceiveMessage " + msg))
 
     msg.message match {
       case Failed(cause)            ⇒ handleFailure(sender, cause)
@@ -538,7 +558,8 @@ private[akka] class ActorCell(
       try {
         parent.sendSystemMessage(ChildTerminated(self))
         system.deathWatch.publish(Terminated(self))
-        if (system.settings.DebugLifecycle) system.eventStream.publish(Debug(self.path.toString, "stopped"))
+        if (system.settings.DebugLifecycle)
+          system.eventStream.publish(Debug(self.path.toString, clazz(actor), "stopped")) // FIXME: can actor be null?
       } finally {
         currentMessage = null
         clearActorFields()
@@ -549,8 +570,8 @@ private[akka] class ActorCell(
 
   final def handleFailure(child: ActorRef, cause: Throwable): Unit = childrenRefs.get(child.path.name) match {
     case Some(stats) if stats.child == child ⇒ if (!props.faultHandler.handleFailure(this, child, cause, stats, childrenRefs.values)) throw cause
-    case Some(stats)                         ⇒ system.eventStream.publish(Warning(self.path.toString, "dropping Failed(" + cause + ") from unknown child " + child + " matching names but not the same, was: " + stats.child))
-    case None                                ⇒ system.eventStream.publish(Warning(self.path.toString, "dropping Failed(" + cause + ") from unknown child " + child))
+    case Some(stats)                         ⇒ system.eventStream.publish(Warning(self.path.toString, clazz(actor), "dropping Failed(" + cause + ") from unknown child " + child + " matching names but not the same, was: " + stats.child))
+    case None                                ⇒ system.eventStream.publish(Warning(self.path.toString, clazz(actor), "dropping Failed(" + cause + ") from unknown child " + child))
   }
 
   final def handleChildTerminated(child: ActorRef): Unit = {
@@ -566,7 +587,7 @@ private[akka] class ActorCell(
 
   final def checkReceiveTimeout() {
     val recvtimeout = receiveTimeoutData
-    if (recvtimeout._1 > 0 && dispatcher.mailboxIsEmpty(this)) {
+    if (recvtimeout._1 > 0 && !mailbox.hasMessages) {
       recvtimeout._2.cancel() //Cancel any ongoing future
       //Only reschedule if desired and there are currently no more messages to be processed
       receiveTimeoutData = (recvtimeout._1, system.scheduler.scheduleOnce(Duration(recvtimeout._1, TimeUnit.MILLISECONDS), self, ReceiveTimeout))
@@ -608,5 +629,10 @@ private[akka] class ActorCell(
       lookupAndSetField(a.getClass, a, "context", context)
       lookupAndSetField(a.getClass, a, "self", self)
     }
+  }
+
+  private def clazz(o: AnyRef): Class[_] = {
+    if (o eq null) this.getClass
+    else o.getClass
   }
 }
