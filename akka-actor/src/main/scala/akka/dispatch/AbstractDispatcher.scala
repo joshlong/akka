@@ -17,9 +17,6 @@ import akka.event.EventStream
 import akka.actor.ActorSystem.Settings
 import com.typesafe.config.Config
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 final case class Envelope(val message: Any, val sender: ActorRef) {
   if (message.isInstanceOf[AnyRef] && (message.asInstanceOf[AnyRef] eq null)) throw new InvalidMessageException("Message is null")
 }
@@ -53,6 +50,7 @@ object SystemMessage {
  * ➡➡➡ NEVER SEND THE SAME SYSTEM MESSAGE OBJECT TO TWO ACTORS ⬅⬅⬅
  */
 sealed trait SystemMessage extends PossiblyHarmful {
+  @transient
   var next: SystemMessage = _
 }
 case class Create() extends SystemMessage // send to self from Dispatcher.register
@@ -61,14 +59,16 @@ case class Suspend() extends SystemMessage // sent to self from ActorCell.suspen
 case class Resume() extends SystemMessage // sent to self from ActorCell.resume
 case class Terminate() extends SystemMessage // sent to self from ActorCell.stop
 case class Supervise(child: ActorRef) extends SystemMessage // sent to supervisor ActorRef from ActorCell.start
-case class Link(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.startsWatching
-case class Unlink(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.stopsWatching
+case class ChildTerminated(child: ActorRef) extends SystemMessage // sent to supervisor from ActorCell.doTerminate
+case class Link(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.watch
+case class Unlink(subject: ActorRef) extends SystemMessage // sent to self from ActorCell.unwatch
 
 final case class TaskInvocation(eventStream: EventStream, function: () ⇒ Unit, cleanup: () ⇒ Unit) extends Runnable {
   def run() {
     try {
       function()
     } catch {
+      // FIXME catching all and continue isn't good for OOME, ticket #1418
       case e ⇒ eventStream.publish(Error(e, "TaskInvocation", e.getMessage))
     } finally {
       cleanup()
@@ -84,9 +84,6 @@ object MessageDispatcher {
   implicit def defaultDispatcher(implicit system: ActorSystem) = system.dispatcher
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) extends AbstractMessageDispatcher with Serializable {
 
   import MessageDispatcher._
@@ -135,7 +132,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
       shutdownScheduleUpdater.get(this) match {
         case UNSCHEDULED ⇒
           if (shutdownScheduleUpdater.compareAndSet(this, UNSCHEDULED, SCHEDULED)) {
-            scheduler.scheduleOnce(shutdownAction, Duration(shutdownTimeout.toMillis, TimeUnit.MILLISECONDS))
+            scheduleShutdownAction()
             ()
           } else ifSensibleToDoSoThenScheduleShutdown()
         case SCHEDULED ⇒
@@ -144,6 +141,13 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
         case RESCHEDULED ⇒ ()
       }
     case _ ⇒ ()
+  }
+
+  private def scheduleShutdownAction(): Unit = {
+    // IllegalStateException is thrown if scheduler has been shutdown
+    try scheduler.scheduleOnce(shutdownTimeout, shutdownAction) catch {
+      case _: IllegalStateException ⇒ shutdown()
+    }
   }
 
   private final val taskCleanup: () ⇒ Unit =
@@ -166,34 +170,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
     val mailBox = actor.mailbox
     mailBox.becomeClosed() // FIXME reschedule in tell if possible race with cleanUp is detected in order to properly clean up
     actor.mailbox = deadLetterMailbox
-    cleanUpMailboxFor(actor, mailBox)
     mailBox.cleanUp()
-  }
-
-  /**
-   * Overridable callback to clean up the mailbox for a given actor,
-   * called when an actor is unregistered.
-   */
-  protected def cleanUpMailboxFor(actor: ActorCell, mailBox: Mailbox) {
-
-    if (mailBox.hasSystemMessages) {
-      var message = mailBox.systemDrain()
-      while (message ne null) {
-        // message must be “virgin” before being able to systemEnqueue again
-        val next = message.next
-        message.next = null
-        deadLetterMailbox.systemEnqueue(actor.self, message)
-        message = next
-      }
-    }
-
-    if (mailBox.hasMessages) {
-      var envelope = mailBox.dequeue
-      while (envelope ne null) {
-        deadLetterMailbox.enqueue(actor.self, envelope)
-        envelope = mailBox.dequeue
-      }
-    }
   }
 
   private val shutdownAction = new Runnable {
@@ -210,7 +187,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
           }
         case RESCHEDULED ⇒
           if (shutdownScheduleUpdater.compareAndSet(MessageDispatcher.this, RESCHEDULED, SCHEDULED))
-            scheduler.scheduleOnce(this, Duration(shutdownTimeout.toMillis, TimeUnit.MILLISECONDS))
+            scheduleShutdownAction()
           else run()
       }
     }
@@ -219,7 +196,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
   /**
    * When the dispatcher no longer has any actors registered, how long will it wait until it shuts itself down,
    * defaulting to your akka configs "akka.actor.dispatcher-shutdown-timeout" or default specified in
-   * akka-actor-reference.conf
+   * reference.conf
    */
   protected[akka] def shutdownTimeout: Duration
 
@@ -285,7 +262,7 @@ abstract class MessageDispatcher(val prerequisites: DispatcherPrerequisites) ext
 }
 
 /**
- * Trait to be used for hooking in new dispatchers into Dispatchers.fromConfig
+ * Trait to be used for hooking in new dispatchers into Dispatchers.from(cfg: Config)
  */
 abstract class MessageDispatcherConfigurator() {
   /**
@@ -302,26 +279,28 @@ abstract class MessageDispatcherConfigurator() {
     }
   }
 
-  def configureThreadPool(config: Config,
-                          settings: Settings,
-                          createDispatcher: ⇒ (ThreadPoolConfig) ⇒ MessageDispatcher): ThreadPoolConfigDispatcherBuilder = {
+  def configureThreadPool(
+    config: Config,
+    settings: Settings,
+    createDispatcher: ⇒ (ThreadPoolConfig) ⇒ MessageDispatcher): ThreadPoolConfigDispatcherBuilder = {
     import ThreadPoolConfigDispatcherBuilder.conf_?
 
     //Apply the following options to the config if they are present in the config
 
-    ThreadPoolConfigDispatcherBuilder(createDispatcher, ThreadPoolConfig()).configure(
-      conf_?(Some(config getMilliseconds "keep-alive-time"))(time ⇒ _.setKeepAliveTime(Duration(time, TimeUnit.MILLISECONDS))),
-      conf_?(Some(config getDouble "core-pool-size-factor"))(factor ⇒ _.setCorePoolSizeFromFactor(factor)),
-      conf_?(Some(config getDouble "max-pool-size-factor"))(factor ⇒ _.setMaxPoolSizeFromFactor(factor)),
-      conf_?(Some(config getBoolean "allow-core-timeout"))(allow ⇒ _.setAllowCoreThreadTimeout(allow)),
-      conf_?(Some(config getInt "task-queue-size") flatMap {
-        case size if size > 0 ⇒
-          Some(config getString "task-queue-type") map {
-            case "array"       ⇒ ThreadPoolConfig.arrayBlockingQueue(size, false) //TODO config fairness?
-            case "" | "linked" ⇒ ThreadPoolConfig.linkedBlockingQueue(size)
-            case x             ⇒ throw new IllegalArgumentException("[%s] is not a valid task-queue-type [array|linked]!" format x)
-          }
-        case _ ⇒ None
-      })(queueFactory ⇒ _.setQueueFactory(queueFactory)))
+    ThreadPoolConfigDispatcherBuilder(createDispatcher, ThreadPoolConfig(daemonic = config getBoolean "daemonic"))
+      .setKeepAliveTime(Duration(config getMilliseconds "keep-alive-time", TimeUnit.MILLISECONDS))
+      .setAllowCoreThreadTimeout(config getBoolean "allow-core-timeout")
+      .setCorePoolSizeFromFactor(config getInt "core-pool-size-min", config getDouble "core-pool-size-factor", config getInt "core-pool-size-max")
+      .setMaxPoolSizeFromFactor(config getInt "max-pool-size-min", config getDouble "max-pool-size-factor", config getInt "max-pool-size-max")
+      .configure(
+        conf_?(Some(config getInt "task-queue-size") flatMap {
+          case size if size > 0 ⇒
+            Some(config getString "task-queue-type") map {
+              case "array"       ⇒ ThreadPoolConfig.arrayBlockingQueue(size, false) //TODO config fairness?
+              case "" | "linked" ⇒ ThreadPoolConfig.linkedBlockingQueue(size)
+              case x             ⇒ throw new IllegalArgumentException("[%s] is not a valid task-queue-type [array|linked]!" format x)
+            }
+          case _ ⇒ None
+        })(queueFactory ⇒ _.setQueueFactory(queueFactory)))
   }
 }

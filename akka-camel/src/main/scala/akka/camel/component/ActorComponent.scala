@@ -172,7 +172,7 @@ class ActorProducer(val ep: ActorEndpoint) extends DefaultProducer(ep) with Asyn
 
   private def sendSync(exchange: Exchange) = {
     val actor = target(exchange)
-    val result: Any = try { (actor ? requestFor(exchange)).as[Any] } catch { case e ⇒ Some(Failure(e)) }
+    val result: Any = try { Some(Await.result((actor ? requestFor(exchange), 5 seconds)) } catch { case e ⇒ Some(Failure(e)) }
 
     result match {
       case Some(Ack)          ⇒ { /* no response message to set */ }
@@ -293,11 +293,8 @@ private[akka] class AsyncCallbackAdapter(exchange: Exchange, callback: AsyncCall
     callback.done(false)
   }
 
-  def startsWatching(actorRef: ActorRef): ActorRef = unsupported
-  def stopsWatching(actorRef: ActorRef): ActorRef = unsupported
-
   def ?(message: Any)(implicit timeout: Timeout): Future[Any] =
-    new KeptPromise[Any](Left(new UnsupportedOperationException("Ask/? is not supported for %s".format(getClass.getName))))
+    Promise.failed(new UnsupportedOperationException("Ask/? is not supported for %s".format(getClass.getName)))
   def restart(reason: Throwable): Unit = unsupported
 
   private def unsupported = throw new UnsupportedOperationException("Not supported for %s" format classOf[AsyncCallbackAdapter].getName)

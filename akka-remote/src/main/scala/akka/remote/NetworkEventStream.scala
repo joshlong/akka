@@ -12,17 +12,15 @@ import akka.actor.ActorSystemImpl
 /**
  * Stream of all kinds of network events, remote failure and connection events, cluster failure and connection events etc.
  * Also provides API for sender listener management.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 object NetworkEventStream {
 
   private sealed trait NetworkEventStreamEvent
 
-  private case class Register(listener: Listener, connectionAddress: RemoteAddress)
+  private case class Register(listener: Listener, connectionAddress: ParsedTransportAddress)
     extends NetworkEventStreamEvent
 
-  private case class Unregister(listener: Listener, connectionAddress: RemoteAddress)
+  private case class Unregister(listener: Listener, connectionAddress: ParsedTransportAddress)
     extends NetworkEventStreamEvent
 
   /**
@@ -37,15 +35,15 @@ object NetworkEventStream {
    */
   private class Channel extends Actor {
 
-    val listeners = new mutable.HashMap[RemoteAddress, mutable.Set[Listener]]() {
-      override def default(k: RemoteAddress) = mutable.Set.empty[Listener]
+    val listeners = new mutable.HashMap[ParsedTransportAddress, mutable.Set[Listener]]() {
+      override def default(k: ParsedTransportAddress) = mutable.Set.empty[Listener]
     }
 
     def receive = {
       case event: RemoteClientLifeCycleEvent ⇒
         listeners(event.remoteAddress) foreach (_ notify event)
 
-      case event: RemoteServerLifeCycleEvent ⇒ // FIXME handle RemoteServerLifeCycleEvent
+      case event: RemoteServerLifeCycleEvent ⇒ // FIXME handle RemoteServerLifeCycleEvent, ticket #1408 and #1190
 
       case Register(listener, connectionAddress) ⇒
         listeners(connectionAddress) += listener
@@ -62,20 +60,20 @@ class NetworkEventStream(system: ActorSystemImpl) {
 
   import NetworkEventStream._
 
-  // FIXME: check that this supervision is correct
-  private[akka] val sender = system.provider.actorOf(system,
-    Props[Channel].copy(dispatcher = system.dispatcherFactory.newPinnedDispatcher("NetworkEventStream")),
-    system.systemGuardian, "network-event-sender", systemService = true)
+  // FIXME: check that this supervision is correct, ticket #1408
+  private[akka] val sender =
+    system.systemActorOf(Props[Channel].copy(dispatcher = system.dispatcherFactory.newPinnedDispatcher("NetworkEventStream")),
+      "network-event-sender")
 
   /**
    * Registers a network event stream listener (asyncronously).
    */
-  def register(listener: Listener, connectionAddress: RemoteAddress) =
+  def register(listener: Listener, connectionAddress: ParsedTransportAddress) =
     sender ! Register(listener, connectionAddress)
 
   /**
    * Unregisters a network event stream listener (asyncronously) .
    */
-  def unregister(listener: Listener, connectionAddress: RemoteAddress) =
+  def unregister(listener: Listener, connectionAddress: ParsedTransportAddress) =
     sender ! Unregister(listener, connectionAddress)
 }

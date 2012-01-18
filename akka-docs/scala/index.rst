@@ -8,17 +8,17 @@ Scala API
 
    actors
    typed-actors
-   actor-registry
+   logging
+   scheduler
    futures
    dataflow
-   agents
-   stm
-   transactors
-   remote-actors
    fault-tolerance
    dispatchers
    routing
+   remoting
+   serialization
    fsm
-   http
    testing
-   tutorial-chat-server
+   extending-akka
+   agents
+   transactors

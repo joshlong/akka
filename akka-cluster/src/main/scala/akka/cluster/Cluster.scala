@@ -33,7 +33,6 @@ import Status._
 import DeploymentConfig._
 
 import akka.event.EventHandler
-import akka.dispatch.{ Dispatchers, Future, PinnedDispatcher }
 import akka.config.Config
 import akka.config.Config._
 
@@ -52,13 +51,12 @@ import RemoteSystemDaemonMessageType._
 import com.eaio.uuid.UUID
 
 import com.google.protobuf.ByteString
+import akka.dispatch.{Await, Dispatchers, Future, PinnedDispatcher}
 
 // FIXME add watch for each node that when the entry for the node is removed then the node shuts itself down
 
 /**
  * JMX MBean for the cluster service.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 trait ClusterNodeMBean {
 
@@ -140,8 +138,6 @@ trait ClusterNodeMBean {
 
 /**
  * Module for the Cluster. Also holds global state such as configuration data etc.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 object Cluster {
   val EMPTY_STRING = "".intern
@@ -257,8 +253,6 @@ object Cluster {
  *
  *   /clusterName/'actor-address-to-uuids'/actorAddress/actorUuid
  * </pre>
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class DefaultClusterNode private[akka] (
   val nodeAddress: NodeAddress,
@@ -297,7 +291,7 @@ class DefaultClusterNode private[akka] (
         :: Nil)).start()
 
   lazy val remoteService: RemoteSupport = {
-    val remote = new akka.cluster.netty.NettyRemoteSupport
+    val remote = new akka.remote.netty.NettyRemoteSupport
     remote.start(hostname, port)
     remote.register(RemoteClusterDaemon.Address, remoteDaemon)
     remote.addListener(RemoteFailureDetector.sender)
@@ -1156,22 +1150,17 @@ class DefaultClusterNode private[akka] (
       connection ! command
     } else {
       try {
-        (connection ? (command, remoteDaemonAckTimeout)).as[Status] match {
-
-          case Some(Success(status)) ⇒
+        Await.result(connection ? (command, remoteDaemonAckTimeout), 10 seconds).asInstanceOf[Status] match {
+          case Success(status) ⇒
             EventHandler.debug(this, "Remote command sent to [%s] successfully received".format(status))
-
-          case Some(Failure(cause)) ⇒
+          case Failure(cause) ⇒
             EventHandler.error(cause, this, cause.toString)
             throw cause
-
-          case None ⇒
-            val error = new ClusterException(
-              "Remote command to [%s] timed out".format(connection.address))
-            EventHandler.error(error, this, error.toString)
-            throw error
         }
       } catch {
+        case e: TimeoutException =>
+          EventHandler.error(e, this, "Remote command to [%s] timed out".format(connection.address))
+          throw e
         case e: Exception ⇒
           EventHandler.error(e, this, "Could not send remote command to [%s] due to: %s".format(connection.address, e.toString))
           throw e
@@ -1601,9 +1590,6 @@ class DefaultClusterNode private[akka] (
   }
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 class MembershipChildListener(self: ClusterNode) extends IZkChildListener with ErrorHandler {
   def handleChildChange(parentPath: String, currentChilds: JList[String]) {
     withErrorHandler {
@@ -1643,9 +1629,6 @@ class MembershipChildListener(self: ClusterNode) extends IZkChildListener with E
   }
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 class StateListener(self: ClusterNode) extends IZkStateListener {
   def handleStateChanged(state: KeeperState) {
     state match {
@@ -1671,9 +1654,6 @@ class StateListener(self: ClusterNode) extends IZkStateListener {
   }
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 trait ErrorHandler {
   def withErrorHandler[T](body: ⇒ T) = {
     try {
@@ -1686,9 +1666,6 @@ trait ErrorHandler {
   }
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 object RemoteClusterDaemon {
   val Address = "akka-cluster-daemon".intern
 
@@ -1700,8 +1677,6 @@ object RemoteClusterDaemon {
  * Internal "daemon" actor for cluster internal communication.
  *
  * It acts as the brain of the cluster that responds to cluster events (messages) and undertakes action.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class RemoteClusterDaemon(cluster: ClusterNode) extends Actor {
 

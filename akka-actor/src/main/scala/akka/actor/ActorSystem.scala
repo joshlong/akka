@@ -8,59 +8,64 @@ import akka.actor._
 import akka.event._
 import akka.dispatch._
 import akka.util.duration._
-import java.net.InetAddress
-import com.eaio.uuid.UUID
-import akka.serialization.Serialization
-import akka.remote.RemoteAddress
+import akka.util.Timeout
+import akka.util.Timeout._
 import org.jboss.netty.akka.util.HashedWheelTimer
-import java.util.concurrent.TimeUnit.SECONDS
 import java.util.concurrent.TimeUnit.MILLISECONDS
 import java.util.concurrent.TimeUnit.NANOSECONDS
 import java.io.File
 import com.typesafe.config.Config
-import com.typesafe.config.ConfigParseOptions
-import com.typesafe.config.ConfigRoot
 import com.typesafe.config.ConfigFactory
+import com.typesafe.config.ConfigParseOptions
+import com.typesafe.config.ConfigResolveOptions
+import com.typesafe.config.ConfigException
 import java.lang.reflect.InvocationTargetException
 import akka.util.{ Helpers, Duration, ReflectiveAccess }
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.{ CountDownLatch, Executors, ConcurrentHashMap }
 import scala.annotation.tailrec
-import akka.serialization.SerializationExtension
 import org.jboss.netty.akka.util.internal.ConcurrentIdentityHashMap
+import java.io.Closeable
 
 object ActorSystem {
 
   val Version = "2.0-SNAPSHOT"
 
-  val envHome = System.getenv("AKKA_HOME") match {
+  val EnvHome = System.getenv("AKKA_HOME") match {
     case null | "" | "." ⇒ None
     case value           ⇒ Some(value)
   }
 
-  val systemHome = System.getProperty("akka.home") match {
+  val SystemHome = System.getProperty("akka.home") match {
     case null | "" ⇒ None
     case value     ⇒ Some(value)
   }
 
-  val GlobalHome = systemHome orElse envHome
+  val GlobalHome = SystemHome orElse EnvHome
 
   def create(name: String, config: Config): ActorSystem = apply(name, config)
   def apply(name: String, config: Config): ActorSystem = new ActorSystemImpl(name, config).start()
 
+  /**
+   * Uses the standard default Config from ConfigFactory.load(), since none is provided.
+   */
   def create(name: String): ActorSystem = apply(name)
-  def apply(name: String): ActorSystem = apply(name, DefaultConfigurationLoader.defaultConfig)
+
+  /**
+   * Uses the standard default Config from ConfigFactory.load(), since none is provided.
+   */
+  def apply(name: String): ActorSystem = apply(name, ConfigFactory.load())
 
   def create(): ActorSystem = apply()
   def apply(): ActorSystem = apply("default")
 
-  class Settings(cfg: Config) {
-    private def referenceConfig: Config =
-      ConfigFactory.parseResource(classOf[ActorSystem], "/akka-actor-reference.conf",
-        ConfigParseOptions.defaults.setAllowMissing(false))
-    val config: ConfigRoot = ConfigFactory.emptyRoot("akka-actor").withFallback(cfg).withFallback(referenceConfig).resolve()
+  class Settings(cfg: Config, val name: String) {
+
+    val config: Config = {
+      val config = cfg.withFallback(ConfigFactory.defaultReference)
+      config.checkValid(ConfigFactory.defaultReference, "akka")
+      config
+    }
 
     import scala.collection.JavaConverters._
     import config._
@@ -69,6 +74,8 @@ object ActorSystem {
 
     val ProviderClass = getString("akka.actor.provider")
 
+    val CreationTimeout = Timeout(Duration(getMilliseconds("akka.actor.creation-timeout"), MILLISECONDS))
+    val ReaperInterval = Duration(getMilliseconds("akka.actor.reaper-interval"), MILLISECONDS)
     val ActorTimeout = Timeout(Duration(getMilliseconds("akka.actor.timeout"), MILLISECONDS))
     val SerializeAllMessages = getBoolean("akka.actor.serialize-messages")
 
@@ -92,26 +99,23 @@ object ActorSystem {
       case "" ⇒ None
       case x  ⇒ Some(x)
     }
-    val BootClasses: Seq[String] = getStringList("akka.boot").asScala
-
-    val EnabledModules: Seq[String] = getStringList("akka.enabled-modules").asScala
 
     val SchedulerTickDuration = Duration(getMilliseconds("akka.scheduler.tickDuration"), MILLISECONDS)
     val SchedulerTicksPerWheel = getInt("akka.scheduler.ticksPerWheel")
 
     if (ConfigVersion != Version)
-      throw new ConfigurationException("Akka JAR version [" + Version +
-        "] does not match the provided config version [" + ConfigVersion + "]")
+      throw new ConfigurationException("Akka JAR version [" + Version + "] does not match the provided config version [" + ConfigVersion + "]")
 
-    override def toString: String = {
-      config.toString
-    }
-
+    override def toString: String = config.root.render
   }
 
-  object DefaultConfigurationLoader {
+  // TODO move to migration kit
+  object OldConfigurationLoader {
 
-    val defaultConfig: Config = fromProperties orElse fromClasspath orElse fromHome getOrElse emptyConfig
+    val defaultConfig: Config = {
+      val cfg = fromProperties orElse fromClasspath orElse fromHome getOrElse emptyConfig
+      cfg.withFallback(ConfigFactory.defaultReference).resolve(ConfigResolveOptions.defaults)
+    }
 
     // file extensions (.conf, .json, .properties), are handled by parseFileAnySyntax
     val defaultLocation: String = (systemMode orElse envMode).map("akka." + _).getOrElse("akka")
@@ -137,7 +141,7 @@ object ActorSystem {
 
     private def fromClasspath = try {
       Option(ConfigFactory.systemProperties.withFallback(
-        ConfigFactory.parseResourceAnySyntax(ActorSystem.getClass, "/" + defaultLocation, configParseOptions)))
+        ConfigFactory.parseResourcesAnySyntax(ActorSystem.getClass, "/" + defaultLocation, configParseOptions)))
     } catch { case _ ⇒ None }
 
     private def fromHome = try {
@@ -146,17 +150,40 @@ object ActorSystem {
     } catch { case _ ⇒ None }
 
     private def emptyConfig = ConfigFactory.systemProperties
-
   }
-
 }
 
 /**
  * An actor system is a hierarchical group of actors which share common
  * configuration, e.g. dispatchers, deployments, remote capabilities and
  * addresses. It is also the entry point for creating or looking up actors.
+ *
+ * There are several possibilities for creating actors (see [[akka.actor.Props]]
+ * for details on `props`):
+ *
+ * {{{
+ * // Java or Scala
+ * system.actorOf(props, "name")
+ * system.actorOf(props)
+ *
+ * // Scala
+ * system.actorOf(Props[MyActor]("name")
+ * system.actorOf(Props[MyActor]
+ * system.actorOf(Props(new MyActor(...))
+ *
+ * // Java
+ * system.actorOf(classOf[MyActor]);
+ * system.actorOf(Props(new Creator<MyActor>() {
+ *   public MyActor create() { ... }
+ * });
+ * system.actorOf(Props(new Creator<MyActor>() {
+ *   public MyActor create() { ... }
+ * }, "name");
+ * }}}
+ *
+ * Where no name is given explicitly, one will be automatically generated.
  */
-abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
+abstract class ActorSystem extends ActorRefFactory {
   import ActorSystem._
 
   /**
@@ -191,6 +218,24 @@ abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
   def /(name: String): ActorPath
 
   /**
+   * ''Java API'': Create a new child actor path.
+   */
+  def child(child: String): ActorPath = /(child)
+
+  /**
+   * Construct a path below the application guardian to be used with [[ActorSystem.actorFor]].
+   */
+  def /(name: Iterable[String]): ActorPath
+
+  /**
+   * ''Java API'': Recursively create a descendant’s path by appending all child names.
+   */
+  def descendant(names: java.lang.Iterable[String]): ActorPath = {
+    import scala.collection.JavaConverters._
+    /(names.asScala)
+  }
+
+  /**
    * Start-up time in milliseconds since the epoch.
    */
   val startTime = System.currentTimeMillis
@@ -216,17 +261,13 @@ abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
    * effort basis and hence not strictly guaranteed.
    */
   def deadLetters: ActorRef
-  // FIXME: do not publish this
-  def deadLetterMailbox: Mailbox
-
-  // FIXME: TypedActor should be an extension
-  def typedActor: TypedActor
-
+  //#scheduler
   /**
    * Light-weight scheduler for running asynchronous tasks after some deadline
    * in the future. Not terribly precise but cheap.
    */
   def scheduler: Scheduler
+  //#scheduler
 
   /**
    * Helper object for creating new dispatchers and passing in all required
@@ -245,7 +286,7 @@ abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
    * Register a block of code to run after all actors in this actor system have
    * been stopped.
    */
-  def registerOnTermination(code: ⇒ Unit)
+  def registerOnTermination[T](code: ⇒ T)
 
   /**
    * Register a block of code to run after all actors in this actor system have
@@ -259,7 +300,7 @@ abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
    * (below which the logging actors reside) and the execute all registered
    * termination handlers (see [[ActorSystem.registerOnTermination]]).
    */
-  def stop()
+  def shutdown()
 
   /**
    * Registers the provided extension and creates its payload, if this extension isn't already registered
@@ -283,17 +324,54 @@ abstract class ActorSystem extends ActorRefFactory with TypedActorFactory {
   def hasExtension(ext: ExtensionId[_ <: Extension]): Boolean
 }
 
-class ActorSystemImpl(val name: String, val applicationConfig: Config) extends ActorSystem {
+class ActorSystemImpl(val name: String, applicationConfig: Config) extends ActorSystem {
+
+  if (!name.matches("""^\w+$"""))
+    throw new IllegalArgumentException("invalid ActorSystem name [" + name + "], must contain only word characters (i.e. [a-zA-Z_0-9])")
 
   import ActorSystem._
 
-  val settings = new Settings(applicationConfig)
+  val settings = new Settings(applicationConfig, name)
 
   def logConfiguration(): Unit = log.info(settings.toString)
 
   protected def systemImpl = this
 
-  private[akka] def systemActorOf(props: Props, address: String): ActorRef = provider.actorOf(this, props, systemGuardian, address, true)
+  private[akka] def systemActorOf(props: Props, name: String): ActorRef = {
+    implicit val timeout = settings.CreationTimeout
+    Await.result(systemGuardian ? CreateChild(props, name), timeout.duration) match {
+      case ref: ActorRef ⇒ ref
+      case ex: Exception ⇒ throw ex
+    }
+  }
+
+  def actorOf(props: Props, name: String): ActorRef = {
+    implicit val timeout = settings.CreationTimeout
+    Await.result(guardian ? CreateChild(props, name), timeout.duration) match {
+      case ref: ActorRef ⇒ ref
+      case ex: Exception ⇒ throw ex
+    }
+  }
+
+  def actorOf(props: Props): ActorRef = {
+    implicit val timeout = settings.CreationTimeout
+    Await.result(guardian ? CreateRandomNameChild(props), timeout.duration) match {
+      case ref: ActorRef ⇒ ref
+      case ex: Exception ⇒ throw ex
+    }
+  }
+
+  def stop(actor: ActorRef): Unit = {
+    implicit val timeout = settings.CreationTimeout
+    val path = actor.path
+    val guard = guardian.path
+    val sys = systemGuardian.path
+    path.parent match {
+      case `guard` ⇒ Await.result(guardian ? StopChild(actor), timeout.duration)
+      case `sys`   ⇒ Await.result(systemGuardian ? StopChild(actor), timeout.duration)
+      case _       ⇒ actor.asInstanceOf[InternalActorRef].stop()
+    }
+  }
 
   import settings._
 
@@ -302,26 +380,7 @@ class ActorSystemImpl(val name: String, val applicationConfig: Config) extends A
   eventStream.startStdoutLogger(settings)
   val log = new BusLogging(eventStream, "ActorSystem") // “this” used only for .getClass in tagging messages
 
-  val scheduler = new DefaultScheduler(new HashedWheelTimer(log, Executors.defaultThreadFactory, settings.SchedulerTickDuration, settings.SchedulerTicksPerWheel), this)
-
-  val provider: ActorRefProvider = {
-    val providerClass = ReflectiveAccess.getClassFor(ProviderClass) match {
-      case Left(e)  ⇒ throw e
-      case Right(b) ⇒ b
-    }
-    val arguments = Seq(
-      classOf[Settings] -> settings,
-      classOf[EventStream] -> eventStream,
-      classOf[Scheduler] -> scheduler)
-    val types: Array[Class[_]] = arguments map (_._1) toArray
-    val values: Array[AnyRef] = arguments map (_._2) toArray
-
-    ReflectiveAccess.createInstance[ActorRefProvider](providerClass, types, values) match {
-      case Left(e: InvocationTargetException) ⇒ throw e.getTargetException
-      case Left(e)                            ⇒ throw e
-      case Right(p)                           ⇒ p
-    }
-  }
+  val scheduler = createScheduler()
 
   val deadLetters = new DeadLetterActorRef(eventStream)
   val deadLetterMailbox = new Mailbox(null) {
@@ -335,49 +394,100 @@ class ActorSystemImpl(val name: String, val applicationConfig: Config) extends A
     override def numberOfMessages = 0
   }
 
-  val dispatcherFactory = new Dispatchers(settings, DefaultDispatcherPrerequisites(eventStream, deadLetterMailbox, scheduler))
-  implicit val dispatcher = dispatcherFactory.defaultGlobalDispatcher
+  val provider: ActorRefProvider = {
+    val providerClass = ReflectiveAccess.getClassFor(ProviderClass) match {
+      case Left(e)  ⇒ throw e
+      case Right(b) ⇒ b
+    }
+    val arguments = Seq(
+      classOf[String] -> name,
+      classOf[Settings] -> settings,
+      classOf[EventStream] -> eventStream,
+      classOf[Scheduler] -> scheduler,
+      classOf[InternalActorRef] -> deadLetters)
+    val types: Array[Class[_]] = arguments map (_._1) toArray
+    val values: Array[AnyRef] = arguments map (_._2) toArray
 
-  //FIXME Set this to a Failure when things bubble to the top
+    ReflectiveAccess.createInstance[ActorRefProvider](providerClass, types, values) match {
+      case Left(e: InvocationTargetException) ⇒ throw e.getTargetException
+      case Left(e)                            ⇒ throw e
+      case Right(p)                           ⇒ p
+    }
+  }
+
+  val dispatcherFactory = new Dispatchers(settings, DefaultDispatcherPrerequisites(eventStream, deadLetterMailbox, scheduler))
+  val dispatcher = dispatcherFactory.defaultGlobalDispatcher
+
   def terminationFuture: Future[Unit] = provider.terminationFuture
-  def guardian: ActorRef = provider.guardian
-  def systemGuardian: ActorRef = provider.systemGuardian
+  def lookupRoot: InternalActorRef = provider.rootGuardian
+  def guardian: InternalActorRef = provider.guardian
+  def systemGuardian: InternalActorRef = provider.systemGuardian
   def deathWatch: DeathWatch = provider.deathWatch
   def nodename: String = provider.nodename
   def clustername: String = provider.clustername
 
-  private final val nextName = new AtomicLong
-  override protected def randomName(): String = Helpers.base64(nextName.incrementAndGet())
-
-  @volatile
-  private var _typedActor: TypedActor = _
-  def typedActor = _typedActor
-
   def /(actorName: String): ActorPath = guardian.path / actorName
+  def /(path: Iterable[String]): ActorPath = guardian.path / path
 
   private lazy val _start: this.type = {
-    // TODO can we do something better than loading SerializationExtension from here?
-    _typedActor = new TypedActor(settings, SerializationExtension(this))
+    // the provider is expected to start default loggers, LocalActorRefProvider does this
     provider.init(this)
     deadLetters.init(dispatcher, provider.rootPath)
     // this starts the reaper actor and the user-configured logging subscribers, which are also actors
-    eventStream.start(this)
-    eventStream.startDefaultLoggers(this)
+    registerOnTermination(stopScheduler())
+    _locker = new Locker(scheduler, ReaperInterval, lookupRoot.path / "locker", deathWatch)
     loadExtensions()
     if (LogConfigOnStart) logConfiguration()
     this
   }
 
+  @volatile
+  private var _locker: Locker = _ // initialized in start()
+  def locker = _locker
+
   def start() = _start
 
-  def registerOnTermination(code: ⇒ Unit) { terminationFuture onComplete (_ ⇒ code) }
+  def registerOnTermination[T](code: ⇒ T) { terminationFuture onComplete (_ ⇒ code) }
   def registerOnTermination(code: Runnable) { terminationFuture onComplete (_ ⇒ code.run) }
 
-  // TODO shutdown all that other stuff, whatever that may be
-  def stop() {
-    guardian.stop()
-    terminationFuture onComplete (_ ⇒ scheduler.stop())
-    terminationFuture onComplete (_ ⇒ dispatcher.shutdown())
+  def shutdown() {
+    stop(guardian)
+  }
+
+  /**
+   * Create the scheduler service. This one needs one special behavior: if
+   * Closeable, it MUST execute all outstanding tasks upon .close() in order
+   * to properly shutdown all dispatchers.
+   *
+   * Furthermore, this timer service MUST throw IllegalStateException if it
+   * cannot schedule a task. Once scheduled, the task MUST be executed. If
+   * executed upon close(), the task may execute before its timeout.
+   */
+  protected def createScheduler(): Scheduler = {
+    val threadFactory = new MonitorableThreadFactory("DefaultScheduler")
+    val hwt = new HashedWheelTimer(log, threadFactory, settings.SchedulerTickDuration, settings.SchedulerTicksPerWheel)
+    // note that dispatcher is by-name parameter in DefaultScheduler constructor,
+    // because dispatcher is not initialized when the scheduler is created
+    def safeDispatcher = {
+      if (dispatcher eq null) {
+        val exc = new IllegalStateException("Scheduler is using dispatcher before it has been initialized")
+        log.error(exc, exc.getMessage)
+        throw exc
+      } else {
+        dispatcher
+      }
+    }
+    new DefaultScheduler(hwt, log, safeDispatcher)
+  }
+
+  /*
+   * This is called after the last actor has signaled its termination, i.e.
+   * after the last dispatcher has had its chance to schedule its shutdown
+   * action.
+   */
+  protected def stopScheduler(): Unit = scheduler match {
+    case x: Closeable ⇒ x.close()
+    case _            ⇒
   }
 
   private val extensions = new ConcurrentIdentityHashMap[ExtensionId[_], AnyRef]
@@ -399,7 +509,7 @@ class ActorSystemImpl(val name: String, val applicationConfig: Config) extends A
         extensions.putIfAbsent(ext, inProcessOfRegistration) match { // Signal that registration is in process
           case null ⇒ try { // Signal was successfully sent
             ext.createExtension(this) match { // Create and initialize the extension
-              case null ⇒ throw new IllegalStateException("Extension instance created as null for Extension: " + ext)
+              case null ⇒ throw new IllegalStateException("Extension instance created as 'null' for extension [" + ext + "]")
               case instance ⇒
                 extensions.replace(ext, inProcessOfRegistration, instance) //Replace our in process signal with the initialized extension
                 instance //Profit!
@@ -418,7 +528,7 @@ class ActorSystemImpl(val name: String, val applicationConfig: Config) extends A
   }
 
   def extension[T <: Extension](ext: ExtensionId[T]): T = findExtension(ext) match {
-    case null ⇒ throw new IllegalArgumentException("Trying to get non-registered extension " + ext)
+    case null ⇒ throw new IllegalArgumentException("Trying to get non-registered extension [" + ext + "]")
     case some ⇒ some.asInstanceOf[T]
   }
 
@@ -431,8 +541,8 @@ class ActorSystemImpl(val name: String, val applicationConfig: Config) extends A
       getObjectFor[AnyRef](fqcn).fold(_ ⇒ createInstance[AnyRef](fqcn, noParams, noArgs), Right(_)) match {
         case Right(p: ExtensionIdProvider) ⇒ registerExtension(p.lookup());
         case Right(p: ExtensionId[_])      ⇒ registerExtension(p);
-        case Right(other)                  ⇒ log.error("'{}' is not an ExtensionIdProvider or ExtensionId, skipping...", fqcn)
-        case Left(problem)                 ⇒ log.error(problem, "While trying to load extension '{}', skipping...", fqcn)
+        case Right(other)                  ⇒ log.error("[{}] is not an 'ExtensionIdProvider' or 'ExtensionId', skipping...", fqcn)
+        case Left(problem)                 ⇒ log.error(problem, "While trying to load extension [{}], skipping...", fqcn)
       }
 
     }

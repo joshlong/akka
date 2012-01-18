@@ -16,16 +16,16 @@ import com.typesafe.config.ConfigValue;
  * improperly-factored and non-modular code. Please don't add parent().
  *
  */
-abstract class AbstractConfigValue implements ConfigValue {
+abstract class AbstractConfigValue implements ConfigValue, MergeableValue {
 
-    final private ConfigOrigin origin;
+    final private SimpleConfigOrigin origin;
 
     AbstractConfigValue(ConfigOrigin origin) {
-        this.origin = origin;
+        this.origin = (SimpleConfigOrigin) origin;
     }
 
     @Override
-    public ConfigOrigin origin() {
+    public SimpleConfigOrigin origin() {
         return this.origin;
     }
 
@@ -72,13 +72,11 @@ abstract class AbstractConfigValue implements ConfigValue {
     }
 
     @Override
-    public AbstractConfigValue toValue() {
+    public AbstractConfigValue toFallbackValue() {
         return this;
     }
 
-    protected AbstractConfigValue newCopy(boolean ignoresFallbacks) {
-        return this;
-    }
+    protected abstract AbstractConfigValue newCopy(boolean ignoresFallbacks, ConfigOrigin origin);
 
     // this is virtualized rather than a field because only some subclasses
     // really need to store the boolean, and they may be able to pack it
@@ -105,12 +103,19 @@ abstract class AbstractConfigValue implements ConfigValue {
         throw badMergeException();
     }
 
+    public AbstractConfigValue withOrigin(ConfigOrigin origin) {
+        if (this.origin == origin)
+            return this;
+        else
+            return newCopy(ignoresFallbacks(), origin);
+    }
+
     @Override
     public AbstractConfigValue withFallback(ConfigMergeable mergeable) {
         if (ignoresFallbacks()) {
             return this;
         } else {
-            ConfigValue other = mergeable.toValue();
+            ConfigValue other = ((MergeableValue) mergeable).toFallbackValue();
 
             if (other instanceof Unmergeable) {
                 return mergedWithTheUnmergeable((Unmergeable) other);
@@ -118,7 +123,7 @@ abstract class AbstractConfigValue implements ConfigValue {
                 AbstractConfigObject fallback = (AbstractConfigObject) other;
                 if (fallback.resolveStatus() == ResolveStatus.RESOLVED && fallback.isEmpty()) {
                     if (fallback.ignoresFallbacks())
-                        return newCopy(true /* ignoresFallbacks */);
+                        return newCopy(true /* ignoresFallbacks */, origin);
                     else
                         return this;
                 } else {
@@ -128,7 +133,7 @@ abstract class AbstractConfigValue implements ConfigValue {
                 // falling back to a non-object doesn't merge anything, and also
                 // prohibits merging any objects that we fall back to later.
                 // so we have to switch to ignoresFallbacks mode.
-                return newCopy(true /* ignoresFallbacks */);
+                return newCopy(true /* ignoresFallbacks */, origin);
             }
         }
     }
@@ -144,7 +149,7 @@ abstract class AbstractConfigValue implements ConfigValue {
             return canEqual(other)
                     && (this.valueType() ==
                             ((ConfigValue) other).valueType())
-                    && ConfigUtil.equalsHandlingNull(this.unwrapped(),
+                    && ConfigImplUtil.equalsHandlingNull(this.unwrapped(),
                             ((ConfigValue) other).unwrapped());
         } else {
             return false;
@@ -162,8 +167,39 @@ abstract class AbstractConfigValue implements ConfigValue {
     }
 
     @Override
-    public String toString() {
-        return valueType().name() + "(" + unwrapped() + ")";
+    public final String toString() {
+        StringBuilder sb = new StringBuilder();
+        render(sb, 0, null /* atKey */, false /* formatted */);
+        return getClass().getSimpleName() + "(" + sb.toString() + ")";
+    }
+
+    protected static void indent(StringBuilder sb, int indent) {
+        int remaining = indent;
+        while (remaining > 0) {
+            sb.append("    ");
+            --remaining;
+        }
+    }
+
+    protected void render(StringBuilder sb, int indent, String atKey, boolean formatted) {
+        if (atKey != null) {
+            sb.append(ConfigImplUtil.renderJsonString(atKey));
+            sb.append(" : ");
+        }
+        render(sb, indent, formatted);
+    }
+
+    protected void render(StringBuilder sb, int indent, boolean formatted) {
+        Object u = unwrapped();
+        sb.append(u.toString());
+    }
+
+
+    @Override
+    public final String render() {
+        StringBuilder sb = new StringBuilder();
+        render(sb, 0, null, true /* formatted */);
+        return sb.toString();
     }
 
     // toString() is a debugging-oriented string but this is defined

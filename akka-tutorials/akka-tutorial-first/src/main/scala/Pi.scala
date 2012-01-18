@@ -1,113 +1,107 @@
-// /**
-//  * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
-//  */
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
+package akka.tutorial.first.scala
 
-// package akka.tutorial.first.scala
+//#imports
+import java.util.concurrent.CountDownLatch
+import akka.actor._
+import akka.routing._
+//#imports
 
-// import akka.actor.{ Actor, PoisonPill, ActorSystem }
-// import Actor._
-// import java.util.concurrent.CountDownLatch
-// import akka.routing.Routing.Broadcast
-// import akka.routing.{ RoutedProps, Routing }
+//#app
+object Pi extends App {
 
-// object Pi extends App {
+  calculate(nrOfWorkers = 4, nrOfElements = 10000, nrOfMessages = 10000)
 
-//   val system = ActorSystem()
+  //#actors-and-messages
+  //#messages
+  sealed trait PiMessage
+  case object Calculate extends PiMessage
+  case class Work(start: Int, nrOfElements: Int) extends PiMessage
+  case class Result(value: Double) extends PiMessage
+  //#messages
 
-//   calculate(nrOfWorkers = 4, nrOfElements = 10000, nrOfMessages = 10000)
+  //#worker
+  class Worker extends Actor {
 
-//   // ====================
-//   // ===== Messages =====
-//   // ====================
-//   sealed trait PiMessage
+    //#calculatePiFor
+    def calculatePiFor(start: Int, nrOfElements: Int): Double = {
+      var acc = 0.0
+      for (i ← start until (start + nrOfElements))
+        acc += 4.0 * (1 - (i % 2) * 2) / (2 * i + 1)
+      acc
+    }
+    //#calculatePiFor
 
-//   case object Calculate extends PiMessage
+    def receive = {
+      case Work(start, nrOfElements) ⇒
+        sender ! Result(calculatePiFor(start, nrOfElements)) // perform the work
+    }
+  }
+  //#worker
 
-//   case class Work(start: Int, nrOfElements: Int) extends PiMessage
+  //#master
+  class Master(
+    nrOfWorkers: Int, nrOfMessages: Int, nrOfElements: Int, latch: CountDownLatch)
+    extends Actor {
 
-//   case class Result(value: Double) extends PiMessage
+    var pi: Double = _
+    var nrOfResults: Int = _
+    var start: Long = _
 
-//   // ==================
-//   // ===== Worker =====
-//   // ==================
-//   class Worker extends Actor {
+    //#create-router
+    val router = context.actorOf(
+      Props[Worker].withRouter(RoundRobinRouter(nrOfWorkers)), "pi")
+    //#create-router
 
-//     // define the work
-//     def calculatePiFor(start: Int, nrOfElements: Int): Double = {
-//       var acc = 0.0
-//       for (i ← start until (start + nrOfElements))
-//         acc += 4.0 * (1 - (i % 2) * 2) / (2 * i + 1)
-//       acc
-//     }
+    //#master-receive
+    def receive = {
+      //#handle-messages
+      case Calculate ⇒
+        for (i ← 0 until nrOfMessages) router ! Work(i * nrOfElements, nrOfElements)
+      case Result(value) ⇒
+        pi += value
+        nrOfResults += 1
+        // Stops this actor and all its supervised children
+        if (nrOfResults == nrOfMessages) context.stop(self)
+      //#handle-messages
+    }
+    //#master-receive
 
-//     def receive = {
-//       case Work(start, nrOfElements) ⇒ sender ! Result(calculatePiFor(start, nrOfElements)) // perform the work
-//     }
-//   }
+    override def preStart() {
+      start = System.currentTimeMillis
+    }
 
-//   // ==================
-//   // ===== Master =====
-//   // ==================
-//   class Master(nrOfWorkers: Int, nrOfMessages: Int, nrOfElements: Int, latch: CountDownLatch)
-//     extends Actor {
+    override def postStop() {
+      println("\n\tPi estimate: \t\t%s\n\tCalculation time: \t%s millis"
+        .format(pi, (System.currentTimeMillis - start)))
+      latch.countDown()
+    }
+  }
+  //#master
+  //#actors-and-messages
 
-//     var pi: Double = _
-//     var nrOfResults: Int = _
-//     var start: Long = _
+  def calculate(nrOfWorkers: Int, nrOfElements: Int, nrOfMessages: Int) {
+    // Create an Akka system
+    val system = ActorSystem("PiSystem")
 
-//     // create the workers
-//     val workers = Vector.fill(nrOfWorkers)(system.actorOf[Worker])
+    // this latch is only plumbing to know when the calculation is completed
+    val latch = new CountDownLatch(1)
 
-//     // wrap them with a load-balancing router
-//     val router = system.actorOf(RoutedProps().withRoundRobinRouter.withLocalConnections(workers), "pi")
+    // create the master
+    val master = system.actorOf(Props(new Master(
+      nrOfWorkers, nrOfMessages, nrOfElements, latch)),
+      "master")
 
-//     // message handler
-//     def receive = {
-//       case Calculate ⇒
-//         // schedule work
-//         for (i ← 0 until nrOfMessages) router ! Work(i * nrOfElements, nrOfElements)
+    // start the calculation
+    master ! Calculate
 
-//         // send a PoisonPill to all workers telling them to shut down themselves
-//         router ! Broadcast(PoisonPill)
+    // wait for master to shut down
+    latch.await()
 
-//         // send a PoisonPill to the router, telling him to shut himself down
-//         router ! PoisonPill
-
-//       case Result(value) ⇒
-//         // handle result from the worker
-//         pi += value
-//         nrOfResults += 1
-//         if (nrOfResults == nrOfMessages) self.stop()
-//     }
-
-//     override def preStart() {
-//       start = System.currentTimeMillis
-//     }
-
-//     override def postStop() {
-//       // tell the world that the calculation is complete
-//       println(
-//         "\n\tPi estimate: \t\t%s\n\tCalculation time: \t%s millis"
-//           .format(pi, (System.currentTimeMillis - start)))
-//       latch.countDown()
-//     }
-//   }
-
-//   // ==================
-//   // ===== Run it =====
-//   // ==================
-//   def calculate(nrOfWorkers: Int, nrOfElements: Int, nrOfMessages: Int) {
-
-//     // this latch is only plumbing to know when the calculation is completed
-//     val latch = new CountDownLatch(1)
-
-//     // create the master
-//     val master = system.actorOf(new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch))
-
-//     // start the calculation
-//     master ! Calculate
-
-//     // wait for master to shut down
-//     latch.await()
-//   }
-// }
+    // Shut down the system
+    system.shutdown()
+  }
+}
+//#app

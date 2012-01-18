@@ -20,6 +20,7 @@ import akka.cluster.LocalCluster._
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.ConcurrentHashMap
+import akka.dispatch.Await
 
 /**
  * When a MultiJvmNode is started, will it automatically be part of the cluster (so will it automatically be eligible
@@ -89,7 +90,7 @@ class RoundRobin2ReplicasMultiJvmNode2 extends ClusterTestNode {
       //check if the actorRef is the expected remoteActorRef.
       var hello: ActorRef = null
       barrier("get-ref-to-actor-on-node2", NrOfNodes) {
-        hello = Actor.actorOf[HelloWorld]("service-hello")
+        hello = Actor.actorOf(Props[HelloWorld]("service-hello")
         hello must not equal (null)
         hello.address must equal("service-hello")
         hello.isInstanceOf[ClusterActorRef] must be(true)
@@ -107,14 +108,8 @@ class RoundRobin2ReplicasMultiJvmNode2 extends ClusterTestNode {
 
         implicit val timeout = Timeout(Duration(20, "seconds"))
 
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node1")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node2")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node1")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node2")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node1")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node2")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node1")))
-        count((hello ? "Hello").as[String].getOrElse(fail("Should have recieved reply from node2")))
+        for(i <- 1 to 8)
+          count(Await.result((hello ? "Hello").mapTo[String], timeout.duration))
 
         replies.get("World from node [node1]").get must equal(4)
         replies.get("World from node [node2]").get must equal(4)

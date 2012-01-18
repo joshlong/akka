@@ -6,12 +6,9 @@ package akka.dispatch
 
 import akka.event.Logging.Warning
 import java.util.concurrent.atomic.AtomicReference
-import java.util.concurrent.{ TimeUnit, ExecutorService, RejectedExecutionException, ConcurrentLinkedQueue }
-import akka.actor.{ ActorCell, ActorKilledException }
-import akka.actor.ActorSystem
-import akka.event.EventStream
-import akka.actor.Scheduler
+import akka.actor.ActorCell
 import akka.util.Duration
+import java.util.concurrent._
 
 /**
  * Default settings are:
@@ -58,7 +55,6 @@ import akka.util.Duration
  * But the preferred way of creating dispatchers is to use
  * the {@link akka.dispatch.Dispatchers} factory object.
  *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  * @param throughput positive integer indicates the dispatcher will only process so much messages at a time from the
  *                   mailbox, without checking the mailboxes of other actors. Zero or negative means the dispatcher
  *                   always continues until the mailbox is empty.

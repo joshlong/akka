@@ -8,14 +8,17 @@ import org.scalatest.BeforeAndAfterEach
 
 import akka.util.ByteString
 import akka.util.cps._
-import akka.dispatch.Future
 import scala.util.continuations._
 import akka.testkit._
+import akka.dispatch.{ Await, Future }
 
 object IOActorSpec {
   import IO._
 
   class SimpleEchoServer(host: String, port: Int, ioManager: ActorRef, started: TestLatch) extends Actor {
+
+    import context.dispatcher
+    implicit val timeout = context.system.settings.ActorTimeout
 
     override def preStart = {
       listen(ioManager, host, port)
@@ -43,7 +46,7 @@ object IOActorSpec {
   class SimpleEchoClient(host: String, port: Int, ioManager: ActorRef) extends Actor with IO {
 
     lazy val socket: SocketHandle = connect(ioManager, host, port)(reader)
-    lazy val reader: ActorRef = context.actorOf {
+    lazy val reader: ActorRef = context.actorOf(Props({
       new Actor with IO {
         def receiveIO = {
           case length: Int ⇒
@@ -51,7 +54,7 @@ object IOActorSpec {
             sender ! bytes
         }
       }
-    }
+    }))
 
     def receiveIO = {
       case bytes: ByteString ⇒
@@ -62,6 +65,9 @@ object IOActorSpec {
 
   // Basic Redis-style protocol
   class KVStore(host: String, port: Int, ioManager: ActorRef, started: TestLatch) extends Actor {
+
+    import context.dispatcher
+    implicit val timeout = context.system.settings.ActorTimeout
 
     var kvs: Map[String, ByteString] = Map.empty
 
@@ -117,6 +123,9 @@ object IOActorSpec {
 
   class KVClient(host: String, port: Int, ioManager: ActorRef) extends Actor with IO {
 
+    import context.dispatcher
+    implicit val timeout = context.system.settings.ActorTimeout
+
     var socket: SocketHandle = _
 
     override def preStart {
@@ -171,80 +180,80 @@ object IOActorSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class IOActorSpec extends AkkaSpec with BeforeAndAfterEach {
+class IOActorSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
   import IOActorSpec._
 
   "an IO Actor" must {
     "run echo server" in {
       val started = TestLatch(1)
-      val ioManager = actorOf(new IOManager(2)) // teeny tiny buffer
-      val server = actorOf(new SimpleEchoServer("localhost", 8064, ioManager, started))
+      val ioManager = system.actorOf(Props(new IOManager(2))) // teeny tiny buffer
+      val server = system.actorOf(Props(new SimpleEchoServer("localhost", 8064, ioManager, started)))
       started.await
-      val client = actorOf(new SimpleEchoClient("localhost", 8064, ioManager))
+      val client = system.actorOf(Props(new SimpleEchoClient("localhost", 8064, ioManager)))
       val f1 = client ? ByteString("Hello World!1")
       val f2 = client ? ByteString("Hello World!2")
       val f3 = client ? ByteString("Hello World!3")
-      f1.get must equal(ByteString("Hello World!1"))
-      f2.get must equal(ByteString("Hello World!2"))
-      f3.get must equal(ByteString("Hello World!3"))
-      client.stop
-      server.stop
-      ioManager.stop
+      Await.result(f1, timeout.duration) must equal(ByteString("Hello World!1"))
+      Await.result(f2, timeout.duration) must equal(ByteString("Hello World!2"))
+      Await.result(f3, timeout.duration) must equal(ByteString("Hello World!3"))
+      system.stop(client)
+      system.stop(server)
+      system.stop(ioManager)
     }
 
     "run echo server under high load" in {
       val started = TestLatch(1)
-      val ioManager = actorOf(new IOManager())
-      val server = actorOf(new SimpleEchoServer("localhost", 8065, ioManager, started))
+      val ioManager = system.actorOf(Props(new IOManager()))
+      val server = system.actorOf(Props(new SimpleEchoServer("localhost", 8065, ioManager, started)))
       started.await
-      val client = actorOf(new SimpleEchoClient("localhost", 8065, ioManager))
+      val client = system.actorOf(Props(new SimpleEchoClient("localhost", 8065, ioManager)))
       val list = List.range(0, 1000)
       val f = Future.traverse(list)(i ⇒ client ? ByteString(i.toString))
-      assert(f.get.size === 1000)
-      client.stop
-      server.stop
-      ioManager.stop
+      assert(Await.result(f, timeout.duration).size === 1000)
+      system.stop(client)
+      system.stop(server)
+      system.stop(ioManager)
     }
 
     "run echo server under high load with small buffer" in {
       val started = TestLatch(1)
-      val ioManager = actorOf(new IOManager(2))
-      val server = actorOf(new SimpleEchoServer("localhost", 8066, ioManager, started))
+      val ioManager = system.actorOf(Props(new IOManager(2)))
+      val server = system.actorOf(Props(new SimpleEchoServer("localhost", 8066, ioManager, started)))
       started.await
-      val client = actorOf(new SimpleEchoClient("localhost", 8066, ioManager))
+      val client = system.actorOf(Props(new SimpleEchoClient("localhost", 8066, ioManager)))
       val list = List.range(0, 1000)
       val f = Future.traverse(list)(i ⇒ client ? ByteString(i.toString))
-      assert(f.get.size === 1000)
-      client.stop
-      server.stop
-      ioManager.stop
+      assert(Await.result(f, timeout.duration).size === 1000)
+      system.stop(client)
+      system.stop(server)
+      system.stop(ioManager)
     }
 
     "run key-value store" in {
       val started = TestLatch(1)
-      val ioManager = actorOf(new IOManager(2)) // teeny tiny buffer
-      val server = actorOf(new KVStore("localhost", 8067, ioManager, started))
+      val ioManager = system.actorOf(Props(new IOManager(2))) // teeny tiny buffer
+      val server = system.actorOf(Props(new KVStore("localhost", 8067, ioManager, started)))
       started.await
-      val client1 = actorOf(new KVClient("localhost", 8067, ioManager))
-      val client2 = actorOf(new KVClient("localhost", 8067, ioManager))
+      val client1 = system.actorOf(Props(new KVClient("localhost", 8067, ioManager)))
+      val client2 = system.actorOf(Props(new KVClient("localhost", 8067, ioManager)))
       val f1 = client1 ? (('set, "hello", ByteString("World")))
       val f2 = client1 ? (('set, "test", ByteString("No one will read me")))
       val f3 = client1 ? (('get, "hello"))
-      f2.await
+      Await.ready(f2, timeout.duration)
       val f4 = client2 ? (('set, "test", ByteString("I'm a test!")))
-      f4.await
+      Await.ready(f4, timeout.duration)
       val f5 = client1 ? (('get, "test"))
       val f6 = client2 ? 'getall
-      f1.get must equal("OK")
-      f2.get must equal("OK")
-      f3.get must equal(ByteString("World"))
-      f4.get must equal("OK")
-      f5.get must equal(ByteString("I'm a test!"))
-      f6.get must equal(Map("hello" -> ByteString("World"), "test" -> ByteString("I'm a test!")))
-      client1.stop
-      client2.stop
-      server.stop
-      ioManager.stop
+      Await.result(f1, timeout.duration) must equal("OK")
+      Await.result(f2, timeout.duration) must equal("OK")
+      Await.result(f3, timeout.duration) must equal(ByteString("World"))
+      Await.result(f4, timeout.duration) must equal("OK")
+      Await.result(f5, timeout.duration) must equal(ByteString("I'm a test!"))
+      Await.result(f6, timeout.duration) must equal(Map("hello" -> ByteString("World"), "test" -> ByteString("I'm a test!")))
+      system.stop(client1)
+      system.stop(client2)
+      system.stop(server)
+      system.stop(ioManager)
     }
   }
 

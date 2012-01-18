@@ -45,11 +45,17 @@ case class ChildRestartStats(val child: ActorRef, var maxNrOfRetriesCount: Int =
 }
 
 object FaultHandlingStrategy {
-  sealed trait Action //TODO FIXME What is the Java API for using this?
+  sealed trait Action
   case object Resume extends Action
   case object Restart extends Action
   case object Stop extends Action
   case object Escalate extends Action
+
+  // Java API
+  def resume = Resume
+  def restart = Restart
+  def stop = Stop
+  def escalate = Escalate
 
   type Decider = PartialFunction[Throwable, Action]
   type JDecider = akka.japi.Function[Throwable, Action]
@@ -113,32 +119,32 @@ abstract class FaultHandlingStrategy {
   /**
    * This method is called after the child has been removed from the set of children.
    */
-  def handleChildTerminated(child: ActorRef, children: Iterable[ActorRef]): Unit
+  def handleChildTerminated(context: ActorContext, child: ActorRef, children: Iterable[ActorRef]): Unit
 
   /**
    * This method is called to act on the failure of a child: restart if the flag is true, stop otherwise.
    */
-  def processFailure(restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit
+  def processFailure(context: ActorContext, restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit
 
   def handleSupervisorFailing(supervisor: ActorRef, children: Iterable[ActorRef]): Unit = {
     if (children.nonEmpty)
-      children.foreach(_.suspend())
+      children.foreach(_.asInstanceOf[InternalActorRef].suspend())
   }
 
   def handleSupervisorRestarted(cause: Throwable, supervisor: ActorRef, children: Iterable[ActorRef]): Unit = {
     if (children.nonEmpty)
-      children.foreach(_.restart(cause))
+      children.foreach(_.asInstanceOf[InternalActorRef].restart(cause))
   }
 
   /**
    * Returns whether it processed the failure or not
    */
-  def handleFailure(child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Boolean = {
+  def handleFailure(context: ActorContext, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Boolean = {
     val action = if (decider.isDefinedAt(cause)) decider(cause) else Escalate
     action match {
-      case Resume   ⇒ child.resume(); true
-      case Restart  ⇒ processFailure(true, child, cause, stats, children); true
-      case Stop     ⇒ processFailure(false, child, cause, stats, children); true
+      case Resume   ⇒ child.asInstanceOf[InternalActorRef].resume(); true
+      case Restart  ⇒ processFailure(context, true, child, cause, stats, children); true
+      case Stop     ⇒ processFailure(context, false, child, cause, stats, children); true
       case Escalate ⇒ false
     }
   }
@@ -186,17 +192,17 @@ case class AllForOneStrategy(decider: FaultHandlingStrategy.Decider,
    */
   val retriesWindow = (maxNrOfRetries, withinTimeRange)
 
-  def handleChildTerminated(child: ActorRef, children: Iterable[ActorRef]): Unit = {
-    children foreach (_.stop())
+  def handleChildTerminated(context: ActorContext, child: ActorRef, children: Iterable[ActorRef]): Unit = {
+    children foreach (context.stop(_))
     //TODO optimization to drop all children here already?
   }
 
-  def processFailure(restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit = {
+  def processFailure(context: ActorContext, restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit = {
     if (children.nonEmpty) {
       if (restart && children.forall(_.requestRestartPermission(retriesWindow)))
-        children.foreach(_.child.restart(cause))
+        children.foreach(_.child.asInstanceOf[InternalActorRef].restart(cause))
       else
-        children.foreach(_.child.stop())
+        for (c ← children) context.stop(c.child)
     }
   }
 }
@@ -243,13 +249,13 @@ case class OneForOneStrategy(decider: FaultHandlingStrategy.Decider,
    */
   val retriesWindow = (maxNrOfRetries, withinTimeRange)
 
-  def handleChildTerminated(child: ActorRef, children: Iterable[ActorRef]): Unit = {}
+  def handleChildTerminated(context: ActorContext, child: ActorRef, children: Iterable[ActorRef]): Unit = {}
 
-  def processFailure(restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit = {
+  def processFailure(context: ActorContext, restart: Boolean, child: ActorRef, cause: Throwable, stats: ChildRestartStats, children: Iterable[ChildRestartStats]): Unit = {
     if (restart && stats.requestRestartPermission(retriesWindow))
-      child.restart(cause)
+      child.asInstanceOf[InternalActorRef].restart(cause)
     else
-      child.stop() //TODO optimization to drop child here already?
+      context.stop(child) //TODO optimization to drop child here already?
   }
 }
 

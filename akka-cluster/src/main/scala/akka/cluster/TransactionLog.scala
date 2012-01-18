@@ -26,19 +26,12 @@ import java.util.Enumeration
 // FIXME allow user to choose dynamically between 'async' and 'sync' tx logging (asyncAddEntry(byte[] data, AddCallback cb, Object ctx))
 // FIXME clean up old entries in log after doing a snapshot
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 class ReplicationException(message: String, cause: Throwable = null) extends AkkaException(message) {
   def this(msg: String) = this(msg, null)
 }
 
 /**
- * TODO: Explain something about threadsafety.
- *
  * A TransactionLog makes chunks of data durable.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class TransactionLog private (
   ledger: LedgerHandle,
@@ -202,7 +195,7 @@ class TransactionLog private (
       EventHandler.debug(this, "Reading entries [%s -> %s] for log [%s]".format(from, to, logId))
 
       if (isAsync) {
-        val future = new DefaultPromise[Vector[Array[Byte]]](timeout)
+        val future = Promise[Vector[Array[Byte]]]()
         ledger.asyncReadEntries(
           from, to,
           new AsyncCallback.ReadCallback {
@@ -210,8 +203,8 @@ class TransactionLog private (
               val future = ctx.asInstanceOf[Promise[Vector[Array[Byte]]]]
               val entries = toByteArrays(enumeration)
 
-              if (returnCode == BKException.Code.OK) future.completeWithResult(entries)
-              else future.completeWithException(BKException.create(returnCode))
+              if (returnCode == BKException.Code.OK) future.success(entries)
+              else future.failure(BKException.create(returnCode))
             }
           },
           future)
@@ -352,7 +345,7 @@ class TransactionLog private (
 }
 
 /**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
+ * TODO: Documentation.
  */
 object TransactionLog {
 
@@ -464,7 +457,7 @@ object TransactionLog {
         }
       }
 
-      val future = new DefaultPromise[LedgerHandle](timeout)
+      val future = Promise[LedgerHandle]()
       if (isAsync) {
         bookieClient.asyncCreateLedger(
           ensembleSize, quorumSize, digestType, password,
@@ -474,8 +467,8 @@ object TransactionLog {
               ledgerHandle: LedgerHandle,
               ctx: AnyRef) {
               val future = ctx.asInstanceOf[Promise[LedgerHandle]]
-              if (returnCode == BKException.Code.OK) future.completeWithResult(ledgerHandle)
-              else future.completeWithException(BKException.create(returnCode))
+              if (returnCode == BKException.Code.OK) future.success(ledgerHandle)
+              else future.failure(BKException.create(returnCode))
             }
           },
           future)
@@ -526,14 +519,14 @@ object TransactionLog {
 
     val ledger = try {
       if (isAsync) {
-        val future = new DefaultPromise[LedgerHandle](timeout)
+        val future = Promise[LedgerHandle]()
         bookieClient.asyncOpenLedger(
           logId, digestType, password,
           new AsyncCallback.OpenCallback {
             def openComplete(returnCode: Int, ledgerHandle: LedgerHandle, ctx: AnyRef) {
               val future = ctx.asInstanceOf[Promise[LedgerHandle]]
-              if (returnCode == BKException.Code.OK) future.completeWithResult(ledgerHandle)
-              else future.completeWithException(BKException.create(returnCode))
+              if (returnCode == BKException.Code.OK) future.success(ledgerHandle)
+              else future.failure(BKException.create(returnCode))
             }
           },
           future)
@@ -549,10 +542,10 @@ object TransactionLog {
   }
 
   private[akka] def await[T](future: Promise[T]): T = {
-    future.await
-    if (future.result.isDefined) future.result.get
-    else if (future.exception.isDefined) handleError(future.exception.get)
-    else handleError(new ReplicationException("No result from async read of entries for transaction log"))
+    future.await.value.get match {
+      case Right(result) => result
+      case Left(throwable) => handleError(throwable)
+    }
   }
 
   private[akka] def handleError(e: Throwable): Nothing = {
@@ -563,8 +556,6 @@ object TransactionLog {
 
 /**
  * TODO: Documentation.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 object LocalBookKeeperEnsemble {
   private val isRunning = new Switch(false)

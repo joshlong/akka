@@ -1,12 +1,16 @@
 package akka.transactor.test;
 
 import static org.junit.Assert.*;
+
+import akka.dispatch.Await;
+import akka.util.Duration;
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.Before;
 
 import akka.actor.ActorSystem;
 import akka.actor.ActorRef;
-import akka.actor.Actors;
 import akka.actor.Props;
 import akka.actor.UntypedActor;
 import akka.actor.UntypedActorFactory;
@@ -22,13 +26,24 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import scala.Option;
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
 import akka.testkit.AkkaSpec;
 
 public class UntypedTransactorTest {
-    ActorSystem application = ActorSystem.create("UntypedTransactorTest", AkkaSpec.testConf());
+
+  private static ActorSystem system;
+
+  @BeforeClass
+  public static void beforeAll() {
+    system = ActorSystem.create("UntypedTransactorTest", AkkaSpec.testConf());
+  }
+
+  @AfterClass
+  public static void afterAll() {
+    system.shutdown();
+    system = null;
+  }
 
   List<ActorRef> counters;
   ActorRef failer;
@@ -42,14 +57,14 @@ public class UntypedTransactorTest {
     counters = new ArrayList<ActorRef>();
     for (int i = 1; i <= numCounters; i++) {
       final String name = "counter" + i;
-      ActorRef counter = application.actorOf(new Props().withCreator(new UntypedActorFactory() {
+      ActorRef counter = system.actorOf(new Props().withCreator(new UntypedActorFactory() {
         public UntypedActor create() {
           return new UntypedCounter(name);
         }
       }));
       counters.add(counter);
     }
-    failer = application.actorOf(new Props().withCreator(UntypedFailer.class));
+    failer = system.actorOf(new Props().withCreator(UntypedFailer.class));
   }
 
   @Test
@@ -62,16 +77,9 @@ public class UntypedTransactorTest {
     } catch (InterruptedException exception) {
     }
     for (ActorRef counter : counters) {
-      Future future = counter.ask("GetCount", askTimeout);
-      future.await();
-      if (future.isCompleted()) {
-        Option resultOption = future.result();
-        if (resultOption.isDefined()) {
-          Object result = resultOption.get();
-          int count = (Integer) result;
-          assertEquals(1, count);
-        }
-      }
+      Future<Object> future = counter.ask("GetCount", askTimeout);
+      int count = (Integer) Await.result(future, Duration.create(askTimeout, TimeUnit.MILLISECONDS));
+      assertEquals(1, count);
     }
   }
 
@@ -80,7 +88,7 @@ public class UntypedTransactorTest {
     EventFilter expectedFailureFilter = (EventFilter) new ErrorFilter(ExpectedFailureException.class);
     EventFilter coordinatedFilter = (EventFilter) new ErrorFilter(CoordinatedTransactionException.class);
     Seq<EventFilter> ignoreExceptions = seq(expectedFailureFilter, coordinatedFilter);
-    application.eventStream().publish(new TestEvent.Mute(ignoreExceptions));
+    system.eventStream().publish(new TestEvent.Mute(ignoreExceptions));
     CountDownLatch incrementLatch = new CountDownLatch(numCounters);
     List<ActorRef> actors = new ArrayList<ActorRef>(counters);
     actors.add(failer);
@@ -91,16 +99,9 @@ public class UntypedTransactorTest {
     } catch (InterruptedException exception) {
     }
     for (ActorRef counter : counters) {
-      Future future = counter.ask("GetCount", askTimeout);
-      future.await();
-      if (future.isCompleted()) {
-        Option resultOption = future.result();
-        if (resultOption.isDefined()) {
-          Object result = resultOption.get();
-          int count = (Integer) result;
-          assertEquals(0, count);
-        }
-      }
+      Future<Object> future = counter.ask("GetCount", askTimeout);
+      int count = (Integer) Await.result(future, Duration.create(askTimeout, TimeUnit.MILLISECONDS));
+      assertEquals(0, count);
     }
   }
 

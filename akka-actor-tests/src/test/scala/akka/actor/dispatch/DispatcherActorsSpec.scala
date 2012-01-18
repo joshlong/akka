@@ -1,13 +1,11 @@
 package akka.actor.dispatch
 
 import java.util.concurrent.CountDownLatch
-import akka.actor.Actor
+import akka.actor._
 import akka.testkit.AkkaSpec
 
 /**
  * Tests the behavior of the executor based event driven dispatcher when multiple actors are being dispatched on it.
- *
- * @author Jan Van Besien
  */
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class DispatcherActorsSpec extends AkkaSpec {
@@ -33,8 +31,8 @@ class DispatcherActorsSpec extends AkkaSpec {
     "not block fast actors by slow actors" in {
       val sFinished = new CountDownLatch(50)
       val fFinished = new CountDownLatch(10)
-      val s = actorOf(new SlowActor(sFinished))
-      val f = actorOf(new FastActor(fFinished))
+      val s = system.actorOf(Props(new SlowActor(sFinished)))
+      val f = system.actorOf(Props(new FastActor(fFinished)))
 
       // send a lot of stuff to s
       for (i ← 1 to 50) {
@@ -51,8 +49,8 @@ class DispatcherActorsSpec extends AkkaSpec {
       assert(sFinished.getCount > 0)
       sFinished.await
       assert(sFinished.getCount === 0)
-      f.stop()
-      s.stop()
+      system.stop(f)
+      system.stop(s)
     }
   }
 }

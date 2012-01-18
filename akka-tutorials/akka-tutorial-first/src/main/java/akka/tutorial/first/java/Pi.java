@@ -1,182 +1,176 @@
-// *
-//  * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+/**
+ * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ */
 
+package akka.tutorial.first.java;
 
-// package akka.tutorial.first.java;
+//#imports
+import akka.actor.Props;
+import akka.actor.ActorRef;
+import akka.actor.ActorSystem;
+import akka.actor.InternalActorRef;
+import akka.actor.UntypedActor;
+import akka.actor.UntypedActorFactory;
+import akka.japi.Creator;
+import akka.routing.*;
+import akka.util.Timeout;
 
-// import static akka.actor.Actors.poisonPill;
-// import static java.util.Arrays.asList;
+import java.util.LinkedList;
+import java.util.concurrent.CountDownLatch;
+//#imports
 
-// import akka.actor.ActorRef;
-// import akka.actor.Actors;
-// import akka.actor.ActorSystem;
-// import akka.actor.UntypedActor;
-// import akka.actor.UntypedActorFactory;
-// import akka.routing.RoutedProps;
-// import akka.routing.RouterType;
-// import akka.routing.LocalConnectionManager;
-// import akka.routing.Routing;
-// import akka.routing.Routing.Broadcast;
-// import scala.collection.JavaConversions;
+//#app
+public class Pi {
 
-// import java.util.LinkedList;
-// import java.util.concurrent.CountDownLatch;
+    public static void main(String[] args) throws Exception {
+        Pi pi = new Pi();
+        pi.calculate(4, 10000, 10000);
+    }
 
-// public class Pi {
+    //#actors-and-messages
+    //#messages
+    static class Calculate {
+    }
 
-//   private static final ActorSystem system = new ActorSystem();
+    static class Work {
+        private final int start;
+        private final int nrOfElements;
 
-//   public static void main(String[] args) throws Exception {
-//     Pi pi = new Pi();
-//     pi.calculate(4, 10000, 10000);
-//   }
+        public Work(int start, int nrOfElements) {
+            this.start = start;
+            this.nrOfElements = nrOfElements;
+        }
 
-//   // ====================
-//   // ===== Messages =====
-//   // ====================
-//   static class Calculate {}
+        public int getStart() {
+            return start;
+        }
 
-//   static class Work {
-//     private final int start;
-//     private final int nrOfElements;
+        public int getNrOfElements() {
+            return nrOfElements;
+        }
+    }
 
-//     public Work(int start, int nrOfElements) {
-//       this.start = start;
-//       this.nrOfElements = nrOfElements;
-//     }
+    static class Result {
+        private final double value;
 
-//     public int getStart() { return start; }
-//     public int getNrOfElements() { return nrOfElements; }
-//   }
+        public Result(double value) {
+            this.value = value;
+        }
 
-//   static class Result {
-//     private final double value;
+        public double getValue() {
+            return value;
+        }
+    }
+    //#messages
 
-//     public Result(double value) {
-//       this.value = value;
-//     }
+    //#worker
+    public static class Worker extends UntypedActor {
 
-//     public double getValue() { return value; }
-//   }
+        //#calculatePiFor
+        private double calculatePiFor(int start, int nrOfElements) {
+            double acc = 0.0;
+            for (int i = start * nrOfElements; i <= ((start + 1) * nrOfElements - 1); i++) {
+                acc += 4.0 * (1 - (i % 2) * 2) / (2 * i + 1);
+            }
+            return acc;
+        }
+        //#calculatePiFor
 
-//   // ==================
-//   // ===== Worker =====
-//   // ==================
-//   static class Worker extends UntypedActor {
+        public void onReceive(Object message) {
+            if (message instanceof Work) {
+                Work work = (Work) message;
+                double result = calculatePiFor(work.getStart(), work.getNrOfElements());
+                getSender().tell(new Result(result));
+            } else {
+                throw new IllegalArgumentException("Unknown message [" + message + "]");
+            }
+        }
+    }
+    //#worker
 
-//     // define the work
-//     private double calculatePiFor(int start, int nrOfElements) {
-//       double acc = 0.0;
-//       for (int i = start * nrOfElements; i <= ((start + 1) * nrOfElements - 1); i++) {
-//         acc += 4.0 * (1 - (i % 2) * 2) / (2 * i + 1);
-//       }
-//       return acc;
-//     }
+    //#master
+    public static class Master extends UntypedActor {
+        private final int nrOfMessages;
+        private final int nrOfElements;
+        private final CountDownLatch latch;
 
-//     // message handler
-//     public void onReceive(Object message) {
-//       if (message instanceof Work) {
-//         Work work = (Work) message;
+        private double pi;
+        private int nrOfResults;
+        private long start;
 
-//         // perform the work
-//         double result = calculatePiFor(work.getStart(), work.getNrOfElements());
+        private ActorRef router;
 
-//         // reply with the result
-//         getSender().tell(new Result(result));
+        public Master(final int nrOfWorkers, int nrOfMessages,
+                      int nrOfElements, CountDownLatch latch) {
+            this.nrOfMessages = nrOfMessages;
+            this.nrOfElements = nrOfElements;
+            this.latch = latch;
 
-//       } else throw new IllegalArgumentException("Unknown message [" + message + "]");
-//     }
-//   }
+            //#create-router
+            router = this.getContext().actorOf(
+                new Props(Worker.class).withRouter(new RoundRobinRouter(nrOfWorkers)),
+                "pi");
+            //#create-router
+        }
 
-//   // ==================
-//   // ===== Master =====
-//   // ==================
-//   static class Master extends UntypedActor {
-//     private final int nrOfMessages;
-//     private final int nrOfElements;
-//     private final CountDownLatch latch;
+        //#master-receive
+        public void onReceive(Object message) {
+            //#handle-messages
+            if (message instanceof Calculate) {
+                for (int start = 0; start < nrOfMessages; start++) {
+                    router.tell(new Work(start, nrOfElements), getSelf());
+                }
+            } else if (message instanceof Result) {
+                Result result = (Result) message;
+                pi += result.getValue();
+                nrOfResults += 1;
+                if (nrOfResults == nrOfMessages) getContext().stop(getSelf());
+            } else throw new IllegalArgumentException("Unknown message [" + message + "]");
+            //#handle-messages
+        }
+        //#master-receive
 
-//     private double pi;
-//     private int nrOfResults;
-//     private long start;
+        @Override
+        public void preStart() {
+            start = System.currentTimeMillis();
+        }
 
-//     private ActorRef router;
+        @Override
+        public void postStop() {
+            System.out.println(String.format(
+                "\n\tPi estimate: \t\t%s\n\tCalculation time: \t%s millis",
+                pi, (System.currentTimeMillis() - start)));
+            latch.countDown();
+        }
+    }
+    //#master
+    //#actors-and-messages
 
-//       public Master(int nrOfWorkers, int nrOfMessages, int nrOfElements, CountDownLatch latch) {
-//       this.nrOfMessages = nrOfMessages;
-//       this.nrOfElements = nrOfElements;
-//       this.latch = latch;
+    public void calculate(final int nrOfWorkers,
+                          final int nrOfElements,
+                          final int nrOfMessages)
+                          throws Exception {
+        // Create an Akka system
+        final ActorSystem system = ActorSystem.create();
 
-//       LinkedList<ActorRef> workers = new LinkedList<ActorRef>();
-//       for (int i = 0; i < nrOfWorkers; i++) {
-//           ActorRef worker = system.actorOf(Worker.class);
-//           workers.add(worker);
-//       }
+        // this latch is only plumbing to know when the calculation is completed
+        final CountDownLatch latch = new CountDownLatch(1);
 
-//       router = system.actorOf(new RoutedProps().withRoundRobinRouter().withLocalConnections(workers), "pi");
-//     }
+        // create the master
+        ActorRef master = system.actorOf(new Props(new UntypedActorFactory() {
+            public UntypedActor create() {
+                return new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch);
+            }
+        }));
 
-//     // message handler
-//     public void onReceive(Object message) {
+        // start the calculation
+        master.tell(new Calculate());
 
-//       if (message instanceof Calculate) {
-//         // schedule work
-//         for (int start = 0; start < nrOfMessages; start++) {
-//           router.tell(new Work(start, nrOfElements), getSelf());
-//         }
+        // wait for master to shut down
+        latch.await();
 
-//         // send a PoisonPill to all workers telling them to shut down themselves
-//         router.tell(new Broadcast(poisonPill()));
-
-//         // send a PoisonPill to the router, telling him to shut himself down
-//         router.tell(poisonPill());
-
-//       } else if (message instanceof Result) {
-
-//         // handle result from the worker
-//         Result result = (Result) message;
-//         pi += result.getValue();
-//         nrOfResults += 1;
-//         if (nrOfResults == nrOfMessages) getSelf().stop();
-
-//       } else throw new IllegalArgumentException("Unknown message [" + message + "]");
-//     }
-
-//     @Override
-//     public void preStart() {
-//       start = System.currentTimeMillis();
-//     }
-
-//     @Override
-//     public void postStop() {
-//       // tell the world that the calculation is complete
-//       System.out.println(String.format(
-//         "\n\tPi estimate: \t\t%s\n\tCalculation time: \t%s millis",
-//         pi, (System.currentTimeMillis() - start)));
-//       latch.countDown();
-//     }
-//   }
-
-//   // ==================
-//   // ===== Run it =====
-//   // ==================
-//   public void calculate(final int nrOfWorkers, final int nrOfElements, final int nrOfMessages)
-//     throws Exception {
-
-//     // this latch is only plumbing to know when the calculation is completed
-//     final CountDownLatch latch = new CountDownLatch(1);
-
-//     // create the master
-//     ActorRef master = system.actorOf(new UntypedActorFactory() {
-//       public UntypedActor create() {
-//         return new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch);
-//       }
-//     });
-
-//     // start the calculation
-//     master.tell(new Calculate());
-
-//     // wait for master to shut down
-//     latch.await();
-//   }
-// }
+        // Shut down the system
+        system.shutdown();
+    }
+}
+//#app

@@ -11,7 +11,6 @@ Simple Trading system.
 
 Compares:
 
-- Synchronous Scala solution
 - Scala library Actors
 
   - Fire-forget
@@ -21,12 +20,3 @@ Compares:
   - Request-reply
   - Fire-forget with default dispatcher
   - Fire-forget with Hawt dispatcher
-
-Performance benchmark
----------------------
-
-Benchmarking Akka against:
-
-- Scala Library Actors
-- Raw Java concurrency
-- Jetlang (Java actors lib) `<http://github.com/jboner/akka-bench>`_

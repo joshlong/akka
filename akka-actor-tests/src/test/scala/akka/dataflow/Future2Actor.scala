@@ -4,12 +4,13 @@
 package akka.dataflow
 
 import akka.actor.{ Actor, Props }
-import akka.dispatch.Future
+import akka.dispatch.{ Future, Await }
 import akka.actor.future2actor
 import akka.util.duration._
 import akka.testkit.AkkaSpec
+import akka.testkit.DefaultTimeout
 
-class Future2ActorSpec extends AkkaSpec {
+class Future2ActorSpec extends AkkaSpec with DefaultTimeout {
 
   "The Future2Actor bridge" must {
 
@@ -25,9 +26,9 @@ class Future2ActorSpec extends AkkaSpec {
           case "ex" ⇒ Future(throw new AssertionError) pipeTo context.sender
         }
       }))
-      (actor ? "do").as[Int] must be(Some(31))
+      Await.result(actor ? "do", timeout.duration) must be(31)
       intercept[AssertionError] {
-        (actor ? "ex").get
+        Await.result(actor ? "ex", timeout.duration)
       }
     }
   }

@@ -9,18 +9,19 @@ import org.scalatest.{ BeforeAndAfterAll, BeforeAndAfterEach }
 import akka.remote.netty.NettyRemoteSupport
 import akka.actor.Actor
 import akka.testkit.AkkaSpec
+import akka.testkit.DefaultTimeout
 import akka.dispatch.Future
 
 import java.util.concurrent.{ TimeUnit, CountDownLatch }
 import java.util.concurrent.atomic.AtomicBoolean
 
-trait NetworkFailureSpec { self: AkkaSpec ⇒
+trait NetworkFailureSpec extends DefaultTimeout { self: AkkaSpec ⇒
   import Actor._
   import akka.util.Duration
 
   val BytesPerSecond = "60KByte/s"
   val DelayMillis = "350ms"
-  val PortRang = "1024-65535"
+  val PortRange = "1024-65535"
 
   def replyWithTcpResetFor(duration: Duration, dead: AtomicBoolean) = {
     Future {
@@ -82,12 +83,12 @@ trait NetworkFailureSpec { self: AkkaSpec ⇒
 
   def enableNetworkDrop() = {
     restoreIP()
-    assert(new ProcessBuilder("ipfw", "add", "1", "deny", "tcp", "from", "any", "to", "any", PortRang).start.waitFor == 0)
+    assert(new ProcessBuilder("ipfw", "add", "1", "deny", "tcp", "from", "any", "to", "any", PortRange).start.waitFor == 0)
   }
 
   def enableTcpReset() = {
     restoreIP()
-    assert(new ProcessBuilder("ipfw", "add", "1", "reset", "tcp", "from", "any", "to", "any", PortRang).start.waitFor == 0)
+    assert(new ProcessBuilder("ipfw", "add", "1", "reset", "tcp", "from", "any", "to", "any", PortRange).start.waitFor == 0)
   }
 
   def restoreIP() = {

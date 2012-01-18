@@ -46,15 +46,15 @@ object IO {
     override def asReadable = this
 
     def read(len: Int)(implicit actor: Actor with IO): ByteString @cps[IOSuspendable[Any]] = shift { cont: (ByteString ⇒ IOSuspendable[Any]) ⇒
-      ByteStringLength(cont, this, actor.context.currentMessage, len)
+      ByteStringLength(cont, this, actor.context.asInstanceOf[ActorCell].currentMessage, len)
     }
 
     def read()(implicit actor: Actor with IO): ByteString @cps[IOSuspendable[Any]] = shift { cont: (ByteString ⇒ IOSuspendable[Any]) ⇒
-      ByteStringAny(cont, this, actor.context.currentMessage)
+      ByteStringAny(cont, this, actor.context.asInstanceOf[ActorCell].currentMessage)
     }
 
     def read(delimiter: ByteString, inclusive: Boolean = false)(implicit actor: Actor with IO): ByteString @cps[IOSuspendable[Any]] = shift { cont: (ByteString ⇒ IOSuspendable[Any]) ⇒
-      ByteStringDelimited(cont, this, actor.context.currentMessage, delimiter, inclusive, 0)
+      ByteStringDelimited(cont, this, actor.context.asInstanceOf[ActorCell].currentMessage, delimiter, inclusive, 0)
     }
   }
 
@@ -158,7 +158,7 @@ trait IO {
       }
       run()
     case msg if _next ne Idle ⇒
-      _messages enqueue context.currentMessage
+      _messages enqueue context.asInstanceOf[ActorCell].currentMessage
     case msg if _receiveIO.isDefinedAt(msg) ⇒
       _next = reset { _receiveIO(msg); Idle }
       run()
@@ -193,7 +193,7 @@ trait IO {
   private def run() {
     _next match {
       case ByteStringLength(continuation, handle, message, waitingFor) ⇒
-        context.currentMessage = message
+        context.asInstanceOf[ActorCell].currentMessage = message
         val st = state(handle)
         if (st.readBytes.length >= waitingFor) {
           val bytes = st.readBytes.take(waitingFor) //.compact
@@ -202,7 +202,7 @@ trait IO {
           run()
         }
       case bsd @ ByteStringDelimited(continuation, handle, message, delimiter, inclusive, scanned) ⇒
-        context.currentMessage = message
+        context.asInstanceOf[ActorCell].currentMessage = message
         val st = state(handle)
         val idx = st.readBytes.indexOfSlice(delimiter, scanned)
         if (idx >= 0) {
@@ -215,7 +215,7 @@ trait IO {
           _next = bsd.copy(scanned = math.min(idx - delimiter.length, 0))
         }
       case ByteStringAny(continuation, handle, message) ⇒
-        context.currentMessage = message
+        context.asInstanceOf[ActorCell].currentMessage = message
         val st = state(handle)
         if (st.readBytes.length > 0) {
           val bytes = st.readBytes //.compact
@@ -239,7 +239,7 @@ class IOManager(bufferSize: Int = 8192) extends Actor {
   var worker: IOWorker = _
 
   override def preStart {
-    worker = new IOWorker(system, self, bufferSize)
+    worker = new IOWorker(context.system, self, bufferSize)
     worker.start()
   }
 

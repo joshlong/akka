@@ -16,19 +16,17 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Remote connection manager, manages remote connections, e.g. RemoteActorRef's.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class RemoteConnectionManager(
-  system: ActorSystem,
+  system: ActorSystemImpl,
   remote: Remote,
-  initialConnections: Map[RemoteAddress, ActorRef] = Map.empty[RemoteAddress, ActorRef])
+  initialConnections: Map[ParsedTransportAddress, ActorRef] = Map.empty[ParsedTransportAddress, ActorRef])
   extends ConnectionManager {
 
   val log = Logging(system, "RemoteConnectionManager")
 
   // FIXME is this VersionedIterable really needed? It is not used I think. Complicates API. See 'def connections' etc.
-  case class State(version: Long, connections: Map[RemoteAddress, ActorRef])
+  case class State(version: Long, connections: Map[ParsedTransportAddress, ActorRef])
     extends VersionedIterable[ActorRef] {
     def iterable: Iterable[ActorRef] = connections.values
   }
@@ -54,16 +52,16 @@ class RemoteConnectionManager(
 
   def size: Int = connections.connections.size
 
-  def connectionFor(address: RemoteAddress): Option[ActorRef] = connections.connections.get(address)
+  def connectionFor(address: ParsedTransportAddress): Option[ActorRef] = connections.connections.get(address)
 
   def isEmpty: Boolean = connections.connections.isEmpty
 
   def shutdown() {
-    state.get.iterable foreach (_.stop()) // shut down all remote connections
+    state.get.iterable foreach (system.stop(_)) // shut down all remote connections
   }
 
   @tailrec
-  final def failOver(from: RemoteAddress, to: RemoteAddress) {
+  final def failOver(from: ParsedTransportAddress, to: ParsedTransportAddress) {
     log.debug("Failing over connection from [{}] to [{}]", from, to)
 
     val oldState = state.get
@@ -94,8 +92,8 @@ class RemoteConnectionManager(
     val oldState = state.get()
     var changed = false
 
-    var faultyAddress: RemoteAddress = null
-    var newConnections = Map.empty[RemoteAddress, ActorRef]
+    var faultyAddress: ParsedTransportAddress = null
+    var newConnections = Map.empty[ParsedTransportAddress, ActorRef]
 
     oldState.connections.keys foreach { address ⇒
       val actorRef: ActorRef = oldState.connections.get(address).get
@@ -121,7 +119,7 @@ class RemoteConnectionManager(
   }
 
   @tailrec
-  final def putIfAbsent(address: RemoteAddress, newConnectionFactory: () ⇒ ActorRef): ActorRef = {
+  final def putIfAbsent(address: ParsedTransportAddress, newConnectionFactory: () ⇒ ActorRef): ActorRef = {
 
     val oldState = state.get()
     val oldConnections = oldState.connections
@@ -138,7 +136,7 @@ class RemoteConnectionManager(
         //if we are not able to update the state, we just try again.
         if (!state.compareAndSet(oldState, newState)) {
           // we failed, need compensating action
-          newConnection.stop() // stop the new connection actor and try again
+          system.stop(newConnection) // stop the new connection actor and try again
           putIfAbsent(address, newConnectionFactory) // recur
         } else {
           // we succeeded
@@ -148,6 +146,6 @@ class RemoteConnectionManager(
     }
   }
 
-  private[remote] def newConnection(remoteAddress: RemoteAddress, actorPath: ActorPath) =
-    RemoteActorRef(remote.system.provider, remote.server, remoteAddress, actorPath, None)
+  private[remote] def newConnection(remoteAddress: ParsedTransportAddress, actorPath: ActorPath) =
+    new RemoteActorRef(remote.provider, remote.server, actorPath, Nobody, None)
 }

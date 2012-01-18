@@ -45,8 +45,9 @@ final class SimpleConfigObject extends AbstractConfigObject {
     }
 
     @Override
-    protected SimpleConfigObject newCopy(ResolveStatus newStatus, boolean newIgnoresFallbacks) {
-        return new SimpleConfigObject(origin(), value, newStatus, newIgnoresFallbacks);
+    protected SimpleConfigObject newCopy(ResolveStatus newStatus, boolean newIgnoresFallbacks,
+            ConfigOrigin newOrigin) {
+        return new SimpleConfigObject(newOrigin, value, newStatus, newIgnoresFallbacks);
     }
 
     @Override
@@ -112,8 +113,8 @@ final class SimpleConfigObject extends AbstractConfigObject {
     }
 
     final private static String EMPTY_NAME = "empty config";
-    final private static SimpleConfigObject emptyInstance = empty(new SimpleConfigOrigin(
-            EMPTY_NAME));
+    final private static SimpleConfigObject emptyInstance = empty(SimpleConfigOrigin
+            .newSimple(EMPTY_NAME));
 
     final static SimpleConfigObject empty() {
         return emptyInstance;
@@ -128,7 +129,7 @@ final class SimpleConfigObject extends AbstractConfigObject {
     }
 
     final static SimpleConfigObject emptyMissing(ConfigOrigin baseOrigin) {
-        return new SimpleConfigObject(new SimpleConfigOrigin(
+        return new SimpleConfigObject(SimpleConfigOrigin.newSimple(
                 baseOrigin.description() + " (not found)"),
                 Collections.<String, AbstractConfigValue> emptyMap());
     }

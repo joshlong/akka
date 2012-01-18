@@ -29,24 +29,21 @@ object Mailbox {
   final val Scheduled = 4
 
   // mailbox debugging helper using println (see below)
-  // FIXME TODO take this out before release
+  // since this is a compile-time constant, scalac will elide code behind if (Mailbox.debug) (RK checked with 2.9.1)
   final val debug = false
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMessageQueue with Runnable {
   import Mailbox._
 
   @volatile
-  protected var _status: Status = _ //0 by default
+  protected var _statusDoNotCallMeDirectly: Status = _ //0 by default
 
   @volatile
-  protected var _systemQueue: SystemMessage = _ //null by default
+  protected var _systemQueueDoNotCallMeDirectly: SystemMessage = _ //null by default
 
   @inline
-  final def status: Mailbox.Status = _status
+  final def status: Mailbox.Status = Unsafe.instance.getIntVolatile(this, AbstractMailbox.mailboxStatusOffset)
 
   @inline
   final def shouldProcessMessage: Boolean = (status & 3) == Open
@@ -65,7 +62,8 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
     Unsafe.instance.compareAndSwapInt(this, AbstractMailbox.mailboxStatusOffset, oldStatus, newStatus)
 
   @inline
-  protected final def setStatus(newStatus: Status): Unit = _status = newStatus
+  protected final def setStatus(newStatus: Status): Unit =
+    Unsafe.instance.putIntVolatile(this, AbstractMailbox.mailboxStatusOffset, newStatus)
 
   /**
    * set new primary status Open. Caller does not need to worry about whether
@@ -130,7 +128,8 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
   /*
    * AtomicReferenceFieldUpdater for system queue
    */
-  protected final def systemQueueGet: SystemMessage = _systemQueue
+  protected final def systemQueueGet: SystemMessage =
+    Unsafe.instance.getObjectVolatile(this, AbstractMailbox.systemMessageOffset).asInstanceOf[SystemMessage]
   protected final def systemQueuePut(_old: SystemMessage, _new: SystemMessage): Boolean =
     Unsafe.instance.compareAndSwapObject(this, AbstractMailbox.systemMessageOffset, _old, _new)
 
@@ -196,7 +195,7 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
       }
     } catch {
       case e ⇒
-        actor.system.eventStream.publish(Error(e, actor.self.toString, "exception during processing system messages, dropping " + SystemMessage.size(nextMessage) + " messages!"))
+        actor.system.eventStream.publish(Error(e, actor.self.path.toString, "exception during processing system messages, dropping " + SystemMessage.size(nextMessage) + " messages!"))
         throw e
     }
   }
@@ -207,8 +206,29 @@ abstract class Mailbox(val actor: ActorCell) extends MessageQueue with SystemMes
   /**
    * Overridable callback to clean up the mailbox,
    * called when an actor is unregistered.
+   * By default it dequeues all system messages + messages and ships them to the owning actors' systems' DeadLetterMailbox
    */
-  protected[dispatch] def cleanUp() {}
+  protected[dispatch] def cleanUp(): Unit = if (actor ne null) {
+    val dlq = actor.systemImpl.deadLetterMailbox
+    if (hasSystemMessages) {
+      var message = systemDrain()
+      while (message ne null) {
+        // message must be “virgin” before being able to systemEnqueue again
+        val next = message.next
+        message.next = null
+        dlq.systemEnqueue(actor.self, message)
+        message = next
+      }
+    }
+
+    if (hasMessages) {
+      var envelope = dequeue
+      while (envelope ne null) {
+        dlq.enqueue(actor.self, envelope)
+        envelope = dequeue
+      }
+    }
+  }
 }
 
 trait MessageQueue {

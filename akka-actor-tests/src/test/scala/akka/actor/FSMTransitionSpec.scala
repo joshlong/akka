@@ -29,6 +29,19 @@ object FSMTransitionSpec {
     override def preRestart(reason: Throwable, msg: Option[Any]) { target ! "restarted" }
   }
 
+  class OtherFSM(target: ActorRef) extends Actor with FSM[Int, Int] {
+    startWith(0, 0)
+    when(0) {
+      case Ev("tick") ⇒ goto(1) using (1)
+    }
+    when(1) {
+      case Ev(_) ⇒ stay
+    }
+    onTransition {
+      case 0 -> 1 ⇒ target ! ((stateData, nextStateData))
+    }
+  }
+
   class Forwarder(target: ActorRef) extends Actor {
     def receive = { case x ⇒ target ! x }
   }
@@ -43,7 +56,7 @@ class FSMTransitionSpec extends AkkaSpec with ImplicitSender {
   "A FSM transition notifier" must {
 
     "notify listeners" in {
-      val fsm = actorOf(new MyFSM(testActor))
+      val fsm = system.actorOf(Props(new MyFSM(testActor)))
       within(1 second) {
         fsm ! SubscribeTransitionCallBack(testActor)
         expectMsg(CurrentState(fsm, 0))
@@ -55,21 +68,33 @@ class FSMTransitionSpec extends AkkaSpec with ImplicitSender {
     }
 
     "not fail when listener goes away" in {
-      val forward = actorOf(new Forwarder(testActor))
-      val fsm = actorOf(new MyFSM(testActor))
-      val sup = actorOf(Props(new Actor {
-        self startsWatching fsm
+      val forward = system.actorOf(Props(new Forwarder(testActor)))
+      val fsm = system.actorOf(Props(new MyFSM(testActor)))
+      val sup = system.actorOf(Props(new Actor {
+        context.watch(fsm)
         def receive = { case _ ⇒ }
       }).withFaultHandler(OneForOneStrategy(List(classOf[Throwable]), None, None)))
 
       within(300 millis) {
         fsm ! SubscribeTransitionCallBack(forward)
         expectMsg(CurrentState(fsm, 0))
-        forward.stop()
+        system.stop(forward)
         fsm ! "tick"
         expectNoMsg
       }
     }
+  }
+
+  "A FSM" must {
+
+    "make previous and next state data available in onTransition" in {
+      val fsm = system.actorOf(Props(new OtherFSM(testActor)))
+      within(300 millis) {
+        fsm ! "tick"
+        expectMsg((0, 1))
+      }
+    }
+
   }
 
 }

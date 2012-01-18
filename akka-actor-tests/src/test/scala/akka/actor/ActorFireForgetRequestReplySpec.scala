@@ -7,7 +7,7 @@ package akka.actor
 import akka.testkit._
 import org.scalatest.BeforeAndAfterEach
 import akka.util.duration._
-import akka.dispatch.Dispatchers
+import akka.dispatch.Await
 
 object ActorFireForgetRequestReplySpec {
 
@@ -21,6 +21,7 @@ object ActorFireForgetRequestReplySpec {
   }
 
   class CrashingActor extends Actor {
+    import context.system
     def receive = {
       case "Die" ⇒
         state.finished.await
@@ -29,6 +30,7 @@ object ActorFireForgetRequestReplySpec {
   }
 
   class SenderActor(replyActor: ActorRef) extends Actor {
+    import context.system
     def receive = {
       case "Init" ⇒
         replyActor ! "Send"
@@ -51,7 +53,7 @@ object ActorFireForgetRequestReplySpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach {
+class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
   import ActorFireForgetRequestReplySpec._
 
   override def beforeEach() = {
@@ -61,16 +63,16 @@ class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach {
   "An Actor" must {
 
     "reply to bang message using reply" in {
-      val replyActor = actorOf[ReplyActor]
-      val senderActor = actorOf(new SenderActor(replyActor))
+      val replyActor = system.actorOf(Props[ReplyActor])
+      val senderActor = system.actorOf(Props(new SenderActor(replyActor)))
       senderActor ! "Init"
       state.finished.await
       state.s must be("Reply")
     }
 
     "reply to bang message using implicit sender" in {
-      val replyActor = actorOf[ReplyActor]
-      val senderActor = actorOf(new SenderActor(replyActor))
+      val replyActor = system.actorOf(Props[ReplyActor])
+      val senderActor = system.actorOf(Props(new SenderActor(replyActor)))
       senderActor ! "InitImplicit"
       state.finished.await
       state.s must be("ReplyImplicit")
@@ -78,14 +80,14 @@ class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach {
 
     "should shutdown crashed temporary actor" in {
       filterEvents(EventFilter[Exception]("Expected exception")) {
-        val supervisor = actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(0))))
-        val actor = (supervisor ? Props[CrashingActor]).as[ActorRef].get
+        val supervisor = system.actorOf(Props[Supervisor].withFaultHandler(OneForOneStrategy(List(classOf[Exception]), Some(0))))
+        val actor = Await.result((supervisor ? Props[CrashingActor]).mapTo[ActorRef], timeout.duration)
         actor.isTerminated must be(false)
         actor ! "Die"
         state.finished.await
         1.second.dilated.sleep()
         actor.isTerminated must be(true)
-        supervisor.stop()
+        system.stop(supervisor)
       }
     }
   }

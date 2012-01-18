@@ -18,20 +18,13 @@ class TellThroughputSeparateDispatchersPerformanceSpec extends PerformanceSpec {
 
   def createDispatcher(name: String) = ThreadPoolConfigDispatcherBuilder(config ⇒
     new Dispatcher(system.dispatcherFactory.prerequisites, name, 5,
-      Duration.Zero, UnboundedMailbox(), config, Duration(60, TimeUnit.SECONDS)), ThreadPoolConfig())
+      Duration.Zero, UnboundedMailbox(), config, Duration(1, TimeUnit.SECONDS)), ThreadPoolConfig())
     .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
     .setCorePoolSize(1)
     .build
 
   //val clientDispatcher = createDispatcher("client-dispatcher")
   //val destinationDispatcher = createDispatcher("destination-dispatcher")
-
-  override def atTermination {
-    super.atTermination()
-    System.out.println("Cleaning up after TellThroughputPerformanceSpec")
-    //clientDispatcher.shutdown()
-    //destinationDispatcher.shutdown()
-  }
 
   val repeat = 30000L * repeatFactor
 
@@ -134,11 +127,11 @@ class TellThroughputSeparateDispatchersPerformanceSpec extends PerformanceSpec {
           yield system.actorOf(Props(new Destination).withDispatcher(clientDispatcher))
         val clients = for ((dest, j) ← destinations.zipWithIndex)
           yield system.actorOf(Props(new Client(dest, latch, repeatsPerClient)).withDispatcher(clientDispatcher))
-	*/
+        */
 
         val start = System.nanoTime
         clients.foreach(_ ! Run)
-        val ok = latch.await((5000000 + 500 * repeat) * timeDilation, TimeUnit.MICROSECONDS)
+        val ok = latch.await(maxRunDuration.toMillis, TimeUnit.MILLISECONDS)
         val durationNs = (System.nanoTime - start)
 
         if (!ok) {
@@ -166,8 +159,8 @@ class TellThroughputSeparateDispatchersPerformanceSpec extends PerformanceSpec {
           ok must be(true)
           logMeasurement(numberOfClients, durationNs, repeat)
         }
-        clients.foreach(_ ! PoisonPill)
-        destinations.foreach(_ ! PoisonPill)
+        clients.foreach(system.stop(_))
+        destinations.foreach(system.stop(_))
 
       }
     }

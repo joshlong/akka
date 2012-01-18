@@ -33,15 +33,12 @@ class DurableMailboxException private[akka] (message: String, cause: Throwable) 
   def this(message: String) = this(message, null)
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 abstract class DurableMailbox(owner: ActorCell) extends Mailbox(owner) with DefaultSystemMessageQueue {
   import DurableExecutableMailboxConfig._
 
   def system = owner.system
   def ownerPath = owner.self.path
-  val ownerPathString = ownerPath.path.mkString("/")
+  val ownerPathString = ownerPath.elements.mkString("/")
   val name = "mailbox_" + Name.replaceAllIn(ownerPathString, "_")
 
 }
@@ -52,10 +49,7 @@ trait DurableMessageSerialization {
 
   def serialize(durableMessage: Envelope): Array[Byte] = {
 
-    def serializeActorRef(ref: ActorRef): ActorRefProtocol = {
-      val serRef = owner.system.provider.serialize(ref)
-      ActorRefProtocol.newBuilder.setPath(serRef.path).setHost(serRef.hostname).setPort(serRef.port).build
-    }
+    def serializeActorRef(ref: ActorRef): ActorRefProtocol = ActorRefProtocol.newBuilder.setPath(ref.path.toString).build
 
     val message = MessageSerializer.serialize(owner.system, durableMessage.message.asInstanceOf[AnyRef])
     val builder = RemoteMessageProtocol.newBuilder
@@ -68,10 +62,7 @@ trait DurableMessageSerialization {
 
   def deserialize(bytes: Array[Byte]): Envelope = {
 
-    def deserializeActorRef(refProtocol: ActorRefProtocol): ActorRef = {
-      val serRef = SerializedActorRef(refProtocol.getHost, refProtocol.getPort, refProtocol.getPath)
-      owner.system.provider.deserialize(serRef).getOrElse(owner.system.deadLetters)
-    }
+    def deserializeActorRef(refProtocol: ActorRefProtocol): ActorRef = owner.system.actorFor(refProtocol.getPath)
 
     val durableMessage = RemoteMessageProtocol.parseFrom(bytes)
     val message = MessageSerializer.deserialize(owner.system, durableMessage.getMessage)
@@ -82,9 +73,6 @@ trait DurableMessageSerialization {
 
 }
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
 abstract class DurableMailboxType(mailboxFQN: String) extends MailboxType {
   val constructorSignature = Array[Class[_]](classOf[ActorCell])
 
@@ -120,11 +108,25 @@ case object ZooKeeperDurableMailboxType extends DurableMailboxType("akka.actor.m
 case class FqnDurableMailboxType(mailboxFQN: String) extends DurableMailboxType(mailboxFQN)
 
 /**
+ * Java API for the mailbox types. Usage:
+ * <pre><code>
+ * MessageDispatcher dispatcher = system.dispatcherFactory()
+ *   .newDispatcher("my-dispatcher", 1, DurableMailboxType.redisDurableMailboxType()).build();
+ * </code></pre>
+ */
+object DurableMailboxType {
+  def redisDurableMailboxType(): DurableMailboxType = RedisDurableMailboxType
+  def mongoDurableMailboxType(): DurableMailboxType = MongoDurableMailboxType
+  def beanstalkDurableMailboxType(): DurableMailboxType = BeanstalkDurableMailboxType
+  def fileDurableMailboxType(): DurableMailboxType = FileDurableMailboxType
+  def zooKeeperDurableMailboxType(): DurableMailboxType = ZooKeeperDurableMailboxType
+  def fqnDurableMailboxType(mailboxFQN: String): DurableMailboxType = FqnDurableMailboxType(mailboxFQN)
+}
+
+/**
  * Configurator for the DurableMailbox
  * Do not forget to specify the "storage", valid values are "redis", "beanstalkd", "zookeeper", "mongodb", "file",
  * or a full class name of the Mailbox implementation.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class DurableMailboxConfigurator {
   // TODO PN #896: when and how is this class supposed to be used? Can we remove it?

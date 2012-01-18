@@ -36,8 +36,7 @@ Download
 --------
 
 There are several ways to download Akka. You can download the full distribution
-with microkernel, which includes all modules. You can download just the core
-distribution or just the actors distribution. Or you can use a build tool like
+with microkernel, which includes all modules. Or you can use a build tool like
 Maven or sbt to download dependencies from the Akka Maven repository.
 
 Modules
@@ -45,17 +44,12 @@ Modules
 
 Akka is very modular and has many JARs for containing different features.
 
-- ``akka-actor-2.0-SNAPSHOT.jar`` -- Standard Actors
-- ``akka-typed-actor-2.0-SNAPSHOT.jar`` -- Typed Actors
+- ``akka-actor-2.0-SNAPSHOT.jar`` -- Standard Actors, Typed Actors and much more
 - ``akka-remote-2.0-SNAPSHOT.jar`` -- Remote Actors
-- ``akka-stm-2.0-SNAPSHOT.jar`` -- STM (Software Transactional Memory), transactors and transactional datastructures
-- ``akka-http-2.0-SNAPSHOT.jar`` -- Akka Mist for continuation-based asynchronous HTTP and also Jersey integration
 - ``akka-slf4j-2.0-SNAPSHOT.jar`` -- SLF4J Event Handler Listener
 - ``akka-testkit-2.0-SNAPSHOT.jar`` -- Toolkit for testing Actors
-- ``akka-camel-2.0-SNAPSHOT.jar`` -- Apache Camel Actors integration (it's the best way to have your Akka application communicate with the rest of the world)
-- ``akka-camel-typed-2.0-SNAPSHOT.jar`` -- Apache Camel Typed Actors integration
-- ``akka-spring-2.0-SNAPSHOT.jar`` -- Spring framework integration
-- ``akka-kernel-2.0-SNAPSHOT.jar`` -- Akka microkernel for running a bare-bones mini application server (embeds Jetty etc.)
+- ``akka-kernel-2.0-SNAPSHOT.jar`` -- Akka microkernel for running a bare-bones mini application server
+- ``akka-<storage-system>-mailbox-2.0-SNAPSHOT.jar`` -- Akka durable mailboxes
 
 How to see the JARs dependencies of each Akka module is described in the
 :ref:`dependencies` section. Worth noting is that ``akka-actor`` has zero
@@ -64,24 +58,23 @@ external dependencies (apart from the ``scala-library.jar`` JAR).
 Using a release distribution
 ----------------------------
 
-Download the release you need, Akka Actors, Akka Core, or Akka Microkernel, from
-http://akka.io/downloads and unzip it.
+Download the release you need from http://akka.io/downloads and unzip it.
 
 Using a snapshot version
 ------------------------
 
-The Akka nightly snapshots are published to
-http://repo.typesafe.com/typesafe/maven-timestamps/ and are versioned with a
-timestamp. You need to choose a timestamped version to work with and can decide
-when to update to a newer version.
+The Akka nightly snapshots are published to http://akka.io/snapshots/ and are
+versioned with both ``SNAPSHOT`` and timestamps. You can choose a timestamped
+version to work with and can decide when to update to a newer version. The Akka
+snapshots repository is also proxied through http://repo.typesafe.com/typesafe/snapshots/
+which includes proxies for several other repositories that Akka modules depend on.
 
 Microkernel
-^^^^^^^^^^^
+-----------
 
-The Akka Modules distribution includes the microkernel. To run the microkernel:
-
-* Set the AKKA_HOME environment variable to the root of the Akka distribution.
-* To start the kernel use the scripts in the ``bin`` directory and deploy all samples applications from ``./deploy`` dir.
+The Akka distribution includes the microkernel. To run the microkernel put your
+application jar in the ``deploy`` directory and use the scripts in the ``bin``
+directory.
 
 More information is available in the documentation of the :ref:`microkernel`.
 
@@ -89,7 +82,7 @@ Using a build tool
 ------------------
 
 Akka can be used with build tools that support Maven repositories. The Akka
-Maven repository can be found at http://akka.io/repository/ and Typesafe provides
+Maven repository can be found at http://akka.io/realeses/ and Typesafe provides
 http://repo.typesafe.com/typesafe/releases/ that proxies several other
 repositories, including akka.io.
 
@@ -122,7 +115,7 @@ Summary of the essential parts for using Akka with Maven:
     <version>2.0-SNAPSHOT</version>
   </dependency>
 
-**Note**: for snapshot versions akka uses specific timestamped versions.
+**Note**: for snapshot versions both ``SNAPSHOT`` and timestamped versions are published.
 
 
 Using Akka with SBT
@@ -154,7 +147,7 @@ Using Akka with Eclipse
 Information about how to use Akka with Eclipse, including how to create an Akka Eclipse project from scratch,
 can be found in the :ref:`getting-started-first-scala-eclipse`.
 
-Setup SBT project and then use `sbteclipse <https://github.com/typesafehub/sbteclipse>`_ to generate Eclipse project. 
+Setup SBT project and then use `sbteclipse <https://github.com/typesafehub/sbteclipse>`_ to generate Eclipse project.
 
 Using Akka with IntelliJ IDEA
 -----------------------------
@@ -167,7 +160,6 @@ Build from sources
 Akka uses Git and is hosted at `Github <http://github.com>`_.
 
 * Akka: clone the Akka repository from `<http://github.com/jboner/akka>`_
-* Akka Modules: clone the Akka Modules repository from `<http://github.com/jboner/akka-modules>`_
 
 Continue reading the page on :ref:`building-akka`
 
