@@ -1,40 +1,49 @@
 package akka.actor;
 
+import akka.actor.ActorSystem;
 import akka.japi.Creator;
+import akka.testkit.AkkaSpec;
+
+import org.junit.AfterClass;
+import org.junit.BeforeClass;
 import org.junit.Test;
-import akka.actor.Actors;
-import akka.cluster.RemoteSupport;
 import static org.junit.Assert.*;
 
 public class JavaAPI {
 
-  @Test void mustBeAbleToUseUntypedActor() {
-      final RemoteSupport remote = Actors.remote();
-      assertNotNull(remote);
+  private static ActorSystem system;
+
+  @BeforeClass
+  public static void beforeAll() {
+    system = ActorSystem.create("JavaAPI", AkkaSpec.testConf());
   }
 
-  @Test void mustInteractWithActorRegistry() {
-      final ActorRegistry registry = Actors.registry();
-      assertNotNull(registry);
+  @AfterClass
+  public static void afterAll() {
+    system.shutdown();
+    system = null;
   }
 
-  @Test void mustBeAbleToCreateActorRefFromClass() {
-      ActorRef ref = Actors.actorOf(JavaAPITestActor.class);
-      assertNotNull(ref);
+  @Test
+  public void mustBeAbleToCreateActorRefFromClass() {
+    ActorRef ref = system.actorOf(new Props(JavaAPITestActor.class));
+    assertNotNull(ref);
   }
 
-  @Test void mustBeAbleToCreateActorRefFromFactory() {
-      ActorRef ref = Actors.actorOf(new Creator<Actor>() {
-          public Actor create() {
-              return new JavaAPITestActor();
-          }
-      });
-      assertNotNull(ref);
+  @Test
+  public void mustBeAbleToCreateActorRefFromFactory() {
+    ActorRef ref = system.actorOf(new Props().withCreator(new Creator<Actor>() {
+      public Actor create() {
+        return new JavaAPITestActor();
+      }
+    }));
+    assertNotNull(ref);
   }
 
-  @Test void mustAcceptSingleArgTryTell() {
-    ActorRef ref = Actors.actorOf(JavaAPITestActor.class);
-    ref.tryTell("hallo");
-    ref.tryTell("hallo", ref);
+  @Test
+  public void mustAcceptSingleArgTell() {
+    ActorRef ref = system.actorOf(new Props(JavaAPITestActor.class));
+    ref.tell("hallo");
+    ref.tell("hallo", ref);
   }
 }

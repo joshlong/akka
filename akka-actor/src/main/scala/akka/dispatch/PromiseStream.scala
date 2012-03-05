@@ -4,13 +4,14 @@
 
 package akka.dispatch
 
-import akka.actor.Actor.TIMEOUT
 import java.util.concurrent.atomic.AtomicReference
 import scala.util.continuations._
-import scala.annotation.{ tailrec }
+import scala.annotation.tailrec
+import akka.util.Timeout
 
 object PromiseStream {
-  def apply[A](timeout: Long = TIMEOUT): PromiseStream[A] = new PromiseStream[A](timeout)
+  def apply[A]()(implicit dispatcher: MessageDispatcher, timeout: Timeout): PromiseStream[A] = new PromiseStream[A]
+  def apply[A](timeout: Long)(implicit dispatcher: MessageDispatcher): PromiseStream[A] = new PromiseStream[A]()(dispatcher, Timeout(timeout))
 
   private sealed trait State
   private case object Normal extends State
@@ -29,7 +30,7 @@ trait PromiseStreamOut[A] {
 
   def apply(promise: Promise[A]): A @cps[Future[Any]]
 
-  final def map[B](f: (A) ⇒ B): PromiseStreamOut[B] = new PromiseStreamOut[B] {
+  final def map[B](f: (A) ⇒ B)(implicit timeout: Timeout): PromiseStreamOut[B] = new PromiseStreamOut[B] {
 
     def dequeue(): Future[B] = self.dequeue().map(f)
 
@@ -53,7 +54,7 @@ trait PromiseStreamIn[A] {
   final def enqueue(elem: Future[A]): Unit =
     elem foreach (enqueue(_))
 
-  final def enqueue(elem1: Future[A], elem2: Future[A], elems: Future[A]*): Unit = {
+  final def enqueue(elem1: Future[A], elem2: Future[A], elems: Future[A]*) {
     this += elem1 += elem2
     elems foreach (enqueue(_))
   }
@@ -102,10 +103,8 @@ trait PromiseStreamIn[A] {
 
 }
 
-class PromiseStream[A](timeout: Long) extends PromiseStreamOut[A] with PromiseStreamIn[A] {
+class PromiseStream[A](implicit val dispatcher: MessageDispatcher, val timeout: Timeout) extends PromiseStreamOut[A] with PromiseStreamIn[A] {
   import PromiseStream.{ State, Normal, Pending, Busy }
-
-  def this() = this(TIMEOUT)
 
   private val _elemOut: AtomicReference[List[A]] = new AtomicReference(Nil)
   private val _elemIn: AtomicReference[List[A]] = new AtomicReference(Nil)
@@ -122,9 +121,9 @@ class PromiseStream[A](timeout: Long) extends PromiseStreamOut[A] with PromiseSt
         if (eo.nonEmpty) {
           if (_elemOut.compareAndSet(eo, eo.tail)) shift { cont: (A ⇒ Future[Any]) ⇒ cont(eo.head) }
           else apply()
-        } else apply(Promise[A](timeout))
+        } else apply(Promise[A])
       }
-    } else apply(Promise[A](timeout))
+    } else apply(Promise[A])
 
   final def apply(promise: Promise[A]): A @cps[Future[Any]] =
     shift { cont: (A ⇒ Future[Any]) ⇒ dequeue(promise) flatMap cont }
@@ -167,7 +166,7 @@ class PromiseStream[A](timeout: Long) extends PromiseStreamOut[A] with PromiseSt
           } else enqueue(elem)
         } else {
           if (_pendOut.compareAndSet(po, po.tail)) {
-            po.head completeWithResult elem
+            po.head success elem
             if (!po.head.isCompleted) enqueue(elem)
           } else enqueue(elem)
         }
@@ -184,11 +183,11 @@ class PromiseStream[A](timeout: Long) extends PromiseStreamOut[A] with PromiseSt
       if (eo eq null) dequeue()
       else {
         if (eo.nonEmpty) {
-          if (_elemOut.compareAndSet(eo, eo.tail)) new KeptPromise(Right(eo.head))
+          if (_elemOut.compareAndSet(eo, eo.tail)) Promise.successful(eo.head)
           else dequeue()
-        } else dequeue(Promise[A](timeout))
+        } else dequeue(Promise[A])
       }
-    } else dequeue(Promise[A](timeout))
+    } else dequeue(Promise[A])
 
   @tailrec
   final def dequeue(promise: Promise[A]): Future[A] = _state.get match {
@@ -228,7 +227,7 @@ class PromiseStream[A](timeout: Long) extends PromiseStreamOut[A] with PromiseSt
           } else dequeue(promise)
         } else {
           if (_elemOut.compareAndSet(eo, eo.tail)) {
-            promise completeWithResult eo.head
+            promise success eo.head
           } else dequeue(promise)
         }
       }

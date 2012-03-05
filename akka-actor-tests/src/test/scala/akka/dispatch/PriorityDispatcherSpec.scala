@@ -1,48 +1,69 @@
 package akka.dispatch
 
-import akka.actor.Actor._
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
 import akka.actor.{ Props, LocalActorRef, Actor }
+import akka.testkit.AkkaSpec
+import akka.pattern.ask
+import akka.util.duration._
+import akka.testkit.DefaultTimeout
+import com.typesafe.config.Config
+import akka.actor.ActorSystem
 
-class PriorityDispatcherSpec extends WordSpec with MustMatchers {
+object PriorityDispatcherSpec {
+  val config = """
+    unbounded-prio-dispatcher {
+      mailbox-type = "akka.dispatch.PriorityDispatcherSpec$Unbounded"
+    }
+    bounded-prio-dispatcher {
+      mailbox-type = "akka.dispatch.PriorityDispatcherSpec$Bounded"
+    }
+    """
+
+  class Unbounded(settings: ActorSystem.Settings, config: Config) extends UnboundedPriorityMailbox(PriorityGenerator({
+    case i: Int  ⇒ i //Reverse order
+    case 'Result ⇒ Int.MaxValue
+  }: Any ⇒ Int))
+
+  class Bounded(settings: ActorSystem.Settings, config: Config) extends BoundedPriorityMailbox(PriorityGenerator({
+    case i: Int  ⇒ i //Reverse order
+    case 'Result ⇒ Int.MaxValue
+  }: Any ⇒ Int), 1000, 10 seconds)
+
+}
+
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) with DefaultTimeout {
 
   "A PriorityDispatcher" must {
     "Order it's messages according to the specified comparator using an unbounded mailbox" in {
-      testOrdering(UnboundedMailbox())
+      val dispatcherKey = "unbounded-prio-dispatcher"
+      testOrdering(dispatcherKey)
     }
 
     "Order it's messages according to the specified comparator using a bounded mailbox" in {
-      testOrdering(BoundedMailbox(1000))
+      val dispatcherKey = "bounded-prio-dispatcher"
+      testOrdering(dispatcherKey)
     }
   }
 
-  def testOrdering(mboxType: MailboxType) {
-    val dispatcher = new PriorityDispatcher("Test",
-      PriorityGenerator({
-        case i: Int  ⇒ i //Reverse order
-        case 'Result ⇒ Int.MaxValue
-      }: Any ⇒ Int),
-      throughput = 1,
-      mailboxType = mboxType)
+  def testOrdering(dispatcherKey: String) {
 
-    val actor = actorOf(Props(new Actor {
+    val actor = system.actorOf(Props(new Actor {
       var acc: List[Int] = Nil
 
       def receive = {
         case i: Int  ⇒ acc = i :: acc
-        case 'Result ⇒ self tryReply acc
+        case 'Result ⇒ sender.tell(acc)
       }
-    }).withDispatcher(dispatcher)).asInstanceOf[LocalActorRef]
+    }).withDispatcher(dispatcherKey)).asInstanceOf[LocalActorRef]
 
-    dispatcher.suspend(actor) //Make sure the actor isn't treating any messages, let it buffer the incoming messages
+    actor.suspend //Make sure the actor isn't treating any messages, let it buffer the incoming messages
 
     val msgs = (1 to 100).toList
     for (m ← msgs) actor ! m
 
-    dispatcher.resume(actor) //Signal the actor to start treating it's message backlog
+    actor.resume //Signal the actor to start treating it's message backlog
 
-    actor.?('Result).as[List[Int]].get must be === (msgs.reverse)
+    Await.result(actor.?('Result).mapTo[List[Int]], timeout.duration) must be === msgs.reverse
   }
 
 }

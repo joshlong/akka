@@ -1,13 +1,12 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.testkit
 
 import akka.actor._
 import akka.util._
-
-import com.eaio.uuid.UUID
+import akka.dispatch.DispatcherPrerequisites
 
 /**
  * This is a specialised form of the TestActorRef with support for querying and
@@ -34,7 +33,13 @@ import com.eaio.uuid.UUID
  * @author Roland Kuhn
  * @since 1.2
  */
-class TestFSMRef[S, D, T <: Actor](props: Props, address: String)(implicit ev: T <:< FSM[S, D]) extends TestActorRef(props, address) {
+class TestFSMRef[S, D, T <: Actor](
+  system: ActorSystemImpl,
+  _prerequisites: DispatcherPrerequisites,
+  props: Props,
+  supervisor: InternalActorRef,
+  name: String)(implicit ev: T <:< FSM[S, D])
+  extends TestActorRef(system, _prerequisites, props, supervisor, name) {
 
   private def fsm: T = underlyingActor
 
@@ -54,8 +59,8 @@ class TestFSMRef[S, D, T <: Actor](props: Props, address: String)(implicit ev: T
    * corresponding transition initiated from within the FSM, including timeout
    * and stop handling.
    */
-  def setState(stateName: S = fsm.stateName, stateData: D = fsm.stateData, timeout: Option[Duration] = None, stopReason: Option[FSM.Reason] = None) {
-    fsm.applyState(FSM.State(stateName, stateData, timeout, stopReason))
+  def setState(stateName: S = fsm.stateName, stateData: D = fsm.stateData, timeout: Duration = null, stopReason: Option[FSM.Reason] = None) {
+    fsm.applyState(FSM.State(stateName, stateData, Option(timeout), stopReason))
   }
 
   /**
@@ -79,8 +84,13 @@ class TestFSMRef[S, D, T <: Actor](props: Props, address: String)(implicit ev: T
 
 object TestFSMRef {
 
-  def apply[S, D, T <: Actor](factory: ⇒ T)(implicit ev: T <:< FSM[S, D]): TestFSMRef[S, D, T] = new TestFSMRef(Props(creator = () ⇒ factory), new UUID().toString)
+  def apply[S, D, T <: Actor](factory: ⇒ T)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
+    new TestFSMRef(impl, system.dispatchers.prerequisites, Props(creator = () ⇒ factory), impl.guardian.asInstanceOf[InternalActorRef], TestActorRef.randomName)
+  }
 
-  def apply[S, D, T <: Actor](factory: ⇒ T, address: String)(implicit ev: T <:< FSM[S, D]): TestFSMRef[S, D, T] = new TestFSMRef(Props(creator = () ⇒ factory), address)
-
+  def apply[S, D, T <: Actor](factory: ⇒ T, name: String)(implicit ev: T <:< FSM[S, D], system: ActorSystem): TestFSMRef[S, D, T] = {
+    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
+    new TestFSMRef(impl, system.dispatchers.prerequisites, Props(creator = () ⇒ factory), impl.guardian.asInstanceOf[InternalActorRef], name)
+  }
 }

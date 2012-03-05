@@ -20,8 +20,8 @@ package akka.actor.mailbox.filequeue
 import java.io._
 import java.nio.{ ByteBuffer, ByteOrder }
 import java.nio.channels.FileChannel
-
-import akka.event.EventHandler
+import akka.event.LoggingAdapter
+import akka.util.NonFatal
 
 // returned from journal replay
 sealed trait JournalItem
@@ -38,7 +38,7 @@ object JournalItem {
 /**
  * Codes for working with the journal file for a PersistentQueue.
  */
-class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
+class Journal(queuePath: String, syncJournal: ⇒ Boolean, log: LoggingAdapter) {
 
   private val queueFile = new File(queuePath)
 
@@ -62,15 +62,15 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
   private val CMD_CONFIRM_REMOVE = 6
   private val CMD_ADD_XID = 7
 
-  private def open(file: File): Unit = {
+  private def open(file: File) {
     writer = new FileOutputStream(file, true).getChannel
   }
 
-  def open(): Unit = {
+  def open() {
     open(queueFile)
   }
 
-  def roll(xid: Int, openItems: List[QItem], queue: Iterable[QItem]): Unit = {
+  def roll(xid: Int, openItems: List[QItem], queue: Iterable[QItem]) {
     writer.close
     val tmpFile = new File(queuePath + "~~" + System.currentTimeMillis)
     open(tmpFile)
@@ -89,18 +89,18 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
     open
   }
 
-  def close(): Unit = {
+  def close() {
     writer.close
     for (r ← reader) r.close
     reader = None
   }
 
-  def erase(): Unit = {
+  def erase() {
     try {
       close()
       queueFile.delete
     } catch {
-      case _ ⇒
+      case NonFatal(_) ⇒
     }
   }
 
@@ -108,7 +108,7 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
 
   def isReplaying(): Boolean = replayer.isDefined
 
-  private def add(allowSync: Boolean, item: QItem): Unit = {
+  private def add(allowSync: Boolean, item: QItem) {
     val blob = ByteBuffer.wrap(item.pack())
     size += write(false, CMD_ADDX.toByte, blob.limit)
     do {
@@ -136,7 +136,7 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
     size += write(true, CMD_REMOVE.toByte)
   }
 
-  private def removeTentative(allowSync: Boolean): Unit = {
+  private def removeTentative(allowSync: Boolean) {
     size += write(allowSync, CMD_REMOVE_TENTATIVE.toByte)
   }
 
@@ -155,14 +155,14 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
     size += write(true, CMD_CONFIRM_REMOVE.toByte, xid)
   }
 
-  def startReadBehind(): Unit = {
+  def startReadBehind() {
     val pos = if (replayer.isDefined) replayer.get.position else writer.position
     val rj = new FileInputStream(queueFile).getChannel
     rj.position(pos)
     reader = Some(rj)
   }
 
-  def fillReadBehind(f: QItem ⇒ Unit): Unit = {
+  def fillReadBehind(f: QItem ⇒ Unit) {
     val pos = if (replayer.isDefined) replayer.get.position else writer.position
     for (rj ← reader) {
       if (rj.position == pos) {
@@ -178,7 +178,7 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
     }
   }
 
-  def replay(name: String)(f: JournalItem ⇒ Unit): Unit = {
+  def replay(name: String)(f: JournalItem ⇒ Unit) {
     size = 0
     var lastUpdate = 0L
     val TEN_MB = 10L * 1024 * 1024
@@ -195,21 +195,20 @@ class Journal(queuePath: String, syncJournal: ⇒ Boolean) {
               f(x)
               if (size / TEN_MB > lastUpdate) {
                 lastUpdate = size / TEN_MB
-                EventHandler.info(this,
-                  "Continuing to read '%s' journal; %s MB so far...".format(name, lastUpdate * 10))
+                log.info("Continuing to read '{}' journal; {} MB so far...", name, lastUpdate * 10)
               }
           }
         } while (!done)
       } catch {
         case e: BrokenItemException ⇒
-          EventHandler.error(e, this, "Exception replaying journal for '%s'".format(name))
+          log.error(e, "Exception replaying journal for '{}'", name)
           truncateJournal(e.lastValidPosition)
       }
     } catch {
       case e: FileNotFoundException ⇒
-        EventHandler.info(this, "No transaction journal for '%s'; starting with empty queue.".format(name))
+        log.info("No transaction journal for '{}'; starting with empty queue.", name)
       case e: IOException ⇒
-        EventHandler.error(e, this, "Exception replaying journal for '%s'".format(name))
+        log.error(e, "Exception replaying journal for '{}'", name)
       // this can happen if the server hardware died abruptly in the middle
       // of writing a journal. not awesome but we should recover.
     }

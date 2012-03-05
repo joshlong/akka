@@ -1,3 +1,6 @@
+
+.. _routing-scala:
+
 Routing (Scala)
 ===============
 
@@ -5,260 +8,367 @@ Routing (Scala)
 
    .. contents:: :local:
 
-Akka-core includes some building blocks to build more complex message flow handlers, they are listed and explained below:
-
-Router
-----------
-
 A Router is an actor that routes incoming messages to outbound actors.
+The router routes the messages sent to it to its underlying actors called 'routees'.
 
-To use it you can either create a Router through the ``routerActor()`` factory method
+Akka comes with some defined routers out of the box, but as you will see in this chapter it
+is really easy to create your own. The routers shipped with Akka are:
 
-.. code-block:: scala
+* ``akka.routing.RoundRobinRouter``
+* ``akka.routing.RandomRouter``
+* ``akka.routing.SmallestMailboxRouter``
+* ``akka.routing.BroadcastRouter``
+* ``akka.routing.ScatterGatherFirstCompletedRouter``
 
-  import akka.actor.Actor._
-  import akka.actor.Actor
-  import akka.routing.Routing._
+Routers In Action
+^^^^^^^^^^^^^^^^^
 
-  //Our message types
-  case object Ping
-  case object Pong
+This is an example of how to create a router that is defined in configuration:
 
-  //Two actors, one named Pinger and one named Ponger
-  //The actor(pf) method creates an anonymous actor and starts it
-  val pinger = actorOf(new Actor { def receive = { case x => println("Pinger: " + x) } })
-  val ponger = actorOf(new Actor { def receive = { case x => println("Ponger: " + x) } })
+.. includecode:: code/akka/docs/routing/RouterViaConfigExample.scala#config
 
-  //A router that dispatches Ping messages to the pinger
-  //and Pong messages to the ponger
-  val d = routerActor {
-    case Ping => pinger
-    case Pong => ponger
-  }
+.. includecode:: code/akka/docs/routing/RouterViaConfigExample.scala#configurableRouting
 
-  d ! Ping //Prints "Pinger: Ping"
-  d ! Pong //Prints "Ponger: Pong"
+This is an example of how to programmatically create a router and set the number of routees it should create:
 
-Or by mixing in akka.routing.Router:
+.. includecode:: code/akka/docs/routing/RouterViaProgramExample.scala#programmaticRoutingNrOfInstances
 
-.. code-block:: scala
+You can also give the router already created routees as in:
 
-  import akka.actor.Actor
-  import akka.actor.Actor._
-  import akka.routing.Router
+.. includecode:: code/akka/docs/routing/RouterViaProgramExample.scala#programmaticRoutingRoutees
 
-  //Our message types
-  case object Ping
-  case object Pong
+When you create a router programmatically you define the number of routees *or* you pass already created routees to it.
+If you send both parameters to the router *only* the latter will be used, i.e. ``nrOfInstances`` is disregarded.
 
-  class MyRouter extends Actor with Router {
-    //Our pinger and ponger actors
-    val pinger = actorOf(new Actor { def receive = { case x => println("Pinger: " + x) } })
-    val ponger = actorOf(new Actor { def receive = { case x => println("Ponger: " + x) } })
-    //When we get a ping, we dispatch to the pinger
-    //When we get a pong, we dispatch to the ponger
-    def routes = {
-      case Ping => pinger
-      case Pong => ponger
-    }
-  }
+*It is also worth pointing out that if you define the ``router`` in the
+configuration file then this value will be used instead of any programmatically
+sent parameters. The decision whether to create a router at all, on the other
+hand, must be taken within the code, i.e. you cannot make something a router by
+external configuration alone (see below for details).*
 
-  //Create an instance of our router, and start it
-  val d = actorOf[MyRouter]
-
-  d ! Ping //Prints "Pinger: Ping"
-  d ! Pong //Prints "Ponger: Pong"
-
-LoadBalancer
-------------
-
-A LoadBalancer is an actor that forwards messages it receives to a boundless sequence of destination actors.
-
-Example using the ``loadBalancerActor()`` factory method:
+Once you have the router actor it is just to send messages to it as you would to any actor:
 
 .. code-block:: scala
 
-  import akka.actor.Actor._
-  import akka.actor.Actor
-  import akka.routing.Routing._
-  import akka.routing.CyclicIterator
+  router ! MyMsg
 
-  //Our message types
-  case object Ping
-  case object Pong
+The router will apply its behavior to the message it receives and forward it to the routees.
 
-  //Two actors, one named Pinger and one named Ponger
-  //The actor(pf) method creates an anonymous actor and starts it
+Remotely Deploying Routees
+**************************
 
-  val pinger = actorOf(new Actor { def receive = { case x => println("Pinger: " + x) } })
-  val ponger = actorOf(new Actor { def receive = { case x => println("Ponger: " + x) } })
+In addition to being able to supply looked-up remote actors as routees, you can
+make the router deploy its created children on a set of remote hosts; this will
+be done in round-robin fashion. In order to do that, wrap the router
+configuration in a :class:`RemoteRouterConfig`, attaching the remote addresses of
+the nodes to deploy to. Naturally, this requires your to include the
+``akka-remote`` module on your classpath:
 
-  //A load balancer that given a sequence of actors dispatches them accordingly
-  //a CyclicIterator works in a round-robin-fashion
+.. includecode:: code/akka/docs/routing/RouterViaProgramExample.scala#remoteRoutees
 
-  val d = loadBalancerActor( new CyclicIterator( List(pinger,ponger) ) )
+How Routing is Designed within Akka
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-  d ! Pong //Prints "Pinger: Pong"
-  d ! Pong //Prints "Ponger: Pong"
-  d ! Ping //Prints "Pinger: Ping"
-  d ! Ping //Prints "Ponger: Ping"
+Routers behave like single actors, but they should also not hinder scalability.
+This apparent contradiction is solved by making routers be represented by a
+special :class:`RoutedActorRef`, which dispatches incoming messages destined
+for the routees without actually invoking the router actor’s behavior (and thus
+avoiding its mailbox; the single router actor’s task is to manage all aspects
+related to the lifecycle of the routees). This means that the code which decides
+which route to take is invoked concurrently from all possible senders and hence
+must be thread-safe, it cannot live the simple and happy life of code within an
+actor.
 
-Or by mixing in akka.routing.LoadBalancer
+There is one part in the above paragraph which warrants some more background
+explanation: Why does a router need a “head” which is actual parent to all the
+routees? The initial design tried to side-step this issue, but location
+transparency as well as mandatory parental supervision required a redesign.
+Each of the actors which the router spawns must have its unique identity, which
+translates into a unique actor path. Since the router has only one given name
+in its parent’s context, another level in the name space is needed, which
+according to the addressing semantics implies the existence of an actor with
+the router’s name. This is not only necessary for the internal messaging
+involved in creating, restarting and terminating actors, it is also needed when
+the pooled actors need to converse with other actors and receive replies in a
+deterministic fashion. Since each actor knows its own external representation
+as well as that of its parent, the routees decide where replies should be sent
+when reacting to a message:
 
-.. code-block:: scala
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#reply-with-sender
 
-  import akka.actor._
-  import akka.actor.Actor._
-  import akka.routing.{ LoadBalancer, CyclicIterator }
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#reply-without-sender
 
-  //Our message types
-  case object Ping
-  case object Pong
+It is apparent now why routing needs to be enabled in code rather than being
+possible to “bolt on” later: whether or not an actor is routed means a change
+to the actor hierarchy, changing the actor paths of all children of the router.
+The routees especially do need to know that they are routed to in order to
+choose the sender reference for any messages they dispatch as shown above.
 
-  //A load balancer that balances between a pinger and a ponger
-  class MyLoadBalancer extends Actor with LoadBalancer {
-    val pinger = actorOf(new Actor { def receive = { case x => println("Pinger: " + x) } })
-    val ponger = actorOf(new Actor { def receive = { case x => println("Ponger: " + x) } })
+Routers vs. Supervision
+^^^^^^^^^^^^^^^^^^^^^^^
 
-    val seq = new CyclicIterator[ActorRef](List(pinger,ponger))
-  }
+As explained in the previous section, routers create new actor instances as
+children of the “head” router, who therefor also is their supervisor. The
+supervisor strategy of this actor can be configured by means of the
+:meth:`RouterConfig.supervisorStrategy` property, which is supported for all
+built-in router types. It defaults to “always escalate”, which leads to the
+application of the router’s parent’s supervision directive to all children of
+the router uniformly (i.e. not only the one which failed). It should be
+mentioned that the router overrides the default behavior of terminating all
+children upon restart, which means that a restart—while re-creating them—does
+not have an effect on the number of actors in the pool.
 
-  //Create an instance of our loadbalancer, and start it
-  val d = actorOf[MyLoadBalancer]
+Setting the strategy is easily done:
 
-  d ! Pong //Prints "Pinger: Pong"
-  d ! Pong //Prints "Ponger: Pong"
-  d ! Ping //Prints "Pinger: Ping"
-  d ! Ping //Prints "Ponger: Ping"
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala
+   :include: supervision
+   :exclude: custom-strategy
 
-Also, instead of using the CyclicIterator, you can create your own message distribution algorithms, there’s already `one <@http://github.com/jboner/akka/blob/master/akka-core/src/main/scala/routing/Iterators.scala#L31>`_ that dispatches depending on target mailbox size, effectively dispatching to the one that’s got fewest messages to process right now.
+Another potentially useful approach is to give the router the same strategy as
+its parent, which effectively treats all actors in the pool as if they were
+direct children of their grand-parent instead.
 
-Example `<http://pastie.org/984889>`_
+Router usage
+^^^^^^^^^^^^
 
-You can also send a 'Routing.Broadcast(msg)' message to the router to have it be broadcasted out to all the actors it represents.
+In this section we will describe how to use the different router types.
+First we need to create some actors that will be used in the examples:
 
-.. code-block:: scala
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#printlnActor
 
-  router ! Routing.Broadcast(PoisonPill)
+and
 
-Actor Pool
-----------
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#fibonacciActor
 
-An actor pool is similar to the load balancer is that it routes incoming messages to other actors. It has different semantics however when it comes to how those actors are managed and selected for dispatch. Therein lies the difference. The pool manages, from start to shutdown, the lifecycle of all delegated actors. The number of actors in a pool can be fixed or grow and shrink over time. Also, messages can be routed to more than one actor in the pool if so desired. This is a useful little feature for accounting for expected failure - especially with remoting - where you can invoke the same request of multiple actors and just take the first, best response.
 
-The actor pool is built around three concepts: capacity, filtering and selection.
+RoundRobinRouter
+****************
+Routes in a `round-robin <http://en.wikipedia.org/wiki/Round-robin>`_ fashion to its routees.
+Code example:
 
-Selection
-^^^^^^^^^
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#roundRobinRouter
 
-All pools require a *Selector* to be mixed-in. This trait controls how and how many actors in the pool will receive the incoming message. Define *selectionCount* to some positive number greater than one to route to multiple actors. Currently two are provided:
-
-* `SmallestMailboxSelector <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L133>`_ - Using the exact same logic as the iterator of the same name, the pooled actor with the fewest number of pending messages will be chosen.
-* `RoundRobinSelector <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L158>`_ - Performs a very simple index-based selection, wrapping around the end of the list, very much like the CyclicIterator does.
-
-Partial Fills
-*************
-
-When selecting more than one pooled actor, its possible that in order to fulfill the requested amount, the selection set must contain duplicates. By setting *partialFill* to **true**, you instruct the selector to return only unique actors from the pool.
-
-Capacity
-^^^^^^^^
-
-As you'd expect, capacity traits determine how the pool is funded with actors. There are two types of strategies that can be employed:
-
-* `FixedCapacityStrategy <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L268>`_ - When you mix this into your actor pool, you define a pool size and when the pool is started, it will have that number of actors within to which messages will be delegated.
-* `BoundedCapacityStrategy <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L269>`_ - When you mix this into your actor pool, you define upper and lower bounds, and when the pool is started, it will have the minimum number of actors in place to handle messages. You must also mix-in a Capacitor and a Filter when using this strategy (see below).
-
-The *BoundedCapacityStrategy* requires additional logic to function. Specifically it requires a *Capacitor* and a *Filter*. Capacitors are used to determine the pressure that the pool is under and provide a (usually) raw reading of this information. Currently we provide for the use of either mailbox backlog or active futures count as a means of evaluating pool pressure. Each expresses itself as a simple number - a reading of the number of actors either with mailbox sizes over a certain threshold or blocking a thread waiting on a future to complete or expire.
-
-Filtering
-^^^^^^^^^
-
-A *Filter* is a trait that modifies the raw pressure reading returned from a Capacitor such that it drives the adjustment of the pool capacity to a desired end. More simply, if we just used the pressure reading alone, we might only ever increase the size of the pool (to respond to overload) or we might only have a single mechanism for reducing the pool size when/if it became necessary. This behavior is fully under your control through the use of *Filters*. Let's take a look at some code to see how this works:
-
-.. code-block:: scala
-
-  trait BoundedCapacitor
-  {
-  	def lowerBound:Int
-  	def upperBound:Int
-
-  	def capacity(delegates:Seq[ActorRef]):Int =
-  	{
-  		val current = delegates length
-  		var delta = _eval(delegates)
-  		val proposed = current + delta
-
-  		if (proposed < lowerBound) delta += (lowerBound - proposed)
-  		else if (proposed > upperBound) delta -= (proposed - upperBound)
-
-  		delta
-  	}
-
-  	protected def _eval(delegates:Seq[ActorRef]):Int
-  }
-
-  trait CapacityStrategy
-  {
-  	import ActorPool._
-
-  	def pressure(delegates:Seq[ActorRef]):Int
-  	def filter(pressure:Int, capacity:Int):Int
-
-  	protected def _eval(delegates:Seq[ActorRef]):Int = filter(pressure(delegates), delegates.size)
-  }
-
-Here we see how the filter function will have the chance to modify the pressure reading to influence the capacity change. You are free to implement filter() however you like. We provide a `Filter <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L279>`_ trait that evaluates both a rampup and a backoff subfilter to determine how to use the pressure reading to alter the pool capacity. There are several subfilters available to use, though again you may create whatever makes the most sense for you pool:
-
-* `BasicRampup <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L308>`_ - When pressure exceeds current capacity, increase the number of actors in the pool by some factor (*rampupRate*) of the current pool size.
-* `BasicBackoff <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L322>`_ - When the pressure ratio falls under some predefined amount (*backoffThreshold*), decrease the number of actors in the pool by some factor of the current pool size.
-* `RunningMeanBackoff <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Pool.scala#L341>`_ - This filter tracks the average pressure-to-capacity over the lifetime of the pool (or since the last time the filter was reset) and will begin to reduce capacity once this mean falls below some predefined amount. The number of actors that will be stopped is determined by some factor of the difference between the current capacity and pressure. The idea behind this filter is to reduce the likelihood of "thrashing" (removing then immediately creating...) pool actors by delaying the backoff until some quiescent stage of the pool. Put another way, use this subfilter to allow quick rampup to handle load and more subtle backoff as that decreases over time.
-
-Examples
-^^^^^^^^
+When run you should see a similar output to this:
 
 .. code-block:: scala
 
-  class TestPool extends Actor with DefaultActorPool
-                                 with BoundedCapacityStrategy
-                                 with ActiveFuturesPressureCapacitor
-                                 with SmallestMailboxSelector
-                                 with BasicNoBackoffFilter
-  {
-     def receive = _route
-     def lowerBound = 2
-     def upperBound = 4
-     def rampupRate = 0.1
-     def partialFill = true
-     def selectionCount = 1
-     def instance = actorOf(new Actor {def receive = {case n:Int =>
-                                                     Thread.sleep(n)
-                                                     counter.incrementAndGet
-                                                     latch.countDown()}})
-  }
+  Received message '1' in actor $b
+  Received message '2' in actor $c
+  Received message '3' in actor $d
+  Received message '6' in actor $b
+  Received message '4' in actor $e
+  Received message '8' in actor $d
+  Received message '5' in actor $f
+  Received message '9' in actor $e
+  Received message '10' in actor $f
+  Received message '7' in actor $c
+
+If you look closely to the output you can see that each of the routees received two messages which
+is exactly what you would expect from a round-robin router to happen.
+(The name of an actor is automatically created in the format ``$letter`` unless you specify it -
+hence the names printed above.)
+
+RandomRouter
+************
+As the name implies this router type selects one of its routees randomly and forwards
+the message it receives to this routee.
+This procedure will happen each time it receives a message.
+Code example:
+
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#randomRouter
+
+When run you should see a similar output to this:
 
 .. code-block:: scala
 
-  class TestPool extends Actor with DefaultActorPool
-                                 with BoundedCapacityStrategy
-                                 with MailboxPressureCapacitor
-                                 with SmallestMailboxSelector
-                                 with Filter
-                                   with RunningMeanBackoff
-                                   with BasicRampup
-  {
-    def receive = _route
-    def lowerBound = 1
-    def upperBound = 5
-    def pressureThreshold = 1
-    def partialFill = true
-    def selectionCount = 1
-    def rampupRate = 0.1
-    def backoffRate = 0.50
-    def backoffThreshold = 0.50
-    def instance = actorOf(new Actor {def receive = {case n:Int =>
-                                                    Thread.sleep(n)
-                                                    latch.countDown()}})
-  }
+  Received message '1' in actor $e
+  Received message '2' in actor $c
+  Received message '4' in actor $b
+  Received message '5' in actor $d
+  Received message '3' in actor $e
+  Received message '6' in actor $c
+  Received message '7' in actor $d
+  Received message '8' in actor $e
+  Received message '9' in actor $d
+  Received message '10' in actor $d
 
-Taken from the unit test `spec <https://github.com/jboner/akka/blob/master/akka-actor/src/test/scala/akka/routing/RoutingSpec.scala>`_.
+The result from running the random router should be different, or at least random, every time you run it.
+Try to run it a couple of times to verify its behavior if you don't trust us.
+
+SmallestMailboxRouter
+*********************
+A Router that tries to send to the non-suspended routee with fewest messages in mailbox.
+The selection is done in this order:
+
+ * pick any idle routee (not processing message) with empty mailbox
+ * pick any routee with empty mailbox
+ * pick routee with fewest pending messages in mailbox
+ * pick any remote routee, remote actors are consider lowest priority,
+   since their mailbox size is unknown
+
+Code example:
+
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#smallestMailboxRouter
+
+BroadcastRouter
+***************
+A broadcast router forwards the message it receives to *all* its routees.
+Code example:
+
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#broadcastRouter
+
+When run you should see a similar output to this:
+
+.. code-block:: scala
+
+  Received message 'this is a broadcast message' in actor $f
+  Received message 'this is a broadcast message' in actor $d
+  Received message 'this is a broadcast message' in actor $e
+  Received message 'this is a broadcast message' in actor $c
+  Received message 'this is a broadcast message' in actor $b
+
+As you can see here above each of the routees, five in total, received the broadcast message.
+
+ScatterGatherFirstCompletedRouter
+*********************************
+The ScatterGatherFirstCompletedRouter will send the message on to all its routees as a future.
+It then waits for first result it gets back. This result will be sent back to original sender.
+Code example:
+
+.. includecode:: code/akka/docs/routing/RouterTypeExample.scala#scatterGatherFirstCompletedRouter
+
+When run you should see this:
+
+.. code-block:: scala
+
+  The result of calculating Fibonacci for 10 is 55
+
+From the output above you can't really see that all the routees performed the calculation, but they did!
+The result you see is from the first routee that returned its calculation to the router.
+
+Broadcast Messages
+^^^^^^^^^^^^^^^^^^
+
+There is a special type of message that will be sent to all routees regardless of the router.
+This message is called ``Broadcast`` and is used in the following manner:
+
+.. code-block:: scala
+
+  router ! Broadcast("Watch out for Davy Jones' locker")
+
+Only the actual message is forwarded to the routees, i.e. "Watch out for Davy Jones' locker" in the example above.
+It is up to the routee implementation whether to handle the broadcast message or not.
+
+Dynamically Resizable Routers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+All routers can be used with a fixed number of routees or with a resize strategy to adjust the number
+of routees dynamically.
+
+This is an example of how to create a resizable router that is defined in configuration:
+
+.. includecode:: code/akka/docs/routing/RouterViaConfigExample.scala#config-resize
+
+.. includecode:: code/akka/docs/routing/RouterViaConfigExample.scala#configurableRoutingWithResizer
+
+Several more configuration options are available and described in ``akka.actor.deployment.default.resizer``
+section of the reference :ref:`configuration`.
+
+This is an example of how to programmatically create a resizable router:
+
+.. includecode:: code/akka/docs/routing/RouterViaProgramExample.scala#programmaticRoutingWithResizer
+
+*It is also worth pointing out that if you define the ``router`` in the configuration file then this value
+will be used instead of any programmatically sent parameters.*
+
+.. note::
+
+  Resizing is triggered by sending messages to the actor pool, but it is not
+  completed synchronously; instead a message is sent to the “head”
+  :class:`Router` to perform the size change. Thus you cannot rely on resizing
+  to instantaneously create new workers when all others are busy, because the
+  message just sent will be queued to the mailbox of a busy actor. To remedy
+  this, configure the pool to use a balancing dispatcher, see `Configuring
+  Dispatchers`_ for more information.
+
+Custom Router
+^^^^^^^^^^^^^
+
+You can also create your own router should you not find any of the ones provided by Akka sufficient for your needs.
+In order to roll your own router you have to fulfill certain criteria which are explained in this section.
+
+The router created in this example is a simple vote counter. It will route the votes to specific vote counter actors.
+In this case we only have two parties the Republicans and the Democrats. We would like a router that forwards all
+democrat related messages to the Democrat actor and all republican related messages to the Republican actor.
+
+We begin with defining the class:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala#crRouter
+   :exclude: crRoute
+
+The next step is to implement the ``createRoute`` method in the class just defined:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala#crRoute
+
+As you can see above we start off by creating the routees and put them in a collection.
+
+Make sure that you don't miss to implement the line below as it is *really* important.
+It registers the routees internally and failing to call this method will
+cause a ``ActorInitializationException`` to be thrown when the router is used.
+Therefore always make sure to do the following in your custom router:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala#crRegisterRoutees
+
+The routing logic is where your magic sauce is applied. In our example it inspects the message types
+and forwards to the correct routee based on this:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala#crRoutingLogic
+
+As you can see above what's returned in the partial function is a ``List`` of ``Destination(sender, routee)``.
+The sender is what "parent" the routee should see - changing this could be useful if you for example want
+another actor than the original sender to intermediate the result of the routee (if there is a result).
+For more information about how to alter the original sender we refer to the source code of
+`ScatterGatherFirstCompletedRouter <https://github.com/jboner/akka/blob/master/akka-actor/src/main/scala/akka/routing/Routing.scala#L375>`_
+
+All in all the custom router looks like this:
+
+.. includecode:: ../../akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala#CustomRouter
+
+If you are interested in how to use the VoteCountRouter you can have a look at the test class
+`RoutingSpec <https://github.com/jboner/akka/blob/master/akka-actor-tests/src/test/scala/akka/routing/RoutingSpec.scala>`_
+
+Configured Custom Router
+************************
+
+It is possible to define configuration properties for custom routers. In the ``router`` property of the deployment
+configuration you define the fully qualified class name of the router class. The router class must extend
+``akka.routing.RouterConfig`` and and have constructor with ``com.typesafe.config.Config`` parameter.
+The deployment section of the configuration is passed to the constructor.
+
+Custom Resizer
+**************
+
+A router with dynamically resizable number of routees is implemented by providing a ``akka.routing.Resizer``
+in ``resizer`` method of the ``RouterConfig``. See ``akka.routing.DefaultResizer`` for inspiration
+of how to write your own resize strategy.
+
+Configuring Dispatchers
+^^^^^^^^^^^^^^^^^^^^^^^
+
+The dispatcher for created children of the router will be taken from
+:class:`Props` as described in :ref:`dispatchers-scala`. For a dynamic pool it
+makes sense to configure the :class:`BalancingDispatcher` if the precise
+routing is not so important (i.e. no consistent hashing or round-robin is
+required); this enables newly created routees to pick up work immediately by
+stealing it from their siblings.
+
+The “head” router, of course, cannot run on the same balancing dispatcher,
+because it does not process the same messages, hence this special actor does
+not use the dispatcher configured in :class:`Props`, but takes the
+``routerDispatcher`` from the :class:`RouterConfig` instead, which defaults to
+the actor system’s default dispatcher. All standard routers allow setting this
+property in their constructor or factory method, custom routers have to
+implement the method in a suitable way.
+
+.. includecode:: code/akka/docs/routing/RouterDocSpec.scala#dispatchers
+

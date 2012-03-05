@@ -1,57 +1,33 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor
 
-import org.scalatest.{ WordSpec, BeforeAndAfterAll }
-import org.scalatest.matchers.MustMatchers
-import akka.testkit.TestKit
-import akka.dispatch.FutureTimeoutException
 import akka.util.duration._
+import akka.testkit._
+import akka.dispatch.Await
+import akka.util.Timeout
+import akka.pattern.{ ask, AskTimeoutException }
 
-class ActorTimeoutSpec
-  extends WordSpec
-  with BeforeAndAfterAll
-  with MustMatchers
-  with TestKit {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ActorTimeoutSpec extends AkkaSpec {
 
-  def actorWithTimeout(t: Timeout): ActorRef = Actor.actorOf(Props(creator = () ⇒ new Actor {
-    def receive = {
-      case x ⇒
-    }
-  }, timeout = t))
-
-  val testTimeout = if (Timeout.default.duration < 400.millis) 500 millis else 100 millis
+  val testTimeout = 200.millis.dilated
+  val leeway = 500.millis.dilated
 
   "An Actor-based Future" must {
 
-    "use the global default timeout if no implicit in scope" in {
-      within((Actor.TIMEOUT - 100).millis, (Actor.TIMEOUT + 400).millis) {
-        val echo = actorWithTimeout(Timeout(12))
-        try {
-          val f = echo ? "hallo"
-          intercept[FutureTimeoutException] { f.await }
-        } finally { echo.stop }
-      }
-    }
-
     "use implicitly supplied timeout" in {
       implicit val timeout = Timeout(testTimeout)
-      within(testTimeout - 100.millis, testTimeout + 300.millis) {
-        val echo = actorWithTimeout(Props.defaultTimeout)
-        try {
-          val f = (echo ? "hallo").mapTo[String]
-          intercept[FutureTimeoutException] { f.await }
-          f.value must be(None)
-        } finally { echo.stop }
-      }
+      val echo = system.actorOf(Props.empty)
+      val f = (echo ? "hallo")
+      intercept[AskTimeoutException] { Await.result(f, testTimeout + leeway) }
     }
 
     "use explicitly supplied timeout" in {
-      within(testTimeout - 100.millis, testTimeout + 300.millis) {
-        val echo = actorWithTimeout(Props.defaultTimeout)
-        try { (echo.?("hallo", testTimeout)).as[String] must be(None) } finally { echo.stop }
-      }
+      val echo = system.actorOf(Props.empty)
+      val f = echo.?("hallo")(testTimeout)
+      intercept[AskTimeoutException] { Await.result(f, testTimeout + leeway) }
     }
   }
 }

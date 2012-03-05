@@ -1,19 +1,23 @@
+/**
+ * Copyright (C) 2009-2010 Typesafe Inc. <http://www.typesafe.com>.
+ */
 package sample.fsm.buncher
 
+import akka.actor.ActorRefFactory
 import scala.reflect.ClassManifest
 import akka.util.Duration
 import akka.actor.{ FSM, Actor, ActorRef }
 
 /*
- * generic typed object buncher.
- *
- * To instantiate it, use the factory method like so:
- *   Buncher(100, 500)(x : List[AnyRef] => x foreach println)
- * which will yield a fully functional ActorRef.
- * The type of messages allowed is strongly typed to match the
- * supplied processing method; other messages are discarded (and
- * possibly logged).
- */
+* generic typed object buncher.
+*
+* To instantiate it, use the factory method like so:
+*   Buncher(100, 500)(x : List[AnyRef] => x foreach println)
+* which will yield a fully functional ActorRef.
+* The type of messages allowed is strongly typed to match the
+* supplied processing method; other messages are discarded (and
+* possibly logged).
+*/
 object GenericBuncher {
   trait State
   case object Idle extends State
@@ -60,7 +64,7 @@ abstract class GenericBuncher[A: Manifest, B](val singleTimeout: Duration, val m
     case Event(Stop, _)  ⇒ stop
   }
 
-  when(Active, stateTimeout = Some(singleTimeout)) {
+  when(Active, stateTimeout = singleTimeout) {
     case Event(Msg(m), acc) ⇒
       stay using merge(acc, m)
     case Event(StateTimeout, acc) ⇒
@@ -81,10 +85,6 @@ object Buncher {
 
   val Stop = GenericBuncher.Stop // make special message objects visible for Buncher clients
   val Flush = GenericBuncher.Flush
-
-  def apply[A: Manifest](singleTimeout: Duration,
-                         multiTimeout: Duration) =
-    Actor.actorOf(new Buncher[A](singleTimeout, multiTimeout))
 }
 
 class Buncher[A: Manifest](singleTimeout: Duration, multiTimeout: Duration)

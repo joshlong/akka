@@ -11,7 +11,6 @@ import org.scalatest.matchers.MustMatchers
 
 import akka.actor.Actor._
 import akka.actor._
-import akka.config.Supervision._
 
 /**
  * @author Martin Krasser
@@ -28,7 +27,7 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
     service = CamelServiceFactory.createCamelService
     // register test consumer before registering the publish requestor
     // and before starting the CamelService (registry is scanned for consumers)
-    actorOf(new TestConsumer("direct:publish-test-1"))
+    actorOf(Props(new TestConsumer("direct:publish-test-1"))
     service.registerPublishRequestor
     service.awaitEndpointActivation(1) {
       service.start
@@ -55,7 +54,7 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
     "started" must {
       "support an in-out message exchange via its endpoint" in {
         service.awaitEndpointActivation(1) {
-          consumer = actorOf(new TestConsumer("direct:publish-test-2"))
+          consumer = actorOf(Props(new TestConsumer("direct:publish-test-2"))
         } must be(true)
         mandatoryTemplate.requestBody("direct:publish-test-2", "msg2") must equal("received msg2")
       }
@@ -101,7 +100,7 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
     "receiving an in-out message exchange" must {
       "lead to a TimeoutException" in {
         service.awaitEndpointActivation(1) {
-          actorOf(Props(creator = () ⇒ new TestBlocker("direct:publish-test-5"), timeout = Timeout(1000)))
+          actorOf(Props(creator = () ⇒ new TestBlocker("direct:publish-test-5")))
         } must be(true)
 
         try {
@@ -120,7 +119,7 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
     "activated with a custom error handler" must {
       "handle thrown exceptions by generating a custom response" in {
         service.awaitEndpointActivation(1) {
-          actorOf[ErrorHandlingConsumer]
+          actorOf(Props[ErrorHandlingConsumer]
         } must be(true)
         mandatoryTemplate.requestBody("direct:error-handler-test", "hello") must equal("error: hello")
 
@@ -129,7 +128,7 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
     "activated with a custom redelivery handler" must {
       "handle thrown exceptions by redelivering the initial message" in {
         service.awaitEndpointActivation(1) {
-          actorOf[RedeliveringConsumer]
+          actorOf(Props[RedeliveringConsumer]
         } must be(true)
         mandatoryTemplate.requestBody("direct:redelivery-test", "hello") must equal("accepted: hello")
 
@@ -139,15 +138,15 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
 
   "An non auto-acknowledging consumer" when {
     "started" must {
-      "must support acknowledgements on application level" in {
+      "must support acknowledgements on system level" in {
 
         var consumer: ActorRef = null
 
         service.awaitEndpointActivation(1) {
-          consumer = actorOf(new TestAckConsumer("direct:application-ack-test"))
+          consumer = actorOf(Props(new TestAckConsumer("direct:system-ack-test"))
         } must be(true)
 
-        val endpoint = mandatoryContext.getEndpoint("direct:application-ack-test", classOf[DirectEndpoint])
+        val endpoint = mandatoryContext.getEndpoint("direct:system-ack-test", classOf[DirectEndpoint])
         val producer = endpoint.createProducer.asInstanceOf[AsyncProcessor]
         val exchange = endpoint.createExchange
 
@@ -170,19 +169,19 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
 
   "A supervised consumer" must {
     "be able to reply during receive" in {
-      val consumer = Actor.actorOf(new SupervisedConsumer("reply-channel-test-1"))
+      val consumer = Actor.actorOf(Props(new SupervisedConsumer("reply-channel-test-1"))
       (consumer ? "succeed").get must equal("ok")
     }
 
     "be able to reply on failure during preRestart" in {
-      val consumer = Actor.actorOf(new SupervisedConsumer("reply-channel-test-2"))
+      val consumer = Actor.actorOf(Props(new SupervisedConsumer("reply-channel-test-2"))
       val supervisor = Supervisor(
         SupervisorConfig(
-          OneForOnePermanentStrategy(List(classOf[Exception]), 2, 10000),
+          OneForOneStrategy(List(classOf[Exception]), 2, 10000),
           Supervise(consumer, Permanent) :: Nil))
 
       val latch = new CountDownLatch(1)
-      val sender = Actor.actorOf(new Sender("pr", latch))
+      val sender = Actor.actorOf(Props(new Sender("pr", latch))
 
       consumer.!("fail")(Some(sender))
       latch.await(5, TimeUnit.SECONDS) must be(true)
@@ -192,11 +191,11 @@ class ConsumerScalaTest extends WordSpec with BeforeAndAfterAll with MustMatcher
       val consumer = Actor.actorOf(Props(new SupervisedConsumer("reply-channel-test-3")))
       val supervisor = Supervisor(
         SupervisorConfig(
-          OneForOneTemporaryStrategy(List(classOf[Exception])),
+          OneForOneStrategy(List(classOf[Exception]), Some(0)),
           Supervise(consumer, Temporary) :: Nil))
 
       val latch = new CountDownLatch(1)
-      val sender = Actor.actorOf(new Sender("ps", latch))
+      val sender = Actor.actorOf(Props(new Sender("ps", latch))
 
       consumer.!("fail")(Some(sender))
       latch.await(5, TimeUnit.SECONDS) must be(true)
@@ -212,7 +211,7 @@ object ConsumerScalaTest {
   class TestConsumer(uri: String) extends Actor with Consumer {
     def endpointUri = uri
     protected def receive = {
-      case msg: Message ⇒ self.reply("received %s" format msg.body)
+      case msg: Message ⇒ sender ! "received %s" format msg.body
     }
   }
 
@@ -227,7 +226,7 @@ object ConsumerScalaTest {
     def endpointUri = uri
     override def autoack = false
     protected def receive = {
-      case msg: Message ⇒ self.reply(Ack)
+      case msg: Message ⇒ sender ! Ack
     }
   }
 
@@ -248,15 +247,15 @@ object ConsumerScalaTest {
 
     protected def receive = {
       case "fail"    ⇒ { throw new Exception("test") }
-      case "succeed" ⇒ self.reply("ok")
+      case "succeed" ⇒ sender ! "ok"
     }
 
     override def preRestart(reason: scala.Throwable, msg: Option[Any]) {
-      self.tryReply("pr")
+      sender.tell("pr")
     }
 
     override def postStop {
-      self.tryReply("ps")
+      sender.tell("ps")
     }
   }
 
@@ -289,7 +288,7 @@ object ConsumerScalaTest {
     }
 
     private def respondTo(msg: Message) =
-      if (valid) self.reply("accepted: %s" format msg.body)
+      if (valid) sender ! ("accepted: %s" format msg.body)
       else throw new Exception("rejected: %s" format msg.body)
 
   }

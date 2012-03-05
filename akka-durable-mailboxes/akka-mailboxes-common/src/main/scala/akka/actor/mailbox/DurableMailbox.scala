@@ -1,77 +1,106 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
-import MailboxProtocol._
-
-import akka.dispatch._
-import akka.event.EventHandler
-import akka.cluster.MessageSerializer
-import akka.cluster.RemoteProtocol.MessageProtocol
-import akka.AkkaException
-import akka.actor._
-
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
-trait DurableMailboxBase {
-  def serialize(message: MessageInvocation): Array[Byte]
-  def deserialize(bytes: Array[Byte]): MessageInvocation
-}
+import akka.actor.{ ActorContext, ActorRef, ExtendedActorSystem }
+import akka.dispatch.{ Envelope, MessageQueue }
+import akka.remote.MessageSerializer
+import akka.remote.RemoteProtocol.{ ActorRefProtocol, RemoteMessageProtocol }
+import com.typesafe.config.Config
+import akka.actor.ActorSystem
 
 private[akka] object DurableExecutableMailboxConfig {
   val Name = "[\\.\\/\\$\\s]".r
 }
 
-class DurableMailboxException private[akka] (message: String, cause: Throwable) extends AkkaException(message, cause) {
-  def this(message: String) = this(message, null)
-}
-
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
-abstract class DurableExecutableMailbox(owner: LocalActorRef) extends MessageQueue with ExecutableMailbox with DurableMailboxBase {
+abstract class DurableMessageQueue(val owner: ActorContext) extends MessageQueue {
   import DurableExecutableMailboxConfig._
 
-  val ownerAddress = owner.address
-  val name = "mailbox_" + Name.replaceAllIn(ownerAddress, "_")
+  def system: ExtendedActorSystem = owner.system.asInstanceOf[ExtendedActorSystem]
+  def ownerPath = owner.self.path
+  val ownerPathString = ownerPath.elements.mkString("/")
+  val name = "mailbox_" + Name.replaceAllIn(ownerPathString, "_")
 
-  EventHandler.debug(this, "Creating %s mailbox [%s]".format(getClass.getName, name))
+}
 
-  val dispatcher: Dispatcher = owner.dispatcher match {
-    case e: Dispatcher ⇒ e
-    case _             ⇒ null
-  }
+trait DurableMessageSerialization { this: DurableMessageQueue ⇒
 
-  //TODO: switch to RemoteProtocol
-  def serialize(durableMessage: MessageInvocation) = {
-    val message = MessageSerializer.serialize(durableMessage.message.asInstanceOf[AnyRef])
-    val builder = DurableMailboxMessageProtocol.newBuilder
-      .setOwnerAddress(ownerAddress)
-      .setMessage(message.toByteString)
-    durableMessage.channel match {
-      case a: ActorRef ⇒ builder.setSenderAddress(a.address)
-      case _           ⇒
-    }
+  def serialize(durableMessage: Envelope): Array[Byte] = {
+
+    def serializeActorRef(ref: ActorRef): ActorRefProtocol = ActorRefProtocol.newBuilder.setPath(ref.path.toString).build
+
+    val message = MessageSerializer.serialize(system, durableMessage.message.asInstanceOf[AnyRef])
+    val builder = RemoteMessageProtocol.newBuilder
+      .setMessage(message)
+      .setRecipient(serializeActorRef(owner.self))
+      .setSender(serializeActorRef(durableMessage.sender))
+
     builder.build.toByteArray
   }
 
-  //TODO: switch to RemoteProtocol
-  def deserialize(bytes: Array[Byte]) = {
-    val durableMessage = DurableMailboxMessageProtocol.parseFrom(bytes)
+  def deserialize(bytes: Array[Byte]): Envelope = {
 
-    val owner = Actor.registry.actorFor(durableMessage.getOwnerAddress) match {
-      case Some(l: LocalActorRef) ⇒ l
-      case Some(a)                ⇒ throw new DurableMailboxException("Recipient of message is not a LocalActorRef: " + a)
-      case None                   ⇒ throw new DurableMailboxException("No actor could be found for address [" + ownerAddress + "], could not deserialize message.")
-    }
+    def deserializeActorRef(refProtocol: ActorRefProtocol): ActorRef = system.actorFor(refProtocol.getPath)
 
-    val messageProtocol = MessageProtocol.parseFrom(durableMessage.getMessage)
-    val message = MessageSerializer.deserialize(messageProtocol)
+    val durableMessage = RemoteMessageProtocol.parseFrom(bytes)
+    val message = MessageSerializer.deserialize(system, durableMessage.getMessage)
+    val sender = deserializeActorRef(durableMessage.getSender)
 
-    val sender = if (durableMessage.hasSenderAddress) Actor.registry.actorFor(durableMessage.getSenderAddress).getOrElse(NullChannel) else NullChannel
-
-    new MessageInvocation(owner, message, sender)
+    new Envelope(message, sender)(system)
   }
+
 }
+
+/**
+ * Conventional organization of durable mailbox settings:
+ *
+ * {{{
+ * my-durable-dispatcher {
+ *   mailbox-type = "my.durable.mailbox"
+ *   my-durable-mailbox {
+ *     setting1 = 1
+ *     setting2 = 2
+ *   }
+ * }
+ * }}}
+ *
+ * where name=“my-durable-mailbox” in this example.
+ */
+trait DurableMailboxSettings {
+  /**
+   * A reference to the enclosing actor system.
+   */
+  def systemSettings: ActorSystem.Settings
+
+  /**
+   * A reference to the config section which the user specified for this mailbox’s dispatcher.
+   */
+  def userConfig: Config
+
+  /**
+   * The extracted config section for this mailbox, which is the “name”
+   * section (if that exists), falling back to system defaults. Typical
+   * implementation looks like:
+   *
+   * {{{
+   * val config = initialize
+   * }}}
+   */
+  def config: Config
+
+  /**
+   * Name of this mailbox type for purposes of configuration scoping. Reference
+   * defaults go into “akka.actor.mailbox.<name>”.
+   */
+  def name: String
+
+  /**
+   * Obtain default extracted mailbox config section from userConfig and system.
+   */
+  def initialize: Config =
+    if (userConfig.hasPath(name))
+      userConfig.getConfig(name).withFallback(systemSettings.config.getConfig("akka.actor.mailbox." + name))
+    else systemSettings.config.getConfig("akka.actor.mailbox." + name)
+}
+

@@ -1,67 +1,69 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
-import akka.actor.LocalActorRef
-import akka.config.Config.config
-import akka.dispatch._
-import akka.event.EventHandler
-import akka.AkkaException
-
-import MailboxProtocol._
-
 import com.redis._
+import akka.AkkaException
+import akka.actor.ActorContext
+import akka.dispatch.Envelope
+import akka.event.Logging
+import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
+import akka.util.NonFatal
+import akka.config.ConfigurationException
+import akka.dispatch.MessageQueue
+import akka.actor.ActorSystem
 
 class RedisBasedMailboxException(message: String) extends AkkaException(message)
 
-/**
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
- */
-class RedisBasedMailbox(val owner: LocalActorRef) extends DurableExecutableMailbox(owner) {
+class RedisBasedMailboxType(systemSettings: ActorSystem.Settings, config: Config) extends MailboxType {
+  private val settings = new RedisBasedMailboxSettings(systemSettings, config)
+  override def create(owner: Option[ActorContext]): MessageQueue = owner match {
+    case Some(o) ⇒ new RedisBasedMessageQueue(o, settings)
+    case None    ⇒ throw new ConfigurationException("creating a durable mailbox requires an owner (i.e. does not work with BalancingDispatcher)")
+  }
+}
+
+class RedisBasedMessageQueue(_owner: ActorContext, val settings: RedisBasedMailboxSettings) extends DurableMessageQueue(_owner) with DurableMessageSerialization {
+
   @volatile
   private var clients = connect() // returns a RedisClientPool for multiple asynchronous message handling
 
-  def enqueue(message: MessageInvocation) = {
-    EventHandler.debug(this,
-      "\nENQUEUING message in redis-based mailbox [%s]".format(message))
+  val log = Logging(system, "RedisBasedMessageQueue")
+
+  def enqueue(receiver: ActorRef, envelope: Envelope) {
     withErrorHandling {
       clients.withClient { client ⇒
-        client.rpush(name, serialize(message))
+        client.rpush(name, serialize(envelope))
       }
     }
   }
 
-  def dequeue: MessageInvocation = withErrorHandling {
+  def dequeue(): Envelope = withErrorHandling {
     try {
       import serialization.Parse.Implicits.parseByteArray
-      val item = clients.withClient { client ⇒
-        client.lpop[Array[Byte]](name).getOrElse(throw new NoSuchElementException(name + " not present"))
-      }
-      val messageInvocation = deserialize(item)
-      EventHandler.debug(this,
-        "\nDEQUEUING message in redis-based mailbox [%s]".format(messageInvocation))
-      messageInvocation
+      val item = clients.withClient { _.lpop[Array[Byte]](name).getOrElse(throw new NoSuchElementException(name + " not present")) }
+      deserialize(item)
     } catch {
       case e: java.util.NoSuchElementException ⇒ null
-      case e ⇒
-        EventHandler.error(e, this, "Couldn't dequeue from Redis-based mailbox")
+      case NonFatal(e) ⇒
+        log.error(e, "Couldn't dequeue from Redis-based mailbox")
         throw e
     }
   }
 
-  def size: Int = withErrorHandling {
+  def numberOfMessages: Int = withErrorHandling {
     clients.withClient { client ⇒
       client.llen(name).getOrElse(throw new NoSuchElementException(name + " not present"))
     }
   }
 
-  def isEmpty: Boolean = size == 0 //TODO review find other solution, this will be very expensive
+  def hasMessages: Boolean = numberOfMessages > 0 //TODO review find other solution, this will be very expensive
 
   private[akka] def connect() = {
-    new RedisClientPool(
-      config.getString("akka.actor.mailbox.redis.hostname", "127.0.0.1"),
-      config.getInt("akka.actor.mailbox.redis.port", 6379))
+    new RedisClientPool(settings.Hostname, settings.Port)
   }
 
   private def withErrorHandling[T](body: ⇒ T): T = {
@@ -72,11 +74,13 @@ class RedisBasedMailbox(val owner: LocalActorRef) extends DurableExecutableMailb
         clients = connect()
         body
       }
-      case e ⇒
-        val error = new RedisBasedMailboxException("Could not connect to Redis server")
-        EventHandler.error(error, this, "Could not connect to Redis server")
+      case NonFatal(e) ⇒
+        val error = new RedisBasedMailboxException("Could not connect to Redis server, due to: " + e.getMessage)
+        log.error(error, error.getMessage)
         throw error
     }
   }
+
+  def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = ()
 }
 

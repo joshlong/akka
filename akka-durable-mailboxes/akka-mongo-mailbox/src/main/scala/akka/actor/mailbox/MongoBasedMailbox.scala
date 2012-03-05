@@ -1,21 +1,32 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
-import akka.actor.{ ActorRef, LocalActorRef }
-import akka.config.Config.config
-import akka.dispatch._
-import akka.event.EventHandler
 import akka.AkkaException
-
-import MailboxProtocol._
-
 import com.mongodb.async._
 import com.mongodb.async.futures.RequestFutures
 import org.bson.collection._
+import akka.actor.ActorContext
+import akka.event.Logging
+import akka.actor.ActorRef
+import akka.dispatch.{ Await, Promise, Envelope }
+import java.util.concurrent.TimeoutException
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
+import akka.config.ConfigurationException
+import akka.dispatch.MessageQueue
+import akka.actor.ActorSystem
 
 class MongoBasedMailboxException(message: String) extends AkkaException(message)
+
+class MongoBasedMailboxType(systemSettings: ActorSystem.Settings, config: Config) extends MailboxType {
+  private val settings = new MongoBasedMailboxSettings(systemSettings, config)
+  override def create(owner: Option[ActorContext]): MessageQueue = owner match {
+    case Some(o) ⇒ new MongoBasedMessageQueue(o, settings)
+    case None    ⇒ throw new ConfigurationException("creating a durable mailbox requires an owner (i.e. does not work with BalancingDispatcher)")
+  }
+}
 
 /**
  * A "naive" durable mailbox which uses findAndRemove; it's possible if the actor crashes
@@ -28,39 +39,33 @@ class MongoBasedMailboxException(message: String) extends AkkaException(message)
  *
  * @author <a href="http://evilmonkeylabs.com">Brendan W. McAdams</a>
  */
-class MongoBasedNaiveMailbox(val owner: LocalActorRef) extends DurableExecutableMailbox(owner) {
+class MongoBasedMessageQueue(_owner: ActorContext, val settings: MongoBasedMailboxSettings) extends DurableMessageQueue(_owner) {
   // this implicit object provides the context for reading/writing things as MongoDurableMessage
-  implicit val mailboxBSONSer = BSONSerializableMailbox
+  implicit val mailboxBSONSer = new BSONSerializableMessageQueue(system)
   implicit val safeWrite = WriteConcern.Safe // TODO - Replica Safe when appropriate!
 
-  val URI_CONFIG_KEY = "akka.actor.mailbox.mongodb.uri"
-  val WRITE_TIMEOUT_KEY = "akka.actor.mailbox.mongodb.timeout.write"
-  val READ_TIMEOUT_KEY = "akka.actor.mailbox.mongodb.timeout.read"
-  val mongoURI = config.getString(URI_CONFIG_KEY)
-  val writeTimeout = config.getInt(WRITE_TIMEOUT_KEY, 3000)
-  val readTimeout = config.getInt(READ_TIMEOUT_KEY, 3000)
+  private val dispatcher = owner.dispatcher
+
+  val log = Logging(system, "MongoBasedMessageQueue")
 
   @volatile
   private var mongo = connect()
 
-  def enqueue(msg: MessageInvocation) = {
-    EventHandler.debug(this,
-      "\nENQUEUING message in mongodb-based mailbox [%s]".format(msg))
+  def enqueue(receiver: ActorRef, envelope: Envelope) {
     /* TODO - Test if a BSON serializer is registered for the message and only if not, use toByteString? */
-    val durableMessage = MongoDurableMessage(ownerAddress, msg.receiver, msg.message, msg.channel)
+    val durableMessage = MongoDurableMessage(ownerPathString, envelope.message, envelope.sender)
     // todo - do we need to filter the actor name at all for safe collection naming?
-    val result = new DefaultPromise[Boolean](writeTimeout)
+    val result = Promise[Boolean]()(dispatcher)
     mongo.insert(durableMessage, false)(RequestFutures.write { wr: Either[Throwable, (Option[AnyRef], WriteResult)] ⇒
       wr match {
-        case Right((oid, wr)) ⇒ result.completeWithResult(true)
-        case Left(t)          ⇒ result.completeWithException(t)
+        case Right((oid, wr)) ⇒ result.success(true)
+        case Left(t)          ⇒ result.failure(t)
       }
     })
-
-    result.as[Boolean].orNull
+    Await.ready(result, settings.WriteTimeout)
   }
 
-  def dequeue: MessageInvocation = withErrorHandling {
+  def dequeue(): Envelope = withErrorHandling {
     /**
      * Retrieves first item in natural order (oldest first, assuming no modification/move)
      * Waits 3 seconds for now for a message, else pops back out.
@@ -68,47 +73,38 @@ class MongoBasedNaiveMailbox(val owner: LocalActorRef) extends DurableExecutable
      * TODO - Should we have a specific query in place? Which way do we sort?
      * TODO - Error handling version!
      */
-    val msgInvocation = new DefaultPromise[MessageInvocation](readTimeout)
+    val envelopePromise = Promise[Envelope]()(dispatcher)
     mongo.findAndRemove(Document.empty) { doc: Option[MongoDurableMessage] ⇒
       doc match {
-        case Some(msg) ⇒ {
-          EventHandler.debug(this,
-            "\nDEQUEUING message in mongo-based mailbox [%s]".format(msg))
-          msgInvocation.completeWithResult(msg.messageInvocation())
-          EventHandler.debug(this,
-            "\nDEQUEUING messageInvocation in mongo-based mailbox [%s]".format(msgInvocation))
-        }
+        case Some(msg) ⇒
+          envelopePromise.success(msg.envelope(system))
+          ()
         case None ⇒
-          {
-            EventHandler.info(this,
-              "\nNo matching document found. Not an error, just an empty queue.")
-            msgInvocation.completeWithResult(null)
-          }
+          log.info("No matching document found. Not an error, just an empty queue.")
+          envelopePromise.success(null)
           ()
       }
     }
-    msgInvocation.as[MessageInvocation].orNull
+    try { Await.result(envelopePromise, settings.ReadTimeout) } catch { case _: TimeoutException ⇒ null }
   }
 
-  def size: Int = {
-    val count = new DefaultPromise[Int](readTimeout)
-    mongo.count()(count.completeWithResult)
-    count.as[Int].getOrElse(-1)
+  def numberOfMessages: Int = {
+    val count = Promise[Int]()(dispatcher)
+    mongo.count()(count.success)
+    try { Await.result(count, settings.ReadTimeout).asInstanceOf[Int] } catch { case _: Exception ⇒ -1 }
   }
 
-  def isEmpty: Boolean = size == 0 //TODO review find other solution, this will be very expensive
+  //TODO review find other solution, this will be very expensive
+  def hasMessages: Boolean = numberOfMessages > 0
 
   private[akka] def connect() = {
-    require(mongoURI.isDefined, "Mongo URI (%s) must be explicitly defined in akka.conf; will not assume defaults for safety sake.".format(URI_CONFIG_KEY))
-    EventHandler.info(this,
-      "\nCONNECTING mongodb { uri : [%s] } ".format(mongoURI))
-    val _dbh = MongoConnection.fromURI(mongoURI.get) match {
+    log.info("CONNECTING mongodb uri : [{}]", settings.MongoURI)
+    val _dbh = MongoConnection.fromURI(settings.MongoURI) match {
       case (conn, None, None) ⇒ {
         throw new UnsupportedOperationException("You must specify a database name to use with MongoDB; please see the MongoDB Connection URI Spec: 'http://www.mongodb.org/display/DOCS/Connections'")
       }
       case (conn, Some(db), Some(coll)) ⇒ {
-        EventHandler.warning(this,
-          "\nCollection name (%s) specified in MongoURI Config will be used as a prefix for mailbox names".format(coll.name))
+        log.warning("Collection name ({}) specified in MongoURI Config will be used as a prefix for mailbox names", coll.name)
         db("%s.%s".format(coll.name, name))
       }
       case (conn, Some(db), None) ⇒ {
@@ -116,8 +112,7 @@ class MongoBasedNaiveMailbox(val owner: LocalActorRef) extends DurableExecutable
       }
       case default ⇒ throw new IllegalArgumentException("Illegal or unexpected response from Mongo Connection URI Parser: %s".format(default))
     }
-    EventHandler.debug(this,
-      "\nCONNECTED to mongodb { dbh: '%s | %s'} ".format(_dbh, _dbh.name))
+    log.debug("CONNECTED to mongodb { dbh: '%s | %s'} ".format(_dbh, _dbh.name))
     _dbh
   }
 
@@ -126,14 +121,20 @@ class MongoBasedNaiveMailbox(val owner: LocalActorRef) extends DurableExecutable
       body
     } catch {
       case e: Exception ⇒ {
+        // TODO PN Question to Brendan: Is this the right approach to handle errors?
+        // If connection to db is ok, but something else fails, then many connection pools will be created?
+        // Doesn't the connection pool reconnect itself, or is this different in Hammersmith?
+        // I guess one would like to use same connection pool for all mailboxes, not one for each mailbox. Is that handled under the hood?
         mongo = connect()
         body
       }
-      case e ⇒ {
-        val error = new MongoBasedMailboxException("Could not connect to MongoDB server")
-        EventHandler.error(error, this, "Could not connect to MongoDB server")
+      case e: Exception ⇒ {
+        val error = new MongoBasedMailboxException("Could not connect to MongoDB server, due to: " + e.getMessage())
+        log.error(error, error.getMessage)
         throw error
       }
     }
   }
+
+  def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = ()
 }

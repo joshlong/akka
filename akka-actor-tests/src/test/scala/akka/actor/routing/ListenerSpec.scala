@@ -1,15 +1,14 @@
 package akka.actor.routing
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-
 import akka.testkit._
 import akka.actor._
 import akka.actor.Actor._
 import akka.routing._
 import java.util.concurrent.atomic.AtomicInteger
+import akka.dispatch.Await
 
-class ListenerSpec extends WordSpec with MustMatchers {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ListenerSpec extends AkkaSpec {
 
   "Listener" must {
 
@@ -18,13 +17,13 @@ class ListenerSpec extends WordSpec with MustMatchers {
       val barLatch = TestLatch(2)
       val barCount = new AtomicInteger(0)
 
-      val broadcast = actorOf(new Actor with Listeners {
+      val broadcast = system.actorOf(Props(new Actor with Listeners {
         def receive = listenerManagement orElse {
           case "foo" ⇒ gossip("bar")
         }
-      })
+      }))
 
-      def newListener = actorOf(new Actor {
+      def newListener = system.actorOf(Props(new Actor {
         def receive = {
           case "bar" ⇒
             barCount.incrementAndGet
@@ -32,7 +31,7 @@ class ListenerSpec extends WordSpec with MustMatchers {
           case "foo" ⇒
             fooLatch.countDown()
         }
-      })
+      }))
 
       val a1 = newListener
       val a2 = newListener
@@ -47,12 +46,12 @@ class ListenerSpec extends WordSpec with MustMatchers {
       broadcast ! WithListeners(_ ! "foo")
       broadcast ! "foo"
 
-      barLatch.await
+      Await.ready(barLatch, TestLatch.DefaultTimeout)
       barCount.get must be(2)
 
-      fooLatch.await
+      Await.ready(fooLatch, TestLatch.DefaultTimeout)
 
-      for (a ← List(broadcast, a1, a2, a3)) a.stop()
+      for (a ← List(broadcast, a1, a2, a3)) system.stop(a)
     }
   }
 }

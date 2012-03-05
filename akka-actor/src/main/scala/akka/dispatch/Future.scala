@@ -1,149 +1,183 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.dispatch
 
-import akka.AkkaException
-import akka.event.EventHandler
-import akka.actor.{ Actor, ForwardableChannel, UntypedChannel, Scheduler, Timeout, ExceptionChannel }
+import akka.event.Logging.Error
 import scala.Option
-import akka.japi.{ Procedure, Function ⇒ JFunc, Option ⇒ JOption }
-
+import akka.japi.{ Function ⇒ JFunc, Option ⇒ JOption }
 import scala.util.continuations._
-
-import java.util.concurrent.{ ConcurrentLinkedQueue, TimeUnit, Callable }
-import java.util.concurrent.TimeUnit.{ NANOSECONDS ⇒ NANOS, MILLISECONDS ⇒ MILLIS }
 import java.lang.{ Iterable ⇒ JIterable }
 import java.util.{ LinkedList ⇒ JLinkedList }
-
 import scala.annotation.tailrec
 import scala.collection.mutable.Stack
-import akka.util.{ Switch, Duration, BoxedType }
-import java.util.concurrent.atomic.{ AtomicInteger, AtomicReference, AtomicBoolean }
+import akka.util.{ Duration, BoxedType }
+import akka.dispatch.Await.CanAwait
+import akka.util.NonFatal
+import akka.event.Logging.LogEventException
+import akka.event.Logging.Debug
+import java.util.concurrent.TimeUnit.NANOSECONDS
+import java.util.concurrent.{ ExecutionException, Callable, TimeoutException }
+import java.util.concurrent.atomic.{ AtomicInteger, AtomicReferenceFieldUpdater }
+import akka.pattern.AskTimeoutException
+import scala.util.DynamicVariable
+import scala.runtime.BoxedUnit
 
-class FutureTimeoutException(message: String, cause: Throwable = null) extends AkkaException(message, cause) {
-  def this(message: String) = this(message, null)
+object Await {
+
+  /**
+   * Internal Akka use only
+   */
+  sealed trait CanAwait
+
+  /**
+   * Classes that implement Awaitable can be used with Await,
+   * this is used to do blocking operations (blocking in the "pause this thread" sense)
+   */
+  trait Awaitable[+T] {
+    /**
+     * Should throw [[java.util.concurrent.TimeoutException]] if times out
+     * This method should not be called directly.
+     */
+    @throws(classOf[TimeoutException])
+    def ready(atMost: Duration)(implicit permit: CanAwait): this.type
+
+    /**
+     * Throws exceptions if cannot produce a T within the specified time
+     * This method should not be called directly.
+     */
+    @throws(classOf[Exception])
+    def result(atMost: Duration)(implicit permit: CanAwait): T
+  }
+
+  private[this] implicit final val permit = new CanAwait {}
+
+  /**
+   * Blocks the current Thread to wait for the given awaitable to be ready.
+   * WARNING: Blocking operation, use with caution.
+   *
+   * @throws [[java.util.concurrent.TimeoutException]] if times out
+   * @return The returned value as returned by Awaitable.ready
+   */
+  @throws(classOf[TimeoutException])
+  def ready[T <: Awaitable[_]](awaitable: T, atMost: Duration): T = awaitable.ready(atMost)
+
+  /**
+   * Blocks the current Thread to wait for the given awaitable to have a result.
+   * WARNING: Blocking operation, use with caution.
+   *
+   * @throws [[java.util.concurrent.TimeoutException]] if times out
+   * @return The returned value as returned by Awaitable.result
+   */
+  @throws(classOf[Exception])
+  def result[T](awaitable: Awaitable[T], atMost: Duration): T = awaitable.result(atMost)
 }
 
+/**
+ * Futures is the Java API for Futures and Promises
+ */
 object Futures {
 
   /**
    * Java API, equivalent to Future.apply
    */
-  def future[T](body: Callable[T]): Future[T] =
-    Future(body.call)
+  def future[T](body: Callable[T], executor: ExecutionContext): Future[T] = Future(body.call)(executor)
 
   /**
-   * Java API, equivalent to Future.apply
+   * Java API, equivalent to Promise.apply
    */
-  def future[T](body: Callable[T], timeout: Timeout): Future[T] =
-    Future(body.call, timeout)
+  def promise[T](executor: ExecutionContext): Promise[T] = Promise[T]()(executor)
 
   /**
-   * Java API, equivalent to Future.apply
+   * Java API, creates an already completed Promise with the specified exception
    */
-  def future[T](body: Callable[T], timeout: Long): Future[T] =
-    Future(body.call, timeout)
+  def failed[T](exception: Throwable, executor: ExecutionContext): Promise[T] = Promise.failed(exception)(executor)
 
   /**
-   * Java API, equivalent to Future.apply
+   * Java API, Creates an already completed Promise with the specified result
    */
-  def future[T](body: Callable[T], dispatcher: MessageDispatcher): Future[T] =
-    Future(body.call)(dispatcher)
-
-  /**
-   * Java API, equivalent to Future.apply
-   */
-  def future[T](body: Callable[T], timeout: Timeout, dispatcher: MessageDispatcher): Future[T] =
-    Future(body.call)(dispatcher, timeout)
-
-  /**
-   * Java API, equivalent to Future.apply
-   */
-  def future[T](body: Callable[T], timeout: Long, dispatcher: MessageDispatcher): Future[T] =
-    Future(body.call)(dispatcher, timeout)
+  def successful[T](result: T, executor: ExecutionContext): Promise[T] = Promise.successful(result)(executor)
 
   /**
    * Java API.
    * Returns a Future that will hold the optional result of the first Future with a result that matches the predicate
    */
-  def find[T <: AnyRef](futures: JIterable[Future[T]], predicate: JFunc[T, java.lang.Boolean], timeout: Timeout): Future[JOption[T]] = {
-    val pred: T ⇒ Boolean = predicate.apply(_)
-    Future.find[T](pred, timeout)(scala.collection.JavaConversions.iterableAsScalaIterable(futures)).map(JOption.fromScalaOption(_))
+  def find[T <: AnyRef](futures: JIterable[Future[T]], predicate: JFunc[T, java.lang.Boolean], executor: ExecutionContext): Future[JOption[T]] = {
+    Future.find[T]((scala.collection.JavaConversions.iterableAsScalaIterable(futures)))(predicate.apply(_))(executor).map(JOption.fromScalaOption(_))
   }
 
   /**
    * Java API.
    * Returns a Future to the result of the first future in the list that is completed
    */
-  def firstCompletedOf[T <: AnyRef](futures: JIterable[Future[T]], timeout: Timeout): Future[T] =
-    Future.firstCompletedOf(scala.collection.JavaConversions.iterableAsScalaIterable(futures), timeout)
+  def firstCompletedOf[T <: AnyRef](futures: JIterable[Future[T]], executor: ExecutionContext): Future[T] =
+    Future.firstCompletedOf(scala.collection.JavaConversions.iterableAsScalaIterable(futures))(executor)
 
   /**
    * Java API
-   * A non-blocking fold over the specified futures.
+   * A non-blocking fold over the specified futures, with the start value of the given zero.
    * The fold is performed on the thread where the last future is completed,
    * the result will be the first failure of any of the futures, or any failure in the actual fold,
    * or the result of the fold.
    */
-  def fold[T <: AnyRef, R <: AnyRef](zero: R, timeout: Timeout, futures: java.lang.Iterable[Future[T]], fun: akka.japi.Function2[R, T, R]): Future[R] =
-    Future.fold(zero, timeout)(scala.collection.JavaConversions.iterableAsScalaIterable(futures))(fun.apply _)
-
-  def fold[T <: AnyRef, R <: AnyRef](zero: R, timeout: Long, futures: java.lang.Iterable[Future[T]], fun: akka.japi.Function2[R, T, R]): Future[R] = fold(zero, timeout: Timeout, futures, fun)
-
-  def fold[T <: AnyRef, R <: AnyRef](zero: R, futures: java.lang.Iterable[Future[T]], fun: akka.japi.Function2[R, T, R]): Future[R] = fold(zero, Timeout.default, futures, fun)
+  def fold[T <: AnyRef, R <: AnyRef](zero: R, futures: JIterable[Future[T]], fun: akka.japi.Function2[R, T, R], executor: ExecutionContext): Future[R] =
+    Future.fold(scala.collection.JavaConversions.iterableAsScalaIterable(futures))(zero)(fun.apply)(executor)
 
   /**
    * Java API.
    * Initiates a fold over the supplied futures where the fold-zero is the result value of the Future that's completed first
    */
-  def reduce[T <: AnyRef, R >: T](futures: java.lang.Iterable[Future[T]], timeout: Timeout, fun: akka.japi.Function2[R, T, T]): Future[R] =
-    Future.reduce(scala.collection.JavaConversions.iterableAsScalaIterable(futures), timeout)(fun.apply _)
-
-  def reduce[T <: AnyRef, R >: T](futures: java.lang.Iterable[Future[T]], timeout: Long, fun: akka.japi.Function2[R, T, T]): Future[R] = reduce(futures, timeout: Timeout, fun)
+  def reduce[T <: AnyRef, R >: T](futures: JIterable[Future[T]], fun: akka.japi.Function2[R, T, R], executor: ExecutionContext): Future[R] =
+    Future.reduce[T, R](scala.collection.JavaConversions.iterableAsScalaIterable(futures))(fun.apply)(executor)
 
   /**
    * Java API.
-   * Simple version of Future.traverse. Transforms a java.lang.Iterable[Future[A]] into a Future[java.lang.Iterable[A]].
+   * Simple version of Future.traverse. Transforms a JIterable[Future[A]] into a Future[JIterable[A]].
    * Useful for reducing many Futures into a single Future.
    */
-  def sequence[A](in: JIterable[Future[A]], timeout: Timeout): Future[JIterable[A]] =
+  def sequence[A](in: JIterable[Future[A]], executor: ExecutionContext): Future[JIterable[A]] = {
+    implicit val d = executor
     scala.collection.JavaConversions.iterableAsScalaIterable(in).foldLeft(Future(new JLinkedList[A]()))((fr, fa) ⇒
       for (r ← fr; a ← fa) yield {
         r add a
         r
       })
+  }
 
   /**
    * Java API.
-   * Simple version of Futures.traverse. Transforms a java.lang.Iterable[Future[A]] into a Future[java.lang.Iterable[A]].
-   * Useful for reducing many Futures into a single Future.
-   */
-  def sequence[A](in: JIterable[Future[A]]): Future[JIterable[A]] = sequence(in, Timeout.default)
-
-  /**
-   * Java API.
-   * Transforms a java.lang.Iterable[A] into a Future[java.lang.Iterable[B]] using the provided Function A ⇒ Future[B].
+   * Transforms a JIterable[A] into a Future[JIterable[B]] using the provided Function A ⇒ Future[B].
    * This is useful for performing a parallel map. For example, to apply a function to all items of a list
    * in parallel.
    */
-  def traverse[A, B](in: JIterable[A], timeout: Timeout, fn: JFunc[A, Future[B]]): Future[JIterable[B]] =
+  def traverse[A, B](in: JIterable[A], fn: JFunc[A, Future[B]], executor: ExecutionContext): Future[JIterable[B]] = {
+    implicit val d = executor
     scala.collection.JavaConversions.iterableAsScalaIterable(in).foldLeft(Future(new JLinkedList[B]())) { (fr, a) ⇒
       val fb = fn(a)
-      for (r ← fr; b ← fb) yield {
-        r add b
-        r
-      }
+      for (r ← fr; b ← fb) yield { r add b; r }
     }
+  }
 
   /**
-   * Java API.
-   * Transforms a java.lang.Iterable[A] into a Future[java.lang.Iterable[B]] using the provided Function A ⇒ Future[B].
-   * This is useful for performing a parallel map. For example, to apply a function to all items of a list
-   * in parallel.
+   * Signals that the current thread of execution will potentially engage
+   * an action that will take a non-trivial amount of time, perhaps by using blocking.IO or using a lot of CPU time,
+   * giving the system a chance to spawn new threads, reuse old threads or otherwise,
+   * to prevent starvation and/or unfairness.
+   *
+   * Assures that any Future tasks initiated in the current thread will be
+   * executed asynchronously, including any tasks currently queued to be
+   * executed in the current thread. This is needed if the current task may
+   * block, causing delays in executing the remaining tasks which in some
+   * cases may cause a deadlock.
+   *
+   * Usage: Call this method in a callback (map, flatMap etc also count) to a Future,
+   * if you will be doing blocking in the callback.
+   *
+   * Note: Calling 'Await.result(future)' or 'Await.ready(future)' will automatically trigger this method.
+   *
    */
-  def traverse[A, B](in: JIterable[A], fn: JFunc[A, Future[B]]): Future[JIterable[B]] = traverse(in, Timeout.default, fn)
+  def blocking(): Unit = Future.blocking()
 }
 
 object Future {
@@ -152,28 +186,22 @@ object Future {
    * This method constructs and returns a Future that will eventually hold the result of the execution of the supplied body
    * The execution is performed by the specified Dispatcher.
    */
-  def apply[T](body: ⇒ T)(implicit dispatcher: MessageDispatcher, timeout: Timeout = implicitly): Future[T] = {
-    val promise = new DefaultPromise[T](timeout)
-    dispatcher dispatchTask { () ⇒
-      promise complete {
-        try {
-          Right(body)
-        } catch {
-          case e ⇒ Left(e)
+  def apply[T](body: ⇒ T)(implicit executor: ExecutionContext): Future[T] = {
+    val promise = Promise[T]()
+    executor.execute(new Runnable {
+      def run =
+        promise complete {
+          try {
+            Right(body)
+          } catch {
+            case NonFatal(e) ⇒
+              executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+              Left(e)
+          }
         }
-      }
-    }
+    })
     promise
   }
-
-  def apply[T](body: ⇒ T, timeout: Timeout)(implicit dispatcher: MessageDispatcher): Future[T] =
-    apply(body)(dispatcher, timeout)
-
-  def apply[T](body: ⇒ T, timeout: Duration)(implicit dispatcher: MessageDispatcher): Future[T] =
-    apply(body)(dispatcher, timeout)
-
-  def apply[T](body: ⇒ T, timeout: Long)(implicit dispatcher: MessageDispatcher): Future[T] =
-    apply(body)(dispatcher, timeout)
 
   import scala.collection.mutable.Builder
   import scala.collection.generic.CanBuildFrom
@@ -182,19 +210,16 @@ object Future {
    * Simple version of Futures.traverse. Transforms a Traversable[Future[A]] into a Future[Traversable[A]].
    * Useful for reducing many Futures into a single Future.
    */
-  def sequence[A, M[_] <: Traversable[_]](in: M[Future[A]])(implicit cbf: CanBuildFrom[M[Future[A]], A, M[A]], timeout: Timeout): Future[M[A]] =
-    in.foldLeft(new KeptPromise(Right(cbf(in))): Future[Builder[A, M[A]]])((fr, fa) ⇒ for (r ← fr; a ← fa.asInstanceOf[Future[A]]) yield (r += a)).map(_.result)
-
-  def sequence[A, M[_] <: Traversable[_]](timeout: Timeout)(in: M[Future[A]])(implicit cbf: CanBuildFrom[M[Future[A]], A, M[A]]): Future[M[A]] =
-    sequence(in)(cbf, timeout)
+  def sequence[A, M[_] <: Traversable[_]](in: M[Future[A]])(implicit cbf: CanBuildFrom[M[Future[A]], A, M[A]], executor: ExecutionContext): Future[M[A]] =
+    in.foldLeft(Promise.successful(cbf(in)): Future[Builder[A, M[A]]])((fr, fa) ⇒ for (r ← fr; a ← fa.asInstanceOf[Future[A]]) yield (r += a)).map(_.result)
 
   /**
    * Returns a Future to the result of the first future in the list that is completed
    */
-  def firstCompletedOf[T](futures: Iterable[Future[T]], timeout: Timeout = Timeout.never): Future[T] = {
-    val futureResult = new DefaultPromise[T](timeout)
+  def firstCompletedOf[T](futures: Traversable[Future[T]])(implicit executor: ExecutionContext): Future[T] = {
+    val futureResult = Promise[T]()
 
-    val completeFirst: Future[T] ⇒ Unit = _.value.foreach(futureResult complete _)
+    val completeFirst: Either[Throwable, T] ⇒ Unit = futureResult tryComplete _
     futures.foreach(_ onComplete completeFirst)
 
     futureResult
@@ -203,17 +228,21 @@ object Future {
   /**
    * Returns a Future that will hold the optional result of the first Future with a result that matches the predicate
    */
-  def find[T](predicate: T ⇒ Boolean, timeout: Timeout = Timeout.default)(futures: Iterable[Future[T]]): Future[Option[T]] = {
-    if (futures.isEmpty) new KeptPromise[Option[T]](Right(None))
+  def find[T](futures: Traversable[Future[T]])(predicate: T ⇒ Boolean)(implicit executor: ExecutionContext): Future[Option[T]] = {
+    if (futures.isEmpty) Promise.successful[Option[T]](None)
     else {
-      val result = new DefaultPromise[Option[T]](timeout)
+      val result = Promise[Option[T]]()
       val ref = new AtomicInteger(futures.size)
-      val search: Future[T] ⇒ Unit = f ⇒ try {
-        f.result.filter(predicate).foreach(r ⇒ result completeWithResult Some(r))
+      val search: Either[Throwable, T] ⇒ Unit = v ⇒ try {
+        v match {
+          case Right(r) ⇒ if (predicate(r)) result tryComplete Right(Some(r))
+          case _        ⇒
+        }
       } finally {
         if (ref.decrementAndGet == 0)
-          result completeWithResult None
+          result tryComplete Right(None)
       }
+
       futures.foreach(_ onComplete search)
 
       result
@@ -221,99 +250,44 @@ object Future {
   }
 
   /**
-   * A non-blocking fold over the specified futures.
+   * A non-blocking fold over the specified futures, with the start value of the given zero.
    * The fold is performed on the thread where the last future is completed,
    * the result will be the first failure of any of the futures, or any failure in the actual fold,
    * or the result of the fold.
    * Example:
    * <pre>
-   *   val result = Futures.fold(0)(futures)(_ + _).await.result
+   *   val result = Await.result(Future.fold(futures)(0)(_ + _), 5 seconds)
    * </pre>
    */
-  def fold[T, R](zero: R, timeout: Timeout = Timeout.default)(futures: Iterable[Future[T]])(foldFun: (R, T) ⇒ R): Future[R] = {
-    if (futures.isEmpty) {
-      new KeptPromise[R](Right(zero))
-    } else {
-      val result = new DefaultPromise[R](timeout)
-      val results = new ConcurrentLinkedQueue[T]()
-      val done = new Switch(false)
-      val allDone = futures.size
-
-      val aggregate: Future[T] ⇒ Unit = f ⇒ if (done.isOff && !result.isCompleted) { //TODO: This is an optimization, is it premature?
-        f.value.get match {
-          case Right(value) ⇒
-            val added = results add value
-            if (added && results.size == allDone) { //Only one thread can get here
-              if (done.switchOn) {
-                try {
-                  val i = results.iterator
-                  var currentValue = zero
-                  while (i.hasNext) { currentValue = foldFun(currentValue, i.next) }
-                  result completeWithResult currentValue
-                } catch {
-                  case e: Exception ⇒
-                    EventHandler.error(e, this, e.getMessage)
-                    result completeWithException e
-                } finally {
-                  results.clear
-                }
-              }
-            }
-          case Left(exception) ⇒
-            if (done.switchOn) {
-              result completeWithException exception
-              results.clear
-            }
-        }
-      }
-
-      futures foreach { _ onComplete aggregate }
-      result
-    }
+  def fold[T, R](futures: Traversable[Future[T]])(zero: R)(foldFun: (R, T) ⇒ R)(implicit executor: ExecutionContext): Future[R] = {
+    if (futures.isEmpty) Promise.successful(zero)
+    else sequence(futures).map(_.foldLeft(zero)(foldFun))
   }
 
   /**
    * Initiates a fold over the supplied futures where the fold-zero is the result value of the Future that's completed first
    * Example:
    * <pre>
-   *   val result = Futures.reduce(futures)(_ + _).await.result
+   *   val result = Await.result(Futures.reduce(futures)(_ + _), 5 seconds)
    * </pre>
    */
-  def reduce[T, R >: T](futures: Iterable[Future[T]], timeout: Timeout = Timeout.default)(op: (R, T) ⇒ T): Future[R] = {
-    if (futures.isEmpty)
-      new KeptPromise[R](Left(new UnsupportedOperationException("empty reduce left")))
-    else {
-      val result = new DefaultPromise[R](timeout)
-      val seedFound = new AtomicBoolean(false)
-      val seedFold: Future[T] ⇒ Unit = f ⇒ {
-        if (seedFound.compareAndSet(false, true)) { //Only the first completed should trigger the fold
-          f.value.get match {
-            case Right(value)    ⇒ result.completeWith(fold(value, timeout)(futures.filterNot(_ eq f))(op))
-            case Left(exception) ⇒ result.completeWithException(exception)
-          }
-        }
-      }
-      for (f ← futures) f onComplete seedFold //Attach the listener to the Futures
-      result
-    }
+  def reduce[T, R >: T](futures: Traversable[Future[T]])(op: (R, T) ⇒ R)(implicit executor: ExecutionContext): Future[R] = {
+    if (futures.isEmpty) Promise[R].failure(new NoSuchElementException("reduce attempted on empty collection"))
+    else sequence(futures).map(_ reduceLeft op)
   }
-
   /**
    * Transforms a Traversable[A] into a Future[Traversable[B]] using the provided Function A ⇒ Future[B].
    * This is useful for performing a parallel map. For example, to apply a function to all items of a list
    * in parallel:
    * <pre>
-   * val myFutureList = Futures.traverse(myList)(x ⇒ Future(myFunc(x)))
+   * val myFutureList = Future.traverse(myList)(x ⇒ Future(myFunc(x)))
    * </pre>
    */
-  def traverse[A, B, M[_] <: Traversable[_]](in: M[A])(fn: A ⇒ Future[B])(implicit cbf: CanBuildFrom[M[A], B, M[B]], timeout: Timeout): Future[M[B]] =
-    in.foldLeft(new KeptPromise(Right(cbf(in))): Future[Builder[B, M[B]]]) { (fr, a) ⇒
+  def traverse[A, B, M[_] <: Traversable[_]](in: M[A])(fn: A ⇒ Future[B])(implicit cbf: CanBuildFrom[M[A], B, M[B]], executor: ExecutionContext): Future[M[B]] =
+    in.foldLeft(Promise.successful(cbf(in)): Future[Builder[B, M[B]]]) { (fr, a) ⇒
       val fb = fn(a.asInstanceOf[A])
       for (r ← fr; b ← fb) yield (r += b)
     }.map(_.result)
-
-  def traverse[A, B, M[_] <: Traversable[_]](in: M[A], timeout: Timeout)(fn: A ⇒ Future[B])(implicit cbf: CanBuildFrom[M[A], B, M[B]]): Future[M[B]] =
-    traverse(in)(fn)(cbf, timeout)
 
   /**
    * Captures a block that will be transformed into 'Continuation Passing Style' using Scala's Delimited
@@ -331,44 +305,122 @@ object Future {
    *
    * The Delimited Continuations compiler plugin must be enabled in order to use this method.
    */
-  def flow[A](body: ⇒ A @cps[Future[Any]])(implicit dispatcher: MessageDispatcher, timeout: Timeout): Future[A] = {
-    val future = Promise[A](timeout)
+  def flow[A](body: ⇒ A @cps[Future[Any]])(implicit executor: ExecutionContext): Future[A] = {
+    val p = Promise[A]
     dispatchTask({ () ⇒
-      (reify(body) foreachFull (future completeWithResult, future completeWithException): Future[Any]) onException {
-        case e: Exception ⇒ future completeWithException e
+      try {
+        (reify(body) foreachFull (p success, p failure): Future[Any]) onFailure {
+          case NonFatal(e) ⇒ p tryComplete Left(e)
+        }
+      } catch {
+        case NonFatal(e) ⇒ p tryComplete Left(e)
       }
     }, true)
-    future
+    p.future
   }
 
-  private val _taskStack = new ThreadLocal[Option[Stack[() ⇒ Unit]]]() {
-    override def initialValue = None
-  }
-
-  private[akka] def dispatchTask(task: () ⇒ Unit, force: Boolean = false)(implicit dispatcher: MessageDispatcher): Unit =
+  /**
+   * Signals that the current thread of execution will potentially engage
+   * an action that will take a non-trivial amount of time, perhaps by using blocking.IO or using a lot of CPU time,
+   * giving the system a chance to spawn new threads, reuse old threads or otherwise,
+   * to prevent starvation and/or unfairness.
+   *
+   * Assures that any Future tasks initiated in the current thread will be
+   * executed asynchronously, including any tasks currently queued to be
+   * executed in the current thread. This is needed if the current task may
+   * block, causing delays in executing the remaining tasks which in some
+   * cases may cause a deadlock.
+   *
+   * Note: Calling 'Await.result(future)' or 'Await.ready(future)' will automatically trigger this method.
+   *
+   * For example, in the following block of code the call to 'latch.open'
+   * might not be executed until after the call to 'latch.await', causing
+   * a deadlock. By adding 'Future.blocking()' the call to 'latch.open'
+   * will instead be dispatched separately from the current block, allowing
+   * it to be run in parallel:
+   * <pre>
+   * val latch = new StandardLatch
+   * val future = Future() map { _ ⇒
+   *   Future.blocking()
+   *   val nested = Future()
+   *   nested foreach (_ ⇒ latch.open)
+   *   latch.await
+   * }
+   * </pre>
+   */
+  def blocking(): Unit =
     _taskStack.get match {
-      case Some(taskStack) if !force ⇒ taskStack push task
-      case _ ⇒
-        dispatcher dispatchTask { () ⇒
-          try {
-            val taskStack = Stack[() ⇒ Unit](task)
-            _taskStack set Some(taskStack)
-            while (taskStack.nonEmpty) {
-              val next = taskStack.pop()
-              try {
-                next.apply()
-              } catch {
-                case e ⇒ // TODO FIXME: Throwable or Exception, log or do what?
-              }
-            }
-          } finally { _taskStack set None }
+      case stack if (stack ne null) && stack.nonEmpty ⇒
+        val executionContext = _executionContext.value match {
+          case null ⇒ throw new IllegalStateException("'blocking' needs to be invoked inside a Future callback.")
+          case some ⇒ some
         }
+        val tasks = stack.elems
+        stack.clear()
+        _taskStack.remove()
+        dispatchTask(() ⇒ _taskStack.get.elems = tasks, true)(executionContext)
+      case _ ⇒ _taskStack.remove()
     }
+
+  private val _taskStack = new ThreadLocal[Stack[() ⇒ Unit]]()
+  private val _executionContext = new DynamicVariable[ExecutionContext](null)
+
+  /**
+   * Internal API, do not call
+   */
+  private[akka] def dispatchTask(task: () ⇒ Unit, force: Boolean = false)(implicit executor: ExecutionContext): Unit =
+    _taskStack.get match {
+      case stack if (stack ne null) && (executor eq _executionContext.value) && !force ⇒ stack push task
+      case _ ⇒ executor.execute(
+        new Runnable {
+          def run =
+            try {
+              _executionContext.withValue(executor) {
+                val taskStack = Stack.empty[() ⇒ Unit]
+                taskStack push task
+                _taskStack set taskStack
+
+                while (taskStack.nonEmpty) {
+                  val next = taskStack.pop()
+                  try {
+                    next.apply()
+                  } catch {
+                    case NonFatal(e) ⇒ executor.reportFailure(e)
+                  }
+                }
+              }
+            } finally {
+              _taskStack.remove()
+            }
+        })
+    }
+
 }
 
-sealed trait Future[+T] extends japi.Future[T] {
+sealed trait Future[+T] extends Await.Awaitable[T] {
 
-  implicit def dispatcher: MessageDispatcher
+  protected implicit def executor: ExecutionContext
+
+  protected final def resolve[X](source: Either[Throwable, X]): Either[Throwable, X] = source match {
+    case Left(t: scala.runtime.NonLocalReturnControl[_]) ⇒ Right(t.value.asInstanceOf[X])
+    case Left(t: InterruptedException) ⇒ Left(new RuntimeException("Boxed InterruptedException", t))
+    case _ ⇒ source
+  }
+
+  /**
+   * @return a new Future that will contain a tuple containing the successful result of this and that Future.
+   * If this or that fail, they will race to complete the returned Future with their failure.
+   * The returned Future will not be completed if neither this nor that are completed.
+   */
+  def zip[U](that: Future[U]): Future[(T, U)] = {
+    val p = Promise[(T, U)]()
+    onComplete {
+      case Left(t)  ⇒ p failure t
+      case Right(r) ⇒ that onSuccess { case r2 ⇒ p success ((r, r2)) }
+    }
+    that onFailure { case f ⇒ p tryComplete Left(f) }
+    p.future
+  }
 
   /**
    * For use only within a Future.flow block or another compatible Delimited Continuations reset block.
@@ -376,86 +428,12 @@ sealed trait Future[+T] extends japi.Future[T] {
    * Returns the result of this Future without blocking, by suspending execution and storing it as a
    * continuation until the result is available.
    */
-  def apply()(implicit timeout: Timeout): T @cps[Future[Any]] = shift(this flatMap (_: T ⇒ Future[Any]))
-
-  /**
-   * Blocks awaiting completion of this Future, then returns the resulting value,
-   * or throws the completed exception
-   *
-   * Scala & Java API
-   *
-   * throws FutureTimeoutException if this Future times out when waiting for completion
-   */
-  def get: T = this.await.resultOrException.get
-
-  /**
-   * Blocks the current thread until the Future has been completed or the
-   * timeout has expired. In the case of the timeout expiring a
-   * FutureTimeoutException will be thrown.
-   */
-  def await: Future[T]
-
-  /**
-   * Blocks the current thread until the Future has been completed or the
-   * timeout has expired, additionally bounding the waiting period according to
-   * the <code>atMost</code> parameter. The timeout will be the lesser value of
-   * 'atMost' and the timeout supplied at the constructuion of this Future.  In
-   * the case of the timeout expiring a FutureTimeoutException will be thrown.
-   * Other callers of this method are not affected by the additional bound
-   * imposed by <code>atMost</code>.
-   */
-  def await(atMost: Duration): Future[T]
-
-  /**
-   * Await completion of this Future and return its value if it conforms to A's
-   * erased type. Will throw a ClassCastException if the value does not
-   * conform, or any exception the Future was completed with. Will return None
-   * in case of a timeout.
-   */
-  def as[A](implicit m: Manifest[A]): Option[A] = {
-    try await catch { case _: FutureTimeoutException ⇒ }
-    value match {
-      case None           ⇒ None
-      case Some(Left(ex)) ⇒ throw ex
-      case Some(Right(v)) ⇒ Some(BoxedType(m.erasure).cast(v).asInstanceOf[A])
-    }
-  }
-
-  /**
-   * Await completion of this Future and return its value if it conforms to A's
-   * erased type, None otherwise. Will throw any exception the Future was
-   * completed with. Will return None in case of a timeout.
-   */
-  def asSilently[A](implicit m: Manifest[A]): Option[A] = {
-    try await catch { case _: FutureTimeoutException ⇒ }
-    value match {
-      case None           ⇒ None
-      case Some(Left(ex)) ⇒ throw ex
-      case Some(Right(v)) ⇒
-        try Some(BoxedType(m.erasure).cast(v).asInstanceOf[A])
-        catch { case _: ClassCastException ⇒ None }
-    }
-  }
+  def apply(): T @cps[Future[Any]] = shift(this flatMap (_: T ⇒ Future[Any]))
 
   /**
    * Tests whether this Future has been completed.
    */
-  final def isCompleted: Boolean = value.isDefined
-
-  /**
-   * Tests whether this Future's timeout has expired.
-   *
-   * Note that an expired Future may still contain a value, or it may be
-   * completed with a value.
-   */
-  def isExpired: Boolean
-
-  def timeout: Timeout
-
-  /**
-   * This Future's timeout in nanoseconds.
-   */
-  def timeoutInNanos = if (timeout.duration.isFinite) timeout.duration.toNanos else Long.MaxValue
+  def isCompleted: Boolean
 
   /**
    * The contained value of this Future. Before this Future is completed
@@ -466,64 +444,69 @@ sealed trait Future[+T] extends japi.Future[T] {
   def value: Option[Either[Throwable, T]]
 
   /**
-   * Returns the successful result of this Future if it exists.
-   */
-  final def result: Option[T] = value match {
-    case Some(Right(r)) ⇒ Some(r)
-    case _              ⇒ None
-  }
-
-  /**
-   * Returns the contained exception of this Future if it exists.
-   */
-  final def exception: Option[Throwable] = value match {
-    case Some(Left(e)) ⇒ Some(e)
-    case _             ⇒ None
-  }
-
-  /**
    * When this Future is completed, apply the provided function to the
    * Future. If the Future has already been completed, this will apply
-   * immediately.
+   * immediately. Multiple
+   * callbacks may be registered; there is no guarantee that they will be
+   * executed in a particular order.
    */
-  def onComplete(func: Future[T] ⇒ Unit): this.type
+  def onComplete[U](func: Either[Throwable, T] ⇒ U): this.type
 
   /**
    * When the future is completed with a valid result, apply the provided
-   * PartialFunction to the result.
+   * PartialFunction to the result. See `onComplete` for more details.
    * <pre>
-   *   future onResult {
+   *   future onSuccess {
    *     case Foo ⇒ target ! "foo"
    *     case Bar ⇒ target ! "bar"
    *   }
    * </pre>
    */
-  final def onResult(pf: PartialFunction[T, Unit]): this.type = onComplete {
-    _.value match {
-      case Some(Right(r)) if pf isDefinedAt r ⇒ pf(r)
-      case _                                  ⇒
-    }
+  final def onSuccess[U](pf: PartialFunction[T, U]): this.type = onComplete {
+    case Right(r) if pf isDefinedAt r ⇒ pf(r)
+    case _                            ⇒
   }
 
   /**
    * When the future is completed with an exception, apply the provided
-   * PartialFunction to the exception.
+   * PartialFunction to the exception. See `onComplete` for more details.
    * <pre>
-   *   future onException {
+   *   future onFailure {
    *     case NumberFormatException ⇒ target ! "wrong format"
    *   }
    * </pre>
    */
-  final def onException(pf: PartialFunction[Throwable, Unit]): this.type = onComplete {
-    _.value match {
-      case Some(Left(ex)) if pf isDefinedAt ex ⇒ pf(ex)
-      case _                                   ⇒
-    }
+  final def onFailure[U](pf: PartialFunction[Throwable, U]): this.type = onComplete {
+    case Left(ex) if pf isDefinedAt ex ⇒ pf(ex)
+    case _                             ⇒
   }
 
-  def onTimeout(func: Future[T] ⇒ Unit): this.type
+  /**
+   * Returns a failure projection of this Future
+   * If `this` becomes completed with a failure, that failure will be the success of the returned Future
+   * If `this` becomes completed with a result, then the returned future will fail with a NoSuchElementException
+   */
+  final def failed: Future[Throwable] = {
+    val p = Promise[Throwable]()
+    this.onComplete {
+      case Left(t)  ⇒ p success t
+      case Right(r) ⇒ p failure new NoSuchElementException("Future.failed not completed with a throwable. Instead completed with: " + r)
+    }
+    p.future
+  }
 
-  def orElse[A >: T](fallback: ⇒ A): Future[A]
+  /**
+   * Returns a new Future that will either hold the successful value of this Future,
+   * or, it this Future fails, it will hold the result of "that" Future.
+   */
+  def fallbackTo[U >: T](that: Future[U]): Future[U] = {
+    val p = Promise[U]()
+    onComplete {
+      case r @ Right(_) ⇒ p complete r
+      case _            ⇒ p completeWith that
+    }
+    p.future
+  }
 
   /**
    * Creates a new Future that will handle any matching Throwable that this
@@ -536,15 +519,60 @@ sealed trait Future[+T] extends japi.Future[T] {
    * Future(6 / 2) recover { case e: ArithmeticException ⇒ 0 } // result: 3
    * </pre>
    */
-  final def recover[A >: T](pf: PartialFunction[Throwable, A])(implicit timeout: Timeout): Future[A] = {
-    val future = new DefaultPromise[A](timeout)
+  final def recover[A >: T](pf: PartialFunction[Throwable, A]): Future[A] = {
+    val p = Promise[A]()
     onComplete {
-      _.value.get match {
-        case Left(e) if pf isDefinedAt e ⇒ future.complete(try { Right(pf(e)) } catch { case x: Exception ⇒ Left(x) })
-        case otherwise                   ⇒ future complete otherwise
-      }
+      case Left(e) if pf isDefinedAt e ⇒ p.complete(try { Right(pf(e)) } catch { case NonFatal(x) ⇒ Left(x) })
+      case otherwise                   ⇒ p complete otherwise
     }
-    future
+    p.future
+  }
+
+  /**
+   * Returns a new Future that will, in case this future fails,
+   * be completed with the resulting Future of the given PartialFunction,
+   * if the given PartialFunction matches the failure of the original Future.
+   *
+   * If the PartialFunction throws, that Throwable will be propagated to the returned Future.
+   *
+   *  Example:
+   *
+   *  {{{
+   *  val f = Future { Int.MaxValue }
+   *  Future (6 / 0) recoverWith { case e: ArithmeticException => f } // result: Int.MaxValue
+   *  }}}
+   */
+  def recoverWith[U >: T](pf: PartialFunction[Throwable, Future[U]]): Future[U] = {
+    val p = Promise[U]()
+
+    onComplete {
+      case Left(t) if pf isDefinedAt t ⇒
+        try { p completeWith pf(t) } catch { case NonFatal(t) ⇒ p complete resolve(Left(t)) }
+      case otherwise ⇒ p complete otherwise
+    }
+
+    p.future
+  }
+
+  /**
+   * Returns a new Future that will contain the completed result of this Future,
+   * and which will invoke the supplied PartialFunction when completed.
+   *
+   * This allows for establishing order of side-effects.
+   *
+   *  {{{
+   *  Future { 5 } andThen {
+   *    case something => assert(something is awesome)
+   *  } andThen {
+   *    case Left(t) => handleProblem(t)
+   *    case Right(v) => dealWithSuccess(v)
+   *  }
+   *  }}}
+   */
+  def andThen[U](pf: PartialFunction[Either[Throwable, T], U]): Future[T] = {
+    val p = Promise[T]()
+    onComplete { case r ⇒ try if (pf isDefinedAt r) pf(r) finally p complete r }
+    p.future
   }
 
   /**
@@ -560,20 +588,18 @@ sealed trait Future[+T] extends japi.Future[T] {
    * } yield b + "-" + c
    * </pre>
    */
-  final def map[A](f: T ⇒ A)(implicit timeout: Timeout): Future[A] = {
-    val future = new DefaultPromise[A](timeout)
+  final def map[A](f: T ⇒ A): Future[A] = {
+    val future = Promise[A]()
     onComplete {
-      _.value.get match {
-        case l: Left[_, _] ⇒ future complete l.asInstanceOf[Either[Throwable, A]]
-        case Right(res) ⇒
-          future complete (try {
-            Right(f(res))
-          } catch {
-            case e: Exception ⇒
-              EventHandler.error(e, this, e.getMessage)
-              Left(e)
-          })
-      }
+      case l: Left[_, _] ⇒ future complete l.asInstanceOf[Either[Throwable, A]]
+      case Right(res) ⇒
+        future complete (try {
+          Right(f(res))
+        } catch {
+          case NonFatal(e) ⇒
+            executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+            Left(e)
+        })
     }
     future
   }
@@ -581,21 +607,23 @@ sealed trait Future[+T] extends japi.Future[T] {
   /**
    * Creates a new Future[A] which is completed with this Future's result if
    * that conforms to A's erased type or a ClassCastException otherwise.
+   *
+   * When used from Java, to create the Manifest, use:
+   * import static akka.japi.Util.manifest;
+   * future.mapTo(manifest(MyClass.class));
    */
-  final def mapTo[A](implicit m: Manifest[A], timeout: Timeout = this.timeout): Future[A] = {
-    val fa = new DefaultPromise[A](timeout)
-    onComplete { ft ⇒
-      fa complete (ft.value.get match {
-        case l: Left[_, _] ⇒ l.asInstanceOf[Either[Throwable, A]]
-        case Right(t) ⇒
-          try {
-            Right(BoxedType(m.erasure).cast(t).asInstanceOf[A])
-          } catch {
-            case e: ClassCastException ⇒ Left(e)
-          }
-      })
+  final def mapTo[A](implicit m: Manifest[A]): Future[A] = {
+    val fa = Promise[A]()
+    onComplete {
+      case l: Left[_, _] ⇒ fa complete l.asInstanceOf[Either[Throwable, A]]
+      case Right(t) ⇒
+        fa complete (try {
+          Right(BoxedType(m.erasure).cast(t).asInstanceOf[A])
+        } catch {
+          case e: ClassCastException ⇒ Left(e)
+        })
     }
-    fa
+    fa.future
   }
 
   /**
@@ -612,367 +640,461 @@ sealed trait Future[+T] extends japi.Future[T] {
    * } yield b + "-" + c
    * </pre>
    */
-  final def flatMap[A](f: T ⇒ Future[A])(implicit timeout: Timeout): Future[A] = {
-    val future = new DefaultPromise[A](timeout)
+  final def flatMap[A](f: T ⇒ Future[A]): Future[A] = {
+    val p = Promise[A]()
 
     onComplete {
-      _.value.get match {
-        case l: Left[_, _] ⇒ future complete l.asInstanceOf[Either[Throwable, A]]
-        case Right(r) ⇒ try {
-          future.completeWith(f(r))
+      case l: Left[_, _] ⇒ p complete l.asInstanceOf[Either[Throwable, A]]
+      case Right(r) ⇒
+        try {
+          p completeWith f(r)
         } catch {
-          case e: Exception ⇒
-            EventHandler.error(e, this, e.getMessage)
-            future complete Left(e)
+          case NonFatal(e) ⇒
+            executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+            p complete Left(e)
+          case t ⇒
+            p complete Left(new ExecutionException(t)); throw t
         }
-      }
     }
-    future
+    p.future
   }
 
-  final def foreach(f: T ⇒ Unit): Unit = onComplete {
-    _.value.get match {
-      case Right(r) ⇒ f(r)
-      case _        ⇒
-    }
+  /**
+   * Same as onSuccess { case r => f(r) } but is also used in for-comprehensions
+   */
+  final def foreach[U](f: T ⇒ U): Unit = onComplete {
+    case Right(r) ⇒ f(r)
+    case _        ⇒
   }
 
-  final def withFilter(p: T ⇒ Boolean)(implicit timeout: Timeout) = new FutureWithFilter[T](this, p)
+  /**
+   * Used by for-comprehensions
+   */
+  final def withFilter(p: T ⇒ Boolean) = new FutureWithFilter[T](this, p)
 
-  final class FutureWithFilter[+A](self: Future[A], p: A ⇒ Boolean)(implicit timeout: Timeout) {
+  final class FutureWithFilter[+A](self: Future[A], p: A ⇒ Boolean) {
     def foreach(f: A ⇒ Unit): Unit = self filter p foreach f
     def map[B](f: A ⇒ B): Future[B] = self filter p map f
     def flatMap[B](f: A ⇒ Future[B]): Future[B] = self filter p flatMap f
     def withFilter(q: A ⇒ Boolean): FutureWithFilter[A] = new FutureWithFilter[A](self, x ⇒ p(x) && q(x))
   }
 
-  final def filter(p: T ⇒ Boolean)(implicit timeout: Timeout): Future[T] = {
-    val future = new DefaultPromise[T](timeout)
-    onComplete {
-      _.value.get match {
-        case l: Left[_, _] ⇒ future complete l.asInstanceOf[Either[Throwable, T]]
-        case r @ Right(res) ⇒ future complete (try {
-          if (p(res)) r else Left(new MatchError(res))
-        } catch {
-          case e: Exception ⇒
-            EventHandler.error(e, this, e.getMessage)
-            Left(e)
-        })
-      }
-    }
-    future
-  }
-
   /**
-   * Returns the current result, throws the exception if one has been raised, else returns None
+   * Returns a new Future that will hold the successful result of this Future if it matches
+   * the given predicate, if it doesn't match, the resulting Future will be a failed Future
+   * with a MatchError, of if this Future fails, that failure will be propagated to the returned Future
    */
-  final def resultOrException: Option[T] = value match {
-    case Some(Left(e))  ⇒ throw e
-    case Some(Right(r)) ⇒ Some(r)
-    case _              ⇒ None
+  final def filter(pred: T ⇒ Boolean): Future[T] = {
+    val p = Promise[T]()
+    onComplete {
+      case l: Left[_, _] ⇒ p complete l.asInstanceOf[Either[Throwable, T]]
+      case r @ Right(res) ⇒ p complete (try {
+        if (pred(res)) r else Left(new MatchError(res))
+      } catch {
+        case NonFatal(e) ⇒
+          executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+          Left(e)
+      })
+    }
+    p.future
   }
-}
 
-package japi {
-  /* Java API */
-  trait Future[+T] { self: akka.dispatch.Future[T] ⇒
-    private[japi] final def onTimeout[A >: T](proc: Procedure[akka.dispatch.Future[A]]): this.type = self.onTimeout(proc(_))
-    private[japi] final def onResult[A >: T](proc: Procedure[A]): this.type = self.onResult({ case r ⇒ proc(r.asInstanceOf[A]) }: PartialFunction[T, Unit])
-    private[japi] final def onException(proc: Procedure[Throwable]): this.type = self.onException({ case t: Throwable ⇒ proc(t) }: PartialFunction[Throwable, Unit])
-    private[japi] final def onComplete[A >: T](proc: Procedure[akka.dispatch.Future[A]]): this.type = self.onComplete(proc(_))
-    private[japi] final def map[A >: T, B](f: JFunc[A, B]): akka.dispatch.Future[B] = self.map(f(_))
-    private[japi] final def flatMap[A >: T, B](f: JFunc[A, akka.dispatch.Future[B]]): akka.dispatch.Future[B] = self.flatMap(f(_))
-    private[japi] final def foreach[A >: T](proc: Procedure[A]): Unit = self.foreach(proc(_))
-    private[japi] final def filter[A >: T](p: JFunc[A, java.lang.Boolean]): akka.dispatch.Future[A] =
-      self.filter((a: Any) ⇒ p(a.asInstanceOf[A])).asInstanceOf[akka.dispatch.Future[A]]
-  }
 }
 
 object Promise {
+  /**
+   * Creates a non-completed Promise
+   *
+   * Scala API
+   */
+  def apply[A]()(implicit executor: ExecutionContext): Promise[A] = new DefaultPromise[A]()
 
   /**
-   * Creates a non-completed, new, Promise with the supplied timeout in milliseconds
+   * Creates an already completed Promise with the specified exception
    */
-  def apply[A](timeout: Timeout)(implicit dispatcher: MessageDispatcher): Promise[A] = new DefaultPromise[A](timeout)
+  def failed[T](exception: Throwable)(implicit executor: ExecutionContext): Promise[T] = new KeptPromise[T](Left(exception))
 
   /**
-   * Creates a non-completed, new, Promise with the default timeout (akka.actor.timeout in conf)
+   * Creates an already completed Promise with the specified result
    */
-  def apply[A]()(implicit dispatcher: MessageDispatcher): Promise[A] = apply(Timeout.default)
-
-  /**
-   * Construct a completable channel
-   */
-  def channel(timeout: Long = Actor.TIMEOUT)(implicit dispatcher: MessageDispatcher): ActorPromise = new ActorPromise(timeout)
+  def successful[T](result: T)(implicit executor: ExecutionContext): Promise[T] = new KeptPromise[T](Right(result))
 }
 
 /**
  * Essentially this is the Promise (or write-side) of a Future (read-side).
  */
 trait Promise[T] extends Future[T] {
-  /**
-   * Completes this Future with the specified result, if not already completed.
-   * @return this
-   */
-  def complete(value: Either[Throwable, T]): this.type
 
   /**
-   * Completes this Future with the specified result, if not already completed.
-   * @return this
+   * Returns the Future associated with this Promise
    */
-  final def completeWithResult(result: T): this.type = complete(Right(result))
+  def future: Future[T] = this
 
   /**
-   * Completes this Future with the specified exception, if not already completed.
-   * @return this
+   * Completes this Promise with the specified result, if not already completed.
+   * @return whether this call completed the Promise
    */
-  final def completeWithException(exception: Throwable): this.type = complete(Left(exception))
+  def tryComplete(value: Either[Throwable, T]): Boolean
 
   /**
-   * Completes this Future with the specified other Future, when that Future is completed,
-   * unless this Future has already been completed.
+   * Completes this Promise with the specified result, if not already completed.
+   * @throws IllegalStateException if already completed, this is to aid in debugging of complete-races,
+   *         use tryComplete to do a conditional complete.
+   * @return this
+   */
+  final def complete(value: Either[Throwable, T]): this.type =
+    if (tryComplete(value)) this else throw new IllegalStateException("Promise already completed: " + this + " tried to complete with " + value)
+
+  /**
+   * Completes this Promise with the specified result, if not already completed.
+   * @return this
+   */
+  final def success(result: T): this.type = complete(Right(result))
+
+  /**
+   * Completes this Promise with the specified exception, if not already completed.
+   * @return this
+   */
+  final def failure(exception: Throwable): this.type = complete(Left(exception))
+
+  /**
+   * Completes this Promise with the specified other Future, when that Future is completed,
+   * unless this Promise has already been completed.
    * @return this.
    */
   final def completeWith(other: Future[T]): this.type = {
-    other onComplete { f ⇒ complete(f.value.get) }
+    other onComplete { tryComplete(_) }
     this
   }
 
   final def <<(value: T): Future[T] @cps[Future[Any]] = shift { cont: (Future[T] ⇒ Future[Any]) ⇒ cont(complete(Right(value))) }
 
   final def <<(other: Future[T]): Future[T] @cps[Future[Any]] = shift { cont: (Future[T] ⇒ Future[Any]) ⇒
-    val fr = new DefaultPromise[Any](this.timeout)
-    this completeWith other onComplete { f ⇒
+    val fr = Promise[Any]()
+    val thisPromise = this
+    thisPromise completeWith other onComplete { v ⇒
       try {
-        fr completeWith cont(f)
+        fr completeWith cont(thisPromise)
       } catch {
-        case e: Exception ⇒
-          EventHandler.error(e, this, e.getMessage)
-          fr completeWithException e
+        case NonFatal(e) ⇒
+          executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+          fr failure e
       }
     }
     fr
   }
 
   final def <<(stream: PromiseStreamOut[T]): Future[T] @cps[Future[Any]] = shift { cont: (Future[T] ⇒ Future[Any]) ⇒
-    val fr = new DefaultPromise[Any](this.timeout)
-    stream.dequeue(this).onComplete { f ⇒
+    val fr = Promise[Any]()
+    val f = stream.dequeue(this)
+    f.onComplete { _ ⇒
       try {
         fr completeWith cont(f)
       } catch {
-        case e: Exception ⇒
-          EventHandler.error(e, this, e.getMessage)
-          fr completeWithException e
+        case NonFatal(e) ⇒
+          executor.reportFailure(new LogEventException(Debug("Future", getClass, e.getMessage), e))
+          fr failure e
       }
     }
     fr
   }
-
 }
 
 //Companion object to FState, just to provide a cheap, immutable default entry
-private[akka] object FState {
-  val empty = new FState[Nothing]()
-  def apply[T](): FState[T] = empty.asInstanceOf[FState[T]]
+private[dispatch] object DefaultPromise {
+  def EmptyPending[T](): List[T] = Nil
 }
-
-/**
- * Represents the internal state of the DefaultCompletableFuture
- */
-private[akka] case class FState[T](value: Option[Either[Throwable, T]] = None, listeners: List[Future[T] ⇒ Unit] = Nil)
 
 /**
  * The default concrete Future implementation.
  */
-class DefaultPromise[T](val timeout: Timeout)(implicit val dispatcher: MessageDispatcher) extends Promise[T] {
+class DefaultPromise[T](implicit val executor: ExecutionContext) extends AbstractPromise with Promise[T] {
   self ⇒
 
-  def this()(implicit dispatcher: MessageDispatcher) = this(Timeout.default)
+  protected final def tryAwait(atMost: Duration): Boolean = {
+    Future.blocking
 
-  def this(timeout: Long)(implicit dispatcher: MessageDispatcher) = this(Timeout(timeout))
+    @tailrec
+    def awaitUnsafe(waitTimeNanos: Long): Boolean = {
+      if (!isCompleted && waitTimeNanos > 0) {
+        val ms = NANOSECONDS.toMillis(waitTimeNanos)
+        val ns = (waitTimeNanos % 1000000l).toInt //As per object.wait spec
+        val start = System.nanoTime()
+        try { synchronized { if (!isCompleted) wait(ms, ns) } } catch { case e: InterruptedException ⇒ }
 
-  def this(timeout: Long, timeunit: TimeUnit)(implicit dispatcher: MessageDispatcher) = this(Timeout(timeout, timeunit))
-
-  private val _startTimeInNanos = currentTimeInNanos
-  private val ref = new AtomicReference[FState[T]](FState())
-
-  @tailrec
-  private def awaitUnsafe(waitTimeNanos: Long): Boolean = {
-    if (value.isEmpty && waitTimeNanos > 0) {
-      val ms = NANOS.toMillis(waitTimeNanos)
-      val ns = (waitTimeNanos % 1000000l).toInt //As per object.wait spec
-      val start = currentTimeInNanos
-      try { ref.synchronized { if (value.isEmpty) ref.wait(ms, ns) } } catch { case e: InterruptedException ⇒ }
-
-      awaitUnsafe(waitTimeNanos - (currentTimeInNanos - start))
-    } else {
-      value.isDefined
+        awaitUnsafe(waitTimeNanos - (System.nanoTime() - start))
+      } else isCompleted
     }
+    awaitUnsafe(if (atMost.isFinite) atMost.toNanos else Long.MaxValue)
   }
 
-  def await(atMost: Duration): this.type = {
-    val waitNanos =
-      if (timeout.duration.isFinite && atMost.isFinite)
-        atMost.toNanos min timeLeft()
-      else if (atMost.isFinite)
-        atMost.toNanos
-      else if (timeout.duration.isFinite)
-        timeLeft()
-      else Long.MaxValue //If both are infinite, use Long.MaxValue
+  @throws(classOf[TimeoutException])
+  def ready(atMost: Duration)(implicit permit: CanAwait): this.type =
+    if (isCompleted || tryAwait(atMost)) this
+    else throw new TimeoutException("Futures timed out after [" + atMost.toMillis + "] milliseconds")
 
-    if (awaitUnsafe(waitNanos)) this
-    else throw new FutureTimeoutException("Futures timed out after [" + NANOS.toMillis(waitNanos) + "] milliseconds")
+  @throws(classOf[Exception])
+  def result(atMost: Duration)(implicit permit: CanAwait): T =
+    ready(atMost).value.get match {
+      case Left(e: AskTimeoutException) ⇒ throw new AskTimeoutException(e.getMessage, e) // to get meaningful stack trace
+      case Left(e)                      ⇒ throw e
+      case Right(r)                     ⇒ r
+    }
+
+  def value: Option[Either[Throwable, T]] = getState match {
+    case _: List[_]      ⇒ None
+    case c: Either[_, _] ⇒ Some(c.asInstanceOf[Either[Throwable, T]])
   }
 
-  def await = await(timeout.duration)
+  def isCompleted(): Boolean = getState match {
+    case _: Either[_, _] ⇒ true
+    case _               ⇒ false
+  }
 
-  def isExpired: Boolean = if (timeout.duration.isFinite) timeLeft() <= 0 else false
+  @inline
+  private[this] final def updater = AbstractPromise.updater.asInstanceOf[AtomicReferenceFieldUpdater[AbstractPromise, AnyRef]]
 
-  def value: Option[Either[Throwable, T]] = ref.get.value
+  @inline
+  protected final def updateState(oldState: AnyRef, newState: AnyRef): Boolean = updater.compareAndSet(this, oldState, newState)
 
-  def complete(value: Either[Throwable, T]): this.type = {
-    val callbacks = {
+  @inline
+  protected final def getState: AnyRef = updater.get(this)
+
+  def tryComplete(value: Either[Throwable, T]): Boolean = {
+    val callbacks: List[Either[Throwable, T] ⇒ Unit] = {
       try {
         @tailrec
-        def tryComplete: List[Future[T] ⇒ Unit] = {
-          val cur = ref.get
-          if (cur.value.isDefined) Nil
-          else if ( /*cur.value.isEmpty && */ isExpired) {
-            //Empty and expired, so remove listeners
-            //TODO Perhaps cancel existing onTimeout listeners in the future here?
-            ref.compareAndSet(cur, FState()) //Try to reset the state to the default, doesn't matter if it fails
-            Nil
-          } else {
-            if (ref.compareAndSet(cur, FState(Option(value), Nil))) cur.listeners
-            else tryComplete
+        def tryComplete(v: Either[Throwable, T]): List[Either[Throwable, T] ⇒ Unit] = {
+          getState match {
+            case raw: List[_] ⇒
+              val cur = raw.asInstanceOf[List[Either[Throwable, T] ⇒ Unit]]
+              if (updateState(cur, v)) cur else tryComplete(v)
+            case _ ⇒ null
           }
         }
-        tryComplete
+        tryComplete(resolve(value))
       } finally {
-        ref.synchronized { ref.notifyAll() } //Notify any evil blockers
+        synchronized { notifyAll() } //Notify any evil blockers
       }
     }
 
-    if (callbacks.nonEmpty) Future.dispatchTask(() ⇒ callbacks foreach notifyCompleted)
-
-    this
+    callbacks match {
+      case null             ⇒ false
+      case cs if cs.isEmpty ⇒ true
+      case cs               ⇒ Future.dispatchTask(() ⇒ cs.foreach(f ⇒ notifyCompleted(f, value))); true
+    }
   }
 
-  def onComplete(func: Future[T] ⇒ Unit): this.type = {
+  def onComplete[U](func: Either[Throwable, T] ⇒ U): this.type = {
     @tailrec //Returns whether the future has already been completed or not
-    def tryAddCallback(): Boolean = {
-      val cur = ref.get
-      if (cur.value.isDefined) true
-      else if (isExpired) false
-      else if (ref.compareAndSet(cur, cur.copy(listeners = func :: cur.listeners))) false
-      else tryAddCallback()
-    }
-
-    if (tryAddCallback()) Future.dispatchTask(() ⇒ notifyCompleted(func))
-
-    this
-  }
-
-  def onTimeout(func: Future[T] ⇒ Unit): this.type = {
-    val runNow =
-      if (!timeout.duration.isFinite) false //Not possible
-      else if (value.isEmpty) {
-        if (!isExpired) {
-          val runnable = new Runnable {
-            def run() {
-              if (!isCompleted) {
-                if (!isExpired) Scheduler.scheduleOnce(this, timeLeftNoinline(), NANOS)
-                else func(DefaultPromise.this)
-              }
-            }
-          }
-          Scheduler.scheduleOnce(runnable, timeLeft(), NANOS)
-          false
-        } else true
-      } else false
-
-    if (runNow) Future.dispatchTask(() ⇒ notifyCompleted(func))
-
-    this
-  }
-
-  final def orElse[A >: T](fallback: ⇒ A): Future[A] =
-    if (timeout.duration.isFinite) {
-      value match {
-        case Some(_)        ⇒ this
-        case _ if isExpired ⇒ Future[A](fallback)
-        case _ ⇒
-          val promise = new DefaultPromise[A](Timeout.never) //TODO FIXME We can't have infinite timeout here, doesn't make sense.
-          promise completeWith this
-          val runnable = new Runnable {
-            def run() {
-              if (!isCompleted) {
-                if (!isExpired) Scheduler.scheduleOnce(this, timeLeftNoinline(), NANOS)
-                else promise complete (try { Right(fallback) } catch { case e: Exception ⇒ Left(e) })
-              }
-            }
-          }
-          Scheduler.scheduleOnce(runnable, timeLeft(), NANOS)
-          promise
-      }
-    } else this
-
-  private def notifyCompleted(func: Future[T] ⇒ Unit) {
-    try { func(this) } catch { case e ⇒ EventHandler notify EventHandler.Error(e, this, "Future onComplete-callback raised an exception") } //TODO catch, everything? Really?
-  }
-
-  @inline
-  private def currentTimeInNanos: Long = MILLIS.toNanos(System.currentTimeMillis) //TODO Switch to math.abs(System.nanoTime)?
-  //TODO: the danger of Math.abs is that it could break the ordering of time. So I would not recommend an abs.
-  @inline
-  private def timeLeft(): Long = timeoutInNanos - (currentTimeInNanos - _startTimeInNanos)
-
-  private def timeLeftNoinline(): Long = timeLeft()
-}
-
-class ActorPromise(timeout: Timeout)(implicit dispatcher: MessageDispatcher) extends DefaultPromise[Any](timeout)(dispatcher) with ForwardableChannel with ExceptionChannel[Any] {
-
-  def !(message: Any)(implicit channel: UntypedChannel) = completeWithResult(message)
-
-  override def sendException(ex: Throwable) = {
-    completeWithException(ex)
-    value == Some(Left(ex))
-  }
-
-  def channel: UntypedChannel = this
-
-}
-
-object ActorPromise {
-  def apply(f: Promise[Any]): ActorPromise =
-    new ActorPromise(f.timeout)(f.dispatcher) {
-      completeWith(f)
-      override def !(message: Any)(implicit channel: UntypedChannel) = f completeWithResult message
-      override def sendException(ex: Throwable) = {
-        f completeWithException ex
-        f.value == Some(Left(ex))
+    def tryAddCallback(): Either[Throwable, T] = {
+      val cur = getState
+      cur match {
+        case r: Either[_, _]    ⇒ r.asInstanceOf[Either[Throwable, T]]
+        case listeners: List[_] ⇒ if (updateState(listeners, func :: listeners)) null else tryAddCallback()
       }
     }
+
+    tryAddCallback() match {
+      case null ⇒ this
+      case completed ⇒
+        Future.dispatchTask(() ⇒ notifyCompleted(func, completed))
+        this
+    }
+  }
+
+  private final def notifyCompleted[U](func: Either[Throwable, T] ⇒ U, result: Either[Throwable, T]): Unit =
+    try func(result) catch { case NonFatal(e) ⇒ executor reportFailure e }
 }
 
 /**
  * An already completed Future is seeded with it's result at creation, is useful for when you are participating in
  * a Future-composition but you already have a value to contribute.
  */
-sealed class KeptPromise[T](suppliedValue: Either[Throwable, T])(implicit val dispatcher: MessageDispatcher) extends Promise[T] {
-  val value = Some(suppliedValue)
+final class KeptPromise[T](suppliedValue: Either[Throwable, T])(implicit val executor: ExecutionContext) extends Promise[T] {
+  val value = Some(resolve(suppliedValue))
 
-  def complete(value: Either[Throwable, T]): this.type = this
-  def onComplete(func: Future[T] ⇒ Unit): this.type = {
-    Future dispatchTask (() ⇒ func(this))
+  def tryComplete(value: Either[Throwable, T]): Boolean = false
+  def onComplete[U](func: Either[Throwable, T] ⇒ U): this.type = {
+    val completedAs = value.get
+    Future dispatchTask (() ⇒ func(completedAs))
     this
   }
-  def await(atMost: Duration): this.type = this
-  def await: this.type = this
-  def isExpired: Boolean = true
-  def timeout: Timeout = Timeout.zero
-
-  final def onTimeout(func: Future[T] ⇒ Unit): this.type = this
-  final def orElse[A >: T](fallback: ⇒ A): Future[A] = this
-
+  def isCompleted(): Boolean = true
+  def ready(atMost: Duration)(implicit permit: CanAwait): this.type = this
+  def result(atMost: Duration)(implicit permit: CanAwait): T = value.get match {
+    case Left(e)  ⇒ throw e
+    case Right(r) ⇒ r
+  }
 }
+
+/**
+ * This class contains bridge classes between Scala and Java.
+ * Internal use only.
+ */
+object japi {
+  @deprecated("Do not use this directly, use subclasses of this", "2.0")
+  class CallbackBridge[-T] extends PartialFunction[T, BoxedUnit] {
+    override final def isDefinedAt(t: T): Boolean = true
+    override final def apply(t: T): BoxedUnit = {
+      internal(t)
+      BoxedUnit.UNIT
+    }
+    protected def internal(result: T): Unit = ()
+  }
+
+  @deprecated("Do not use this directly, use 'Recover'", "2.0")
+  class RecoverBridge[+T] extends PartialFunction[Throwable, T] {
+    override final def isDefinedAt(t: Throwable): Boolean = true
+    override final def apply(t: Throwable): T = internal(t)
+    protected def internal(result: Throwable): T = null.asInstanceOf[T]
+  }
+
+  @deprecated("Do not use this directly, use subclasses of this", "2.0")
+  class BooleanFunctionBridge[-T] extends scala.Function1[T, Boolean] {
+    override final def apply(t: T): Boolean = internal(t)
+    protected def internal(result: T): Boolean = false
+  }
+
+  @deprecated("Do not use this directly, use subclasses of this", "2.0")
+  class UnitFunctionBridge[-T] extends (T ⇒ BoxedUnit) {
+    override final def apply(t: T): BoxedUnit = {
+      internal(t)
+      BoxedUnit.UNIT
+    }
+    protected def internal(result: T): Unit = ()
+  }
+}
+
+/**
+ * Callback for when a Future is completed successfully
+ * SAM (Single Abstract Method) class
+ *
+ * Java API
+ */
+abstract class OnSuccess[-T] extends japi.CallbackBridge[T] {
+  protected final override def internal(result: T) = onSuccess(result)
+
+  /**
+   * This method will be invoked once when/if a Future that this callback is registered on
+   * becomes successfully completed
+   */
+  def onSuccess(result: T): Unit
+}
+
+/**
+ * Callback for when a Future is completed with a failure
+ * SAM (Single Abstract Method) class
+ *
+ * Java API
+ */
+abstract class OnFailure extends japi.CallbackBridge[Throwable] {
+  protected final override def internal(failure: Throwable) = onFailure(failure)
+
+  /**
+   * This method will be invoked once when/if a Future that this callback is registered on
+   * becomes completed with a failure
+   */
+  def onFailure(failure: Throwable): Unit
+}
+
+/**
+ * Callback for when a Future is completed with either failure or a success
+ * SAM (Single Abstract Method) class
+ *
+ * Java API
+ */
+abstract class OnComplete[-T] extends japi.CallbackBridge[Either[Throwable, T]] {
+  protected final override def internal(value: Either[Throwable, T]): Unit = value match {
+    case Left(t)  ⇒ onComplete(t, null.asInstanceOf[T])
+    case Right(r) ⇒ onComplete(null, r)
+  }
+
+  /**
+   * This method will be invoked once when/if a Future that this callback is registered on
+   * becomes completed with a failure or a success.
+   * In the case of success then "failure" will be null, and in the case of failure the "success" will be null.
+   */
+  def onComplete(failure: Throwable, success: T): Unit
+}
+
+/**
+ * Callback for the Future.recover operation that conditionally turns failures into successes.
+ *
+ * SAM (Single Abstract Method) class
+ *
+ * Java API
+ */
+abstract class Recover[+T] extends japi.RecoverBridge[T] {
+  protected final override def internal(result: Throwable): T = recover(result)
+
+  /**
+   * This method will be invoked once when/if the Future this recover callback is registered on
+   * becomes completed with a failure.
+   *
+   * @return a successful value for the passed in failure
+   * @throws the passed in failure to propagate it.
+   *
+   * Java API
+   */
+  @throws(classOf[Throwable])
+  def recover(failure: Throwable): T
+}
+
+/**
+ * <i><b>Java API (not recommended):</b></i>
+ * Callback for the Future.filter operation that creates a new Future which will
+ * conditionally contain the success of another Future.
+ *
+ * Unfortunately it is not possible to express the type of a Scala filter in
+ * Java: Function1[T, Boolean], where “Boolean” is the primitive type. It is
+ * possible to use `Future.filter` by constructing such a function indirectly:
+ *
+ * {{{
+ * import static akka.dispatch.Filter.filterOf;
+ * Future<String> f = ...;
+ * f.filter(filterOf(new Function<String, Boolean>() {
+ *   @Override
+ *   public Boolean apply(String s) {
+ *     ...
+ *   }
+ * }));
+ * }}}
+ *
+ * However, `Future.filter` exists mainly to support Scala’s for-comprehensions,
+ * thus Java users should prefer `Future.map`, translating non-matching values
+ * to failure cases.
+ */
+object Filter {
+  def filterOf[T](f: akka.japi.Function[T, java.lang.Boolean]): (T ⇒ Boolean) =
+    new Function1[T, Boolean] { def apply(result: T): Boolean = f(result).booleanValue() }
+}
+
+/**
+ * Callback for the Future.foreach operation that will be invoked if the Future that this callback
+ * is registered on becomes completed with a success. This method is essentially the same operation
+ * as onSuccess.
+ *
+ * SAM (Single Abstract Method) class
+ * Java API
+ */
+abstract class Foreach[-T] extends japi.UnitFunctionBridge[T] {
+  override final def internal(t: T): Unit = each(t)
+
+  /**
+   * This method will be invoked once when/if a Future that this callback is registered on
+   * becomes successfully completed
+   */
+  def each(result: T): Unit
+}
+
+/**
+ * Callback for the Future.map and Future.flatMap operations that will be invoked
+ * if the Future that this callback is registered on becomes completed with a success.
+ * This callback is the equivalent of an akka.japi.Function
+ *
+ * SAM (Single Abstract Method) class
+ *
+ * Java API
+ */
+abstract class Mapper[-T, +R] extends scala.runtime.AbstractFunction1[T, R]

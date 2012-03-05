@@ -1,303 +1,144 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import collection.immutable.Seq
+import akka.util.Duration
+import com.typesafe.config._
+import akka.routing._
+import java.util.concurrent.{ TimeUnit, ConcurrentHashMap }
 
-import java.util.concurrent.ConcurrentHashMap
+/**
+ * This class represents deployment configuration for a given actor path. It is
+ * marked final in order to guarantee stable merge semantics (i.e. what
+ * overrides what in case multiple configuration sources are available) and is
+ * fully extensible via its Scope argument, and by the fact that an arbitrary
+ * Config section can be passed along with it (which will be merged when merging
+ * two Deploys).
+ *
+ * The path field is used only when inserting the Deploy into a deployer and
+ * not needed when just doing deploy-as-you-go:
+ *
+ * {{{
+ * context.actorOf(someProps, "someName", Deploy(scope = RemoteScope("someOtherNodeName")))
+ * }}}
+ */
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
+final case class Deploy(
+  path: String = "",
+  config: Config = ConfigFactory.empty,
+  routerConfig: RouterConfig = NoRouter,
+  scope: Scope = NoScopeGiven) {
 
-import akka.event.EventHandler
-import akka.actor.DeploymentConfig._
-import akka.util.ReflectiveAccess._
-import akka.AkkaException
-import akka.config.{ Configuration, ConfigurationException, Config }
+  def this(routing: RouterConfig) = this("", ConfigFactory.empty, routing)
+  def this(routing: RouterConfig, scope: Scope) = this("", ConfigFactory.empty, routing, scope)
+  def this(scope: Scope) = this("", ConfigFactory.empty, NoRouter, scope)
 
-trait ActorDeployer {
-  private[akka] def init(deployments: Seq[Deploy]): Unit
-  private[akka] def shutdown(): Unit //TODO Why should we have "shutdown", should be crash only?
-  private[akka] def deploy(deployment: Deploy): Unit
-  private[akka] def lookupDeploymentFor(address: String): Option[Deploy]
-  private[akka] def deploy(deployment: Seq[Deploy]): Unit = deployment foreach (deploy(_))
+  /**
+   * Do a merge between this and the other Deploy, where values from “this” take
+   * precedence. The “path” of the other Deploy is not taken into account. All
+   * other members are merged using ``<X>.withFallback(other.<X>)``.
+   */
+  def withFallback(other: Deploy): Deploy =
+    Deploy(path, config.withFallback(other.config), routerConfig.withFallback(other.routerConfig), scope.withFallback(other.scope))
 }
 
 /**
- * Deployer maps actor deployments to actor addresses.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
+ * The scope of a [[akka.actor.Deploy]] serves two purposes: as a marker for
+ * pattern matching the “scope” (i.e. local/remote/cluster) as well as for
+ * extending the information carried by the final Deploy class. Scopes can be
+ * used in conjunction with a custom [[akka.actor.ActorRefProvider]], making
+ * Akka actors fully extensible.
  */
-object Deployer extends ActorDeployer {
-
-  //  val defaultAddress = Node(Config.nodename)
-
-  lazy val instance: ActorDeployer = {
-    val deployer = if (ClusterModule.isEnabled) ClusterModule.clusterDeployer else LocalDeployer
-    deployer.init(deploymentsInConfig)
-    deployer
-  }
-
-  def start(): Unit = instance.toString //Force evaluation
-
-  private[akka] def init(deployments: Seq[Deploy]) = instance.init(deployments)
-
-  def shutdown(): Unit = instance.shutdown() //TODO Why should we have "shutdown", should be crash only?
-
-  def deploy(deployment: Deploy): Unit = instance.deploy(deployment)
-
-  def isLocal(deployment: Deploy): Boolean = deployment match {
-    case Deploy(_, _, _, _, Local) | Deploy(_, _, _, _, _: Local) ⇒ true
-    case _ ⇒ false
-  }
-
-  def isClustered(deployment: Deploy): Boolean = !isLocal(deployment)
-
-  def isLocal(address: String): Boolean = isLocal(deploymentFor(address)) //TODO Should this throw exception if address not found?
-
-  def isClustered(address: String): Boolean = !isLocal(address) //TODO Should this throw exception if address not found?
-
+trait Scope {
   /**
-   * Same as 'lookupDeploymentFor' but throws an exception if no deployment is bound.
+   * When merging [[akka.actor.Deploy]] instances using ``withFallback()`` on
+   * the left one, this is propagated to “merging” scopes in the same way.
+   * The setup is biased towards preferring the callee over the argument, i.e.
+   * ``a.withFallback(b)`` is called expecting that ``a`` should in general take
+   * precedence.
    */
-  private[akka] def deploymentFor(address: String): Deploy = {
-    lookupDeploymentFor(address) match {
-      case Some(deployment) ⇒ deployment
-      case None             ⇒ thrownNoDeploymentBoundException(address)
-    }
-  }
+  def withFallback(other: Scope): Scope
+}
 
-  private[akka] def lookupDeploymentFor(address: String): Option[Deploy] = {
-    val deployment_? = instance.lookupDeploymentFor(address)
-
-    if (deployment_?.isDefined && (deployment_?.get ne null)) deployment_?
-    else {
-      val newDeployment = try {
-        lookupInConfig(address)
-      } catch {
-        case e: ConfigurationException ⇒
-          EventHandler.error(e, this, e.getMessage)
-          throw e
-      }
-
-      newDeployment foreach { d ⇒
-        if (d eq null) {
-          val e = new IllegalStateException("Deployment for address [" + address + "] is null")
-          EventHandler.error(e, this, e.getMessage)
-          throw e
-        }
-        deploy(d) // deploy and cache it
-      }
-
-      newDeployment
-    }
-  }
-
-  private[akka] def deploymentsInConfig: List[Deploy] = {
-    for {
-      address ← addressesInConfig
-      deployment ← lookupInConfig(address)
-    } yield deployment
-  }
-
-  private[akka] def addressesInConfig: List[String] = {
-    val deploymentPath = "akka.actor.deployment"
-    Config.config.getSection(deploymentPath) match {
-      case None ⇒ Nil
-      case Some(addressConfig) ⇒
-        addressConfig.map.keySet
-          .map(path ⇒ path.substring(0, path.indexOf(".")))
-          .toSet.toList // toSet to force uniqueness
-    }
-  }
-
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
+case object LocalScope extends Scope {
   /**
-   * Lookup deployment in 'akka.conf' configuration file.
+   * Java API
    */
-  private[akka] def lookupInConfig(address: String, configuration: Configuration = Config.config): Option[Deploy] = {
-    import akka.util.ReflectiveAccess.{ createInstance, emptyArguments, emptyParams, getClassFor }
+  def scope: Scope = this
 
-    // --------------------------------
-    // akka.actor.deployment.<address>
-    // --------------------------------
-    val addressPath = "akka.actor.deployment." + address
-    configuration.getSection(addressPath) match {
-      case None ⇒
-        Some(Deploy(address, None, Direct, RemoveConnectionOnFirstFailureLocalFailureDetector, Local))
-
-      case Some(addressConfig) ⇒
-
-        // --------------------------------
-        // akka.actor.deployment.<address>.router
-        // --------------------------------
-        val router: Routing = addressConfig.getString("router", "direct") match {
-          case "direct"         ⇒ Direct
-          case "round-robin"    ⇒ RoundRobin
-          case "random"         ⇒ Random
-          case "least-cpu"      ⇒ LeastCPU
-          case "least-ram"      ⇒ LeastRAM
-          case "least-messages" ⇒ LeastMessages
-          case customRouterClassName ⇒
-            createInstance[AnyRef](customRouterClassName, emptyParams, emptyArguments).fold(
-              e ⇒ throw new ConfigurationException(
-                "Config option [" + addressPath + ".router] needs to be one of " +
-                  "[\"direct\", \"round-robin\", \"random\", \"least-cpu\", \"least-ram\", \"least-messages\" or the fully qualified name of Router class]", e),
-              CustomRouter(_))
-        }
-
-        // --------------------------------
-        // akka.actor.deployment.<address>.failure-detector
-        // --------------------------------
-        val failureDetector: FailureDetector = addressConfig.getString("failure-detector", "remove-connection-on-first-local-failure") match {
-          case "remove-connection-on-first-local-failure"  ⇒ RemoveConnectionOnFirstFailureLocalFailureDetector
-          case "remove-connection-on-first-remote-failure" ⇒ RemoveConnectionOnFirstFailureRemoteFailureDetector
-          case customFailureDetectorClassName              ⇒ CustomFailureDetector(customFailureDetectorClassName)
-        }
-
-        val recipe: Option[ActorRecipe] = addressConfig.getSection("create-as") map { section ⇒
-          val implementationClass = section.getString("implementation-class") match {
-            case Some(impl) ⇒
-              getClassFor[Actor](impl).fold(e ⇒ throw new ConfigurationException("Config option [" + addressPath + ".create-as.implementation-class] load failed", e), identity)
-            case None ⇒ throw new ConfigurationException("Config option [" + addressPath + ".create-as.implementation-class] is missing")
-          }
-
-          ActorRecipe(implementationClass)
-        }
-
-        // --------------------------------
-        // akka.actor.deployment.<address>.cluster
-        // --------------------------------
-        addressConfig.getSection("cluster") match {
-          case None ⇒
-            Some(Deploy(address, recipe, router, RemoveConnectionOnFirstFailureLocalFailureDetector, Local)) // deploy locally
-
-          case Some(clusterConfig) ⇒
-
-            // --------------------------------
-            // akka.actor.deployment.<address>.cluster.preferred-nodes
-            // --------------------------------
-
-            val preferredNodes = clusterConfig.getList("preferred-nodes") match {
-              case Nil ⇒ Nil
-              case homes ⇒
-                def raiseHomeConfigError() = throw new ConfigurationException(
-                  "Config option [" + addressPath +
-                    ".cluster.preferred-nodes] needs to be a list with elements on format\n'host:<hostname>', 'ip:<ip address>' or 'node:<node name>', was [" +
-                    homes + "]")
-
-                homes map { home ⇒
-                  if (!(home.startsWith("host:") || home.startsWith("node:") || home.startsWith("ip:"))) raiseHomeConfigError()
-
-                  val tokenizer = new java.util.StringTokenizer(home, ":")
-                  val protocol = tokenizer.nextElement
-                  val address = tokenizer.nextElement.asInstanceOf[String]
-
-                  protocol match {
-                    //case "host" ⇒ Host(address)
-                    case "node" ⇒ Node(address)
-                    //case "ip"   ⇒ IP(address)
-                    case _      ⇒ raiseHomeConfigError()
-                  }
-                }
-            }
-
-            // --------------------------------
-            // akka.actor.deployment.<address>.cluster.replicas
-            // --------------------------------
-            val replicationFactor = {
-              if (router == Direct) new ReplicationFactor(1)
-              else {
-                clusterConfig.getAny("replication-factor", "0") match {
-                  case "auto" ⇒ AutoReplicationFactor
-                  case "0"    ⇒ ZeroReplicationFactor
-                  case nrOfReplicas: String ⇒
-                    try {
-                      new ReplicationFactor(nrOfReplicas.toInt)
-                    } catch {
-                      case e: Exception ⇒
-                        throw new ConfigurationException(
-                          "Config option [" + addressPath +
-                            ".cluster.replicas] needs to be either [\"auto\"] or [0-N] - was [" +
-                            nrOfReplicas + "]")
-                    }
-                }
-              }
-            }
-
-            // --------------------------------
-            // akka.actor.deployment.<address>.cluster.replication
-            // --------------------------------
-            clusterConfig.getSection("replication") match {
-              case None ⇒
-                Some(Deploy(address, recipe, router, failureDetector, Clustered(preferredNodes, replicationFactor, Transient)))
-
-              case Some(replicationConfig) ⇒
-                val storage = replicationConfig.getString("storage", "transaction-log") match {
-                  case "transaction-log" ⇒ TransactionLog
-                  case "data-grid"       ⇒ DataGrid
-                  case unknown ⇒
-                    throw new ConfigurationException("Config option [" + addressPath +
-                      ".cluster.replication.storage] needs to be either [\"transaction-log\"] or [\"data-grid\"] - was [" +
-                      unknown + "]")
-                }
-                val strategy = replicationConfig.getString("strategy", "write-through") match {
-                  case "write-through" ⇒ WriteThrough
-                  case "write-behind"  ⇒ WriteBehind
-                  case unknown ⇒
-                    throw new ConfigurationException("Config option [" + addressPath +
-                      ".cluster.replication.strategy] needs to be either [\"write-through\"] or [\"write-behind\"] - was [" +
-                      unknown + "]")
-                }
-                Some(Deploy(address, recipe, router, failureDetector, Clustered(preferredNodes, replicationFactor, Replication(storage, strategy))))
-            }
-        }
-    }
-  }
-
-  private[akka] def throwDeploymentBoundException(deployment: Deploy): Nothing = {
-    val e = new DeploymentAlreadyBoundException("Address [" + deployment.address + "] already bound to [" + deployment + "]")
-    EventHandler.error(e, this, e.getMessage)
-    throw e
-  }
-
-  private[akka] def thrownNoDeploymentBoundException(address: String): Nothing = {
-    val e = new NoDeploymentBoundException("Address [" + address + "] is not bound to a deployment")
-    EventHandler.error(e, this, e.getMessage)
-    throw e
-  }
+  def withFallback(other: Scope): Scope = this
 }
 
 /**
- * TODO: Improved documentation
+ * This is the default value and as such allows overrides.
+ */
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
+case object NoScopeGiven extends Scope {
+  def withFallback(other: Scope): Scope = other
+}
+
+/**
+ * Deployer maps actor paths to actor deployments.
  *
  * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
-object LocalDeployer extends ActorDeployer {
+class Deployer(val settings: ActorSystem.Settings, val dynamicAccess: DynamicAccess) {
+
+  import scala.collection.JavaConverters._
+
   private val deployments = new ConcurrentHashMap[String, Deploy]
+  private val config = settings.config.getConfig("akka.actor.deployment")
+  protected val default = config.getConfig("default")
+  config.root.asScala flatMap {
+    case ("default", _)             ⇒ None
+    case (key, value: ConfigObject) ⇒ parseConfig(key, value.toConfig)
+    case _                          ⇒ None
+  } foreach deploy
 
-  private[akka] def init(deployments: Seq[Deploy]) {
-    EventHandler.info(this, "Deploying actors locally [\n\t%s\n]" format deployments.mkString("\n\t"))
-    deployments foreach (deploy(_)) // deploy
-  }
+  def lookup(path: String): Option[Deploy] = Option(deployments.get(path))
 
-  private[akka] def shutdown() {
-    deployments.clear() //TODO do something else/more?
-  }
+  def deploy(d: Deploy): Unit = deployments.put(d.path, d)
 
-  private[akka] def deploy(deployment: Deploy) {
-    deployments.putIfAbsent(deployment.address, deployment) /* match {
-      case null ⇒
-        deployment match {
-          case Deploy(address, Some(recipe), routing, _) ⇒ Actor.actorOf(recipe.implementationClass, address) //FIXME use routing?
-          case _                                         ⇒
+  protected def parseConfig(key: String, config: Config): Option[Deploy] = {
+
+    val deployment = config.withFallback(default)
+
+    val routees = deployment.getStringList("routees.paths").asScala.toSeq
+
+    val nrOfInstances = deployment.getInt("nr-of-instances")
+
+    val within = Duration(deployment.getMilliseconds("within"), TimeUnit.MILLISECONDS)
+
+    val resizer: Option[Resizer] = if (config.hasPath("resizer")) {
+      Some(DefaultResizer(deployment.getConfig("resizer")))
+    } else {
+      None
+    }
+
+    val router: RouterConfig = deployment.getString("router") match {
+      case "from-code"        ⇒ NoRouter
+      case "round-robin"      ⇒ RoundRobinRouter(nrOfInstances, routees, resizer)
+      case "random"           ⇒ RandomRouter(nrOfInstances, routees, resizer)
+      case "smallest-mailbox" ⇒ SmallestMailboxRouter(nrOfInstances, routees, resizer)
+      case "scatter-gather"   ⇒ ScatterGatherFirstCompletedRouter(nrOfInstances, routees, within, resizer)
+      case "broadcast"        ⇒ BroadcastRouter(nrOfInstances, routees, resizer)
+      case fqn ⇒
+        val args = Seq(classOf[Config] -> deployment)
+        dynamicAccess.createInstanceFor[RouterConfig](fqn, args) match {
+          case Right(router) ⇒ router
+          case Left(exception) ⇒
+            throw new IllegalArgumentException(
+              ("Cannot instantiate router [%s], defined in [%s], " +
+                "make sure it extends [akka.routing.RouterConfig] and has constructor with " +
+                "[com.typesafe.config.Config] parameter")
+                .format(fqn, key), exception)
         }
-      case `deployment` ⇒ //Already deployed TODO should it be like this?
-      case preexists    ⇒ Deployer.throwDeploymentBoundException(deployment)
-    }*/
+    }
+
+    Some(Deploy(key, deployment, router, NoScopeGiven))
   }
 
-  private[akka] def lookupDeploymentFor(address: String): Option[Deploy] = Option(deployments.get(address))
 }
-
-class DeploymentException private[akka] (message: String) extends AkkaException(message)
-class DeploymentAlreadyBoundException private[akka] (message: String) extends AkkaException(message)
-class NoDeploymentBoundException private[akka] (message: String) extends AkkaException(message)

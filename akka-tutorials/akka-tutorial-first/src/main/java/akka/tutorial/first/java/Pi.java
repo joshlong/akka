@@ -1,36 +1,34 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.tutorial.first.java;
 
-import static akka.actor.Actors.actorOf;
-import static akka.actor.Actors.poisonPill;
-import static java.util.Arrays.asList;
+//#imports
 
 import akka.actor.ActorRef;
+import akka.actor.ActorSystem;
+import akka.actor.Props;
 import akka.actor.UntypedActor;
 import akka.actor.UntypedActorFactory;
-import akka.routing.RoutedProps;
-import akka.routing.RouterType;
-import akka.routing.Routing;
-import akka.routing.Routing.Broadcast;
-import scala.collection.JavaConversions;
+import akka.routing.RoundRobinRouter;
+import akka.util.Duration;
+import java.util.concurrent.TimeUnit;
 
-import java.util.LinkedList;
-import java.util.concurrent.CountDownLatch;
+//#imports
 
+//#app
 public class Pi {
 
-  public static void main(String[] args) throws Exception {
+  public static void main(String[] args) {
     Pi pi = new Pi();
     pi.calculate(4, 10000, 10000);
   }
 
-  // ====================
-  // ===== Messages =====
-  // ====================
-  static class Calculate {}
+  //#actors-and-messages
+  //#messages
+  static class Calculate {
+  }
 
   static class Work {
     private final int start;
@@ -41,8 +39,13 @@ public class Pi {
       this.nrOfElements = nrOfElements;
     }
 
-    public int getStart() { return start; }
-    public int getNrOfElements() { return nrOfElements; }
+    public int getStart() {
+      return start;
+    }
+
+    public int getNrOfElements() {
+      return nrOfElements;
+    }
   }
 
   static class Result {
@@ -52,15 +55,35 @@ public class Pi {
       this.value = value;
     }
 
-    public double getValue() { return value; }
+    public double getValue() {
+      return value;
+    }
   }
 
-  // ==================
-  // ===== Worker =====
-  // ==================
-  static class Worker extends UntypedActor {
+  static class PiApproximation {
+    private final double pi;
+    private final Duration duration;
 
-    // define the work
+    public PiApproximation(double pi, Duration duration) {
+      this.pi = pi;
+      this.duration = duration;
+    }
+
+    public double getPi() {
+      return pi;
+    }
+
+    public Duration getDuration() {
+      return duration;
+    }
+  }
+
+  //#messages
+
+  //#worker
+  public static class Worker extends UntypedActor {
+
+    //#calculatePiFor
     private double calculatePiFor(int start, int nrOfElements) {
       double acc = 0.0;
       for (int i = start * nrOfElements; i <= ((start + 1) * nrOfElements - 1); i++) {
@@ -69,115 +92,106 @@ public class Pi {
       return acc;
     }
 
-    // message handler
+    //#calculatePiFor
+
     public void onReceive(Object message) {
       if (message instanceof Work) {
         Work work = (Work) message;
-
-        // perform the work
         double result = calculatePiFor(work.getStart(), work.getNrOfElements());
-
-        // reply with the result
-        getContext().reply(new Result(result));
-
-      } else throw new IllegalArgumentException("Unknown message [" + message + "]");
+        getSender().tell(new Result(result), getSelf());
+      } else {
+        unhandled(message);
+      }
     }
   }
 
-  // ==================
-  // ===== Master =====
-  // ==================
-  static class Master extends UntypedActor {
+  //#worker
+
+  //#master
+  public static class Master extends UntypedActor {
     private final int nrOfMessages;
     private final int nrOfElements;
-    private final CountDownLatch latch;
 
     private double pi;
     private int nrOfResults;
-    private long start;
+    private final long start = System.currentTimeMillis();
 
-    private ActorRef router;
+    private final ActorRef listener;
+    private final ActorRef workerRouter;
 
-      public Master(int nrOfWorkers, int nrOfMessages, int nrOfElements, CountDownLatch latch) {
+    public Master(final int nrOfWorkers, int nrOfMessages, int nrOfElements, ActorRef listener) {
       this.nrOfMessages = nrOfMessages;
       this.nrOfElements = nrOfElements;
-      this.latch = latch;
+      this.listener = listener;
 
-      LinkedList<ActorRef> workers = new LinkedList<ActorRef>();
-      for (int i = 0; i < nrOfWorkers; i++) {
-          ActorRef worker = actorOf(Worker.class, "worker");
-          workers.add(worker);
-      }
-
-      router = Routing.actorOf(
-        RoutedProps.apply()
-            .withRoundRobinRouter()
-            .withConnections(workers)
-            .withDeployId("pi")
-      );
+      //#create-router
+      workerRouter = this.getContext().actorOf(new Props(Worker.class).withRouter(new RoundRobinRouter(nrOfWorkers)),
+          "workerRouter");
+      //#create-router
     }
 
-    // message handler
+    //#master-receive
     public void onReceive(Object message) {
-
+      //#handle-messages
       if (message instanceof Calculate) {
-        // schedule work
         for (int start = 0; start < nrOfMessages; start++) {
-          router.tell(new Work(start, nrOfElements), getContext());
+          workerRouter.tell(new Work(start, nrOfElements), getSelf());
         }
-
-        // send a PoisonPill to all workers telling them to shut down themselves
-        router.tell(new Broadcast(poisonPill()));
-
-        // send a PoisonPill to the router, telling him to shut himself down
-        router.tell(poisonPill());
-
       } else if (message instanceof Result) {
-
-        // handle result from the worker
         Result result = (Result) message;
         pi += result.getValue();
         nrOfResults += 1;
-        if (nrOfResults == nrOfMessages) getContext().stop();
-
-      } else throw new IllegalArgumentException("Unknown message [" + message + "]");
+        if (nrOfResults == nrOfMessages) {
+          // Send the result to the listener
+          Duration duration = Duration.create(System.currentTimeMillis() - start, TimeUnit.MILLISECONDS);
+          listener.tell(new PiApproximation(pi, duration), getSelf());
+          // Stops this actor and all its supervised children
+          getContext().stop(getSelf());
+        }
+      } else {
+        unhandled(message);
+      }
+      //#handle-messages
     }
+    //#master-receive
+  }
 
-    @Override
-    public void preStart() {
-      start = System.currentTimeMillis();
-    }
+  //#master
 
-    @Override
-    public void postStop() {
-      // tell the world that the calculation is complete
-      System.out.println(String.format(
-        "\n\tPi estimate: \t\t%s\n\tCalculation time: \t%s millis",
-        pi, (System.currentTimeMillis() - start)));
-      latch.countDown();
+  //#result-listener
+  public static class Listener extends UntypedActor {
+    public void onReceive(Object message) {
+      if (message instanceof PiApproximation) {
+        PiApproximation approximation = (PiApproximation) message;
+        System.out.println(String.format("\n\tPi approximation: \t\t%s\n\tCalculation time: \t%s",
+            approximation.getPi(), approximation.getDuration()));
+        getContext().system().shutdown();
+      } else {
+        unhandled(message);
+      }
     }
   }
 
-  // ==================
-  // ===== Run it =====
-  // ==================
-  public void calculate(final int nrOfWorkers, final int nrOfElements, final int nrOfMessages)
-    throws Exception {
+  //#result-listener
+  //#actors-and-messages
 
-    // this latch is only plumbing to know when the calculation is completed
-    final CountDownLatch latch = new CountDownLatch(1);
+  public void calculate(final int nrOfWorkers, final int nrOfElements, final int nrOfMessages) {
+    // Create an Akka system
+    ActorSystem system = ActorSystem.create("PiSystem");
+
+    // create the result listener, which will print the result and shutdown the system
+    final ActorRef listener = system.actorOf(new Props(Listener.class), "listener");
 
     // create the master
-    ActorRef master = actorOf(new UntypedActorFactory() {
+    ActorRef master = system.actorOf(new Props(new UntypedActorFactory() {
       public UntypedActor create() {
-        return new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch);
+        return new Master(nrOfWorkers, nrOfMessages, nrOfElements, listener);
       }
-    }, "master");
+    }), "master");
 
     // start the calculation
     master.tell(new Calculate());
 
-    // wait for master to shut down
-    latch.await();
   }
 }
+//#app

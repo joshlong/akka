@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.camel
@@ -32,8 +32,8 @@ private[camel] object TypedCamel {
    * and re-uses the <code>activationTracker</code> of <code>service</code>.
    */
   def onCamelServiceStart(service: CamelService) {
-    consumerPublisher = new LocalActorRef(Props(new TypedConsumerPublisher(service.activationTracker)), newUuid.toString, true)
-    publishRequestor = new LocalActorRef(Props(new TypedConsumerPublishRequestor), newUuid.toString, true)
+    consumerPublisher = new LocalActorRef(Props(new TypedConsumerPublisher(service.activationTracker)), Props.randomName, true)
+    publishRequestor = new LocalActorRef(Props(new TypedConsumerPublishRequestor), Props.randomName, true)
 
     registerPublishRequestor
 

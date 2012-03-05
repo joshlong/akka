@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.util
 
@@ -38,6 +38,27 @@ class DurationSpec extends WordSpec with MustMatchers {
       (inf - minf) must be(inf)
       (minf - inf) must be(minf)
       (minf + minf) must be(minf)
+      assert(inf == inf)
+      assert(minf == minf)
+      inf.compareTo(inf) must be(0)
+      inf.compareTo(one) must be(1)
+      minf.compareTo(minf) must be(0)
+      minf.compareTo(one) must be(-1)
+      assert(inf != minf)
+      assert(minf != inf)
+      assert(one != inf)
+      assert(minf != one)
+    }
+
+    "support fromNow" in {
+      val dead = 2.seconds.fromNow
+      val dead2 = 2 seconds fromNow
+      // view bounds vs. very local type inference vs. operator precedence: sigh
+      dead.timeLeft must be > (1 second: Duration)
+      dead2.timeLeft must be > (1 second: Duration)
+      1.second.sleep
+      dead.timeLeft must be < (1 second: Duration)
+      dead2.timeLeft must be < (1 second: Duration)
     }
 
   }

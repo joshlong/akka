@@ -14,6 +14,7 @@ import akka.japi.{ SideEffect, Option ⇒ JOption }
 import akka.util.Bootable
 
 import TypedCamelAccess._
+import akka.dispatch.Await
 
 /**
  * Publishes consumer actors at their Camel endpoints. Consumer actors are published asynchronously when
@@ -26,9 +27,9 @@ import TypedCamelAccess._
  * @author Martin Krasser
  */
 trait CamelService extends Bootable {
-  private[camel] val activationTracker = new LocalActorRef(Props[ActivationTracker], newUuid.toString, true)
-  private[camel] val consumerPublisher = new LocalActorRef(Props(new ConsumerPublisher(activationTracker)), newUuid.toString, true)
-  private[camel] val publishRequestor = new LocalActorRef(Props(new ConsumerPublishRequestor), newUuid.toString, true)
+  private[camel] val activationTracker = new LocalActorRef(Props[ActivationTracker], Props.randomName, true)
+  private[camel] val consumerPublisher = new LocalActorRef(Props(new ConsumerPublisher(activationTracker)), Props.randomName, true)
+  private[camel] val publishRequestor = new LocalActorRef(Props(new ConsumerPublishRequestor), Props.randomName, true)
 
   private val serviceEnabled = config.getList("akka.enabled-modules").exists(_ == "camel")
 
@@ -58,7 +59,7 @@ trait CamelService extends Bootable {
    * Starts this CamelService.
    */
   def start: CamelService = {
-    // Only init and start if not already done by application
+    // Only init and start if not already done by system
     if (!CamelContextManager.initialized) CamelContextManager.init
     if (!CamelContextManager.started) CamelContextManager.start
 
@@ -164,7 +165,7 @@ trait CamelService extends Bootable {
    * activations that occurred in the past are not considered.
    */
   private def expectEndpointActivationCount(count: Int): CountDownLatch =
-    (activationTracker ? SetExpectedActivationCount(count)).as[CountDownLatch].get
+    Await.result((activationTracker ? SetExpectedActivationCount(count)).mapTo[CountDownLatch], 3 seconds)
 
   /**
    * Sets an expectation on the number of upcoming endpoint de-activations and returns
@@ -172,7 +173,7 @@ trait CamelService extends Bootable {
    * de-activations that occurred in the past are not considered.
    */
   private def expectEndpointDeactivationCount(count: Int): CountDownLatch =
-    (activationTracker ? SetExpectedDeactivationCount(count)).as[CountDownLatch].get
+    Await.result((activationTracker ? SetExpectedDeactivationCount(count)).mapTo[CountDownLatch], 3 seconds)
 
   private[camel] def registerPublishRequestor: Unit =
     Actor.registry.addListener(publishRequestor)

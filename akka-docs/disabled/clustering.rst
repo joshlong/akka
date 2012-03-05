@@ -48,8 +48,8 @@ cluster node.
 Cluster configuration
 ~~~~~~~~~~~~~~~~~~~~~
 
-Cluster is configured in the ``akka.cloud.cluster`` section in the ``akka.conf``
-configuration file. Here you specify the default addresses to the ZooKeeper
+Cluster is configured in the ``akka.cloud.cluster`` section in the :ref:`configuration`.
+Here you specify the default addresses to the ZooKeeper
 servers, timeouts, if compression should be on or off, and so on.
 
 .. code-block:: conf
@@ -296,7 +296,7 @@ are:
   - ``remove`` -- removes the actor from the clustered actor registry
 
 The ``store`` method also allows you to specify a replication factor. The
-``replicationFactor`` defines the number of (randomly picked) nodes in the cluster that
+``nrOfInstances`` defines the number of (randomly picked) nodes in the cluster that
 the stored actor should be automatically deployed to and instantiated  locally on (using
 ``use``). If you leave this argument out then a replication factor of ``0`` will be used
 which means that the actor will only be stored in the clustered actor registry and not
@@ -310,11 +310,11 @@ on your use-case. Default is ``false``
 This is the signatures for the ``store`` method (all different permutations of these methods are available for using from Java)::
 
     def store[T <: Actor]
-      (actorRef: ActorRef, replicationFactor: Int = 0, serializeMailbox: Boolean = false)
+      (actorRef: ActorRef, nrOfInstances: Int = 0, serializeMailbox: Boolean = false)
       (implicit format: Format[T]): ClusterNode
 
     def store[T <: Actor]
-      (actorClass: Class[T], replicationFactor: Int = 0, serializeMailbox: Boolean = false)
+      (actorClass: Class[T], nrOfInstances: Int = 0, serializeMailbox: Boolean = false)
       (implicit format: Format[T]): ClusterNode
 
 The ``implicit format: Format[T]`` might look scary but this argument is chosen for you and passed in automatically by the compiler as long as you have imported the serialization typeclass for the actor you are storing, e.g. the ``HelloActorFormat`` (defined above and imported in the sample below).
@@ -328,12 +328,12 @@ created actor::
 
     val clusterNode = Cluster.newNode(NodeAddress("test-cluster", "node1")).start
 
-    val hello = actorOf[HelloActor].start.asInstanceOf[LocalActorRef]
+    val hello = actorOf(Props[HelloActor]).asInstanceOf[LocalActorRef]
 
     val serializeMailbox = false
-    val replicationFactor = 5
+    val nrOfInstances = 5
 
-    clusterNode store (hello, serializeMailbox, replicationFactor)
+    clusterNode store (hello, serializeMailbox, nrOfInstances)
 
 Here is an example of how to use ``store`` to cluster an actor by type::
 
@@ -444,7 +444,7 @@ The workhorse for this is the ``send`` method (in different variations). The
 ``send`` methods take the following parameters:
   - ``f`` -- the function you want to be invoked on the remote nodes in the cluster
   - ``arg`` -- the argument to the function (not all of them have this parameter)
-  - ``replicationFactor`` -- the replication factor defining the number of nodes you want the function to be sent and invoked on
+  - ``nrOfInstances`` -- the replication factor defining the number of nodes you want the function to be sent and invoked on
 
 You can currently send these function types to the cluster:
   - ``Function0[Unit]`` -- takes no arguments and returns nothing
@@ -594,7 +594,7 @@ Consolidation and management of the Akka configuration file
 
 Not implemented yet.
 
-The actor configuration file ``akka.conf`` will also be stored into the cluster
+The actor :ref:`configuration` file will also be stored into the cluster
 and it will be possible to have one single configuration file, stored on the server, and pushed out to all
 the nodes that joins the cluster. Each node only needs to be configured with the ZooKeeper
 server address and the master configuration will only reside in one single place

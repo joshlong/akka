@@ -10,7 +10,7 @@ import System.{currentTimeMillis => now}
 import java.util.concurrent.CountDownLatch
 //#imports
 
-//#app
+//#system
 object Pi extends App {
 
   calculate(nrOfWorkers = 4, nrOfElements = 10000, nrOfMessages = 10000)
@@ -43,7 +43,7 @@ object Pi extends App {
 
     def receive = {
       case Work(start, nrOfElements) =>
-        self reply Result(calculatePiFor(start, nrOfElements)) // perform the work
+        reply(Result(calculatePiFor(start, nrOfElements))) // perform the work
     }
   }
   //#worker
@@ -62,15 +62,11 @@ object Pi extends App {
 
     //#create-workers
     // create the workers
-    val workers = Vector.fill(nrOfWorkers)(actorOf[Worker])
+    val workers = Vector.fill(nrOfWorkers)(actorOf(Props[Worker])
 
     // wrap them with a load-balancing router
     val router = Routing.actorOf(
-      RoutedProps.apply
-        .withRoundRobinRouter
-        .withConnections(workers)
-        .withDeployId("pi")
-    )
+        RoutedProps().withRoundRobinRouter.withLocalConnections(workers), "pi")
 
     loadBalancerActor(CyclicIterator(workers))
     //#create-workers
@@ -122,8 +118,7 @@ object Pi extends App {
     val latch = new CountDownLatch(1)
 
     // create the master
-    val master = actorOf(
-      new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch))
+    val master = actorOf(Props(new Master(nrOfWorkers, nrOfMessages, nrOfElements, latch)))
 
     // start the calculation
     master ! Calculate
@@ -132,5 +127,5 @@ object Pi extends App {
     latch.await()
   }
 }
-//#app
+//#system
 

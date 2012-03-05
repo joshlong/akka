@@ -9,21 +9,21 @@ class ConsumerRegisteredTest extends JUnitSuite {
 
   @Test
   def shouldCreateSomeNonBlockingPublishRequestFromConsumer = {
-    val c = Actor.actorOf[ConsumerActor1]
+    val c = Actor.actorOf(Props[ConsumerActor1]
     val event = ConsumerActorRegistered.eventFor(c)
     assert(event === Some(ConsumerActorRegistered(c, consumerOf(c))))
   }
 
   @Test
   def shouldCreateSomeBlockingPublishRequestFromConsumer = {
-    val c = Actor.actorOf[ConsumerActor2]
+    val c = Actor.actorOf(Props[ConsumerActor2]
     val event = ConsumerActorRegistered.eventFor(c)
     assert(event === Some(ConsumerActorRegistered(c, consumerOf(c))))
   }
 
   @Test
   def shouldCreateNoneFromConsumer = {
-    val event = ConsumerActorRegistered.eventFor(Actor.actorOf[PlainActor])
+    val event = ConsumerActorRegistered.eventFor(Actor.actorOf(Props[PlainActor])
     assert(event === None)
   }
 
@@ -49,7 +49,7 @@ class ConsumerRegisteredTest extends JUnitSuite {
   }
 
   private def consumerOf(ref: ActorRef) = ref match {
-    case l: LocalActorRef ⇒ l.actorInstance.get.asInstanceOf[Consumer]
+    case l: LocalActorRef ⇒ l.underlyingActorInstance.asInstanceOf[Consumer]
     case _                ⇒ null: Consumer
   }
 }

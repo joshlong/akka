@@ -1,64 +1,86 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import org.scalatest.junit.JUnitSuite
-import org.junit.Test
-
-import Actor._
-import akka.config.Supervision.OneForOnePermanentStrategy
-
+import akka.testkit._
 import java.util.concurrent.{ TimeUnit, CountDownLatch }
+import akka.dispatch.Await
+import akka.pattern.ask
+import akka.util.Duration
+import akka.util.duration._
 
 object SupervisorHierarchySpec {
   class FireWorkerException(msg: String) extends Exception(msg)
 
-  class CountDownActor(countDown: CountDownLatch) extends Actor {
-    protected def receive = { case _ ⇒ }
-    override def postRestart(reason: Throwable) = countDown.countDown()
+  /**
+   * For testing Supervisor behavior, normally you don't supply the strategy
+   * from the outside like this.
+   */
+  class CountDownActor(countDown: CountDownLatch, override val supervisorStrategy: SupervisorStrategy) extends Actor {
+
+    protected def receive = {
+      case p: Props ⇒ sender ! context.actorOf(p)
+    }
+    // test relies on keeping children around during restart
+    override def preRestart(cause: Throwable, msg: Option[Any]) {}
+    override def postRestart(reason: Throwable) = {
+      countDown.countDown()
+    }
   }
 }
 
-class SupervisorHierarchySpec extends JUnitSuite {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class SupervisorHierarchySpec extends AkkaSpec with DefaultTimeout {
   import SupervisorHierarchySpec._
 
-  @Test
-  def killWorkerShouldRestartMangerAndOtherWorkers = {
-    val countDown = new CountDownLatch(4)
+  "A Supervisor Hierarchy" must {
 
-    val boss = actorOf(Props(self ⇒ { case _ ⇒ }).withFaultHandler(OneForOnePermanentStrategy(List(classOf[Throwable]), 5, 1000)))
+    "restart manager and workers in AllForOne" in {
+      val countDown = new CountDownLatch(4)
 
-    val manager = actorOf(Props(new CountDownActor(countDown)).withFaultHandler(OneForOnePermanentStrategy(List(), None, None)).withSupervisor(boss))
+      val boss = system.actorOf(Props(new Supervisor(OneForOneStrategy()(List(classOf[Exception])))))
 
-    val workerOne, workerTwo, workerThree = actorOf(Props(new CountDownActor(countDown)).withSupervisor(manager))
+      val managerProps = Props(new CountDownActor(countDown, AllForOneStrategy()(List())))
+      val manager = Await.result((boss ? managerProps).mapTo[ActorRef], timeout.duration)
 
-    manager ! Death(workerOne, new FireWorkerException("Fire the worker!"), true)
+      val workerProps = Props(new CountDownActor(countDown, SupervisorStrategy.defaultStrategy))
+      val workerOne, workerTwo, workerThree = Await.result((manager ? workerProps).mapTo[ActorRef], timeout.duration)
 
-    // manager + all workers should be restarted by only killing a worker
-    // manager doesn't trap exits, so boss will restart manager
+      filterException[ActorKilledException] {
+        workerOne ! Kill
 
-    assert(countDown.await(2, TimeUnit.SECONDS))
-  }
+        // manager + all workers should be restarted by only killing a worker
+        // manager doesn't trap exits, so boss will restart manager
 
-  @Test
-  def supervisorShouldReceiveNotificationMessageWhenMaximumNumberOfRestartsWithinTimeRangeIsReached = {
-    val countDownMessages = new CountDownLatch(1)
-    val countDownMax = new CountDownLatch(1)
-    val boss = actorOf(Props(new Actor {
-      protected def receive = {
-        case MaximumNumberOfRestartsWithinTimeRangeReached(_, _, _, _) ⇒ countDownMax.countDown()
+        assert(countDown.await(2, TimeUnit.SECONDS))
       }
-    }).withFaultHandler(OneForOnePermanentStrategy(List(classOf[Throwable]), 1, 5000)))
+    }
 
-    val crasher = actorOf(Props(new CountDownActor(countDownMessages)).withSupervisor(boss))
+    "send notification to supervisor when permanent failure" in {
+      val countDownMessages = new CountDownLatch(1)
+      val countDownMax = new CountDownLatch(1)
+      val boss = system.actorOf(Props(new Actor {
+        override val supervisorStrategy =
+          OneForOneStrategy(maxNrOfRetries = 1, withinTimeRange = 5 seconds)(List(classOf[Throwable]))
 
-    crasher ! Kill
-    crasher ! Kill
+        val crasher = context.watch(context.actorOf(Props(new CountDownActor(countDownMessages, SupervisorStrategy.defaultStrategy))))
 
-    assert(countDownMessages.await(2, TimeUnit.SECONDS))
-    assert(countDownMax.await(2, TimeUnit.SECONDS))
+        protected def receive = {
+          case "killCrasher" ⇒ crasher ! Kill
+          case Terminated(_) ⇒ countDownMax.countDown()
+        }
+      }))
+
+      filterException[ActorKilledException] {
+        boss ! "killCrasher"
+        boss ! "killCrasher"
+
+        assert(countDownMessages.await(2, TimeUnit.SECONDS))
+        assert(countDownMax.await(2, TimeUnit.SECONDS))
+      }
+    }
   }
 }
 

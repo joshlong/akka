@@ -1,79 +1,67 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor
 
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
-
 import akka.actor._
-import akka.config.Supervision._
-import akka.testkit.{ filterEvents, EventFilter }
-import org.scalatest.{ BeforeAndAfterAll, WordSpec }
-import org.scalatest.matchers.MustMatchers
+import org.scalatest.BeforeAndAfterAll
+import akka.testkit.{ TestKit, filterEvents, EventFilter }
+import akka.testkit.AkkaSpec
+import akka.testkit.ImplicitSender
+import akka.testkit.DefaultTimeout
+import akka.dispatch.Await
+import akka.pattern.ask
+import akka.util.duration._
 
-class Ticket669Spec extends WordSpec with MustMatchers with BeforeAndAfterAll {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class Ticket669Spec extends AkkaSpec with BeforeAndAfterAll with ImplicitSender with DefaultTimeout {
   import Ticket669Spec._
 
-  override def beforeAll = Thread.interrupted() //remove interrupted status.
-
-  override def afterAll = {
-    Actor.registry.local.shutdownAll
-    akka.event.EventHandler.start()
+  // TODO: does this really make sense?
+  override def atStartup() {
+    Thread.interrupted() //remove interrupted status.
   }
 
   "A supervised actor with lifecycle PERMANENT" should {
     "be able to reply on failure during preRestart" in {
-      filterEvents(EventFilter[Exception]("test")) {
-        val latch = new CountDownLatch(1)
-        val sender = Actor.actorOf(new Sender(latch))
+      filterEvents(EventFilter[Exception]("test", occurrences = 1)) {
+        val supervisor = system.actorOf(Props(new Supervisor(
+          AllForOneStrategy(5, 10 seconds)(List(classOf[Exception])))))
+        val supervised = Await.result((supervisor ? Props[Supervised]).mapTo[ActorRef], timeout.duration)
 
-        val supervised = Actor.actorOf[Supervised]
-        val supervisor = Supervisor(SupervisorConfig(
-          AllForOnePermanentStrategy(List(classOf[Exception]), 5, 10000),
-          Supervise(supervised, Permanent) :: Nil))
-
-        supervised.!("test")(Some(sender))
-        latch.await(5, TimeUnit.SECONDS) must be(true)
+        supervised.!("test")(testActor)
+        expectMsg("failure1")
+        system.stop(supervisor)
       }
     }
 
     "be able to reply on failure during postStop" in {
-      filterEvents(EventFilter[Exception]("test")) {
-        val latch = new CountDownLatch(1)
-        val sender = Actor.actorOf(new Sender(latch))
+      filterEvents(EventFilter[Exception]("test", occurrences = 1)) {
+        val supervisor = system.actorOf(Props(new Supervisor(
+          AllForOneStrategy(maxNrOfRetries = 0)(List(classOf[Exception])))))
+        val supervised = Await.result((supervisor ? Props[Supervised]).mapTo[ActorRef], timeout.duration)
 
-        val supervised = Actor.actorOf[Supervised]
-        val supervisor = Supervisor(SupervisorConfig(
-          AllForOnePermanentStrategy(List(classOf[Exception]), 5, 10000),
-          Supervise(supervised, Temporary) :: Nil))
-
-        supervised.!("test")(Some(sender))
-        latch.await(5, TimeUnit.SECONDS) must be(true)
+        supervised.!("test")(testActor)
+        expectMsg("failure2")
+        system.stop(supervisor)
       }
     }
   }
 }
 
 object Ticket669Spec {
-  class Sender(latch: CountDownLatch) extends Actor {
-    def receive = {
-      case "failure1" ⇒ latch.countDown()
-      case "failure2" ⇒ latch.countDown()
-      case _          ⇒ {}
-    }
-  }
-
   class Supervised extends Actor {
     def receive = {
       case msg ⇒ throw new Exception("test")
     }
 
     override def preRestart(reason: scala.Throwable, msg: Option[Any]) {
-      self.tryReply("failure1")
+      sender.tell("failure1")
     }
 
     override def postStop() {
-      self.tryReply("failure2")
+      sender.tell("failure2")
     }
   }
 }

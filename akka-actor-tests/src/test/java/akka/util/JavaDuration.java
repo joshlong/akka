@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.util;
 
@@ -7,7 +7,8 @@ import org.junit.Test;
 
 public class JavaDuration {
 
-  @Test void testCreation() {
+  @Test
+  public void testCreation() {
     final Duration fivesec = Duration.create(5, "seconds");
     final Duration threemillis = Duration.parse("3 millis");
     final Duration diff = fivesec.minus(threemillis);

@@ -1,46 +1,84 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.config
 
-import org.junit.runner.RunWith
-import org.scalatest.WordSpec
-import org.scalatest.junit.JUnitRunner
-import org.scalatest.matchers.MustMatchers
+import akka.testkit.AkkaSpec
+import com.typesafe.config.ConfigFactory
+import scala.collection.JavaConverters._
+import akka.util.duration._
+import akka.util.Duration
+import akka.actor.ActorSystem
 
-@RunWith(classOf[JUnitRunner])
-class ConfigSpec extends WordSpec with MustMatchers {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ConfigSpec extends AkkaSpec(ConfigFactory.defaultReference(ActorSystem.findClassLoader())) {
 
-  "The default configuration file (i.e. akka-reference.conf)" must {
+  "The default configuration file (i.e. reference.conf)" must {
     "contain all configuration properties for akka-actor that are used in code with their correct defaults" in {
-      import Config.config._
 
-      getList("akka.boot") must equal(Nil)
-      getString("akka.time-unit") must equal(Some("seconds"))
-      getString("akka.version") must equal(Some("2.0-SNAPSHOT"))
+      val settings = system.settings
+      val config = settings.config
 
-      getString("akka.actor.default-dispatcher.type") must equal(Some("Dispatcher"))
-      getInt("akka.actor.default-dispatcher.keep-alive-time") must equal(Some(60))
-      getDouble("akka.actor.default-dispatcher.core-pool-size-factor") must equal(Some(8.0))
-      getDouble("akka.actor.default-dispatcher.max-pool-size-factor") must equal(Some(8.0))
-      getInt("akka.actor.default-dispatcher.executor-bounds") must equal(Some(-1))
-      getInt("akka.actor.default-dispatcher.task-queue-size") must equal(Some(-1))
-      getString("akka.actor.default-dispatcher.task-queue-type") must equal(Some("linked"))
-      getBool("akka.actor.default-dispatcher.allow-core-timeout") must equal(Some(true))
-      getString("akka.actor.default-dispatcher.rejection-policy") must equal(Some("caller-runs"))
-      getInt("akka.actor.default-dispatcher.mailbox-capacity") must equal(Some(-1))
-      getInt("akka.actor.default-dispatcher.mailbox-push-timeout-time") must equal(Some(10))
-      getLong("akka.actor.dispatcher-shutdown-timeout") must equal(Some(1))
-      getInt("akka.actor.default-dispatcher.throughput") must equal(Some(5))
-      getInt("akka.actor.default-dispatcher.throughput-deadline-time") must equal(Some(-1))
-      getBool("akka.actor.serialize-messages") must equal(Some(false))
-      getInt("akka.actor.timeout") must equal(Some(5))
-      getInt("akka.actor.throughput") must equal(Some(5))
-      getInt("akka.actor.throughput-deadline-time") must equal(Some(-1))
+      {
+        import config._
 
-      getString("akka.cluster.layer") must equal(Some("akka.cluster.netty.NettyRemoteSupport"))
-      getInt("akka.cluster.server.port") must equal(Some(2552))
+        getString("akka.version") must equal("2.0-SNAPSHOT")
+        settings.ConfigVersion must equal("2.0-SNAPSHOT")
+
+        getBoolean("akka.daemonic") must equal(false)
+        getBoolean("akka.actor.serialize-messages") must equal(false)
+        settings.SerializeAllMessages must equal(false)
+
+        getInt("akka.scheduler.ticks-per-wheel") must equal(512)
+        settings.SchedulerTicksPerWheel must equal(512)
+
+        getMilliseconds("akka.scheduler.tick-duration") must equal(100)
+        settings.SchedulerTickDuration must equal(100 millis)
+
+        settings.Daemonicity must be(false)
+        settings.JvmExitOnFatalError must be(true)
+      }
+
+      {
+        val c = config.getConfig("akka.actor.default-dispatcher")
+
+        //General dispatcher config
+
+        {
+          c.getString("type") must equal("Dispatcher")
+          c.getString("executor") must equal("fork-join-executor")
+          c.getInt("mailbox-capacity") must equal(-1)
+          c.getMilliseconds("mailbox-push-timeout-time") must equal(10 * 1000)
+          c.getString("mailbox-type") must be("")
+          c.getMilliseconds("shutdown-timeout") must equal(1 * 1000)
+          c.getInt("throughput") must equal(5)
+          c.getMilliseconds("throughput-deadline-time") must equal(0)
+          c.getBoolean("attempt-teamwork") must equal(true)
+        }
+
+        //Fork join executor config
+
+        {
+          val pool = c.getConfig("fork-join-executor")
+          pool.getInt("parallelism-min") must equal(8)
+          pool.getDouble("parallelism-factor") must equal(3.0)
+          pool.getInt("parallelism-max") must equal(64)
+        }
+
+        //Thread pool executor config
+
+        {
+          val pool = c.getConfig("thread-pool-executor")
+          import pool._
+          getMilliseconds("keep-alive-time") must equal(60 * 1000)
+          getDouble("core-pool-size-factor") must equal(3.0)
+          getDouble("max-pool-size-factor") must equal(3.0)
+          getInt("task-queue-size") must equal(-1)
+          getString("task-queue-type") must equal("linked")
+          getBoolean("allow-core-timeout") must equal(true)
+        }
+      }
     }
   }
 }

@@ -1,146 +1,210 @@
 package akka.actor
 
-import org.scalatest.junit.JUnitSuite
 import org.scalatest.BeforeAndAfterEach
-import akka.event.EventHandler
-import akka.testkit.TestEvent._
-import akka.testkit.EventFilter
-import Actor._
-import akka.config.Supervision._
-import org.multiverse.api.latches.StandardLatch
-import org.junit.{ Test, Before, After }
-import java.util.concurrent.{ ScheduledFuture, ConcurrentLinkedQueue, CountDownLatch, TimeUnit }
+import akka.util.duration._
+import java.util.concurrent.{ CountDownLatch, ConcurrentLinkedQueue, TimeUnit }
+import akka.testkit._
+import akka.dispatch.Await
+import akka.pattern.ask
+import java.util.concurrent.atomic.AtomicInteger
 
-class SchedulerSpec extends JUnitSuite {
-  private val futures = new ConcurrentLinkedQueue[ScheduledFuture[AnyRef]]()
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class SchedulerSpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
+  private val cancellables = new ConcurrentLinkedQueue[Cancellable]()
 
-  def collectFuture(f: ⇒ ScheduledFuture[AnyRef]): ScheduledFuture[AnyRef] = {
-    val future = f
-    futures.add(future)
-    future
+  def collectCancellable(c: Cancellable): Cancellable = {
+    cancellables.add(c)
+    c
   }
 
-  @Before
-  def beforeEach {
-    EventHandler.notify(Mute(EventFilter[Exception]("CRASH")))
+  override def afterEach {
+    while (cancellables.peek() ne null) { Option(cancellables.poll()).foreach(_.cancel()) }
   }
 
-  @After
-  def afterEach {
-    while (futures.peek() ne null) { Option(futures.poll()).foreach(_.cancel(true)) }
-    Actor.registry.local.shutdownAll
-    EventHandler.start()
-  }
+  "A Scheduler" must {
 
-  @Test
-  def schedulerShouldScheduleMoreThanOnce = {
+    "schedule more than once" in {
+      case object Tick
+      val countDownLatch = new CountDownLatch(3)
+      val tickActor = system.actorOf(Props(new Actor {
+        def receive = { case Tick ⇒ countDownLatch.countDown() }
+      }))
+      // run every 50 milliseconds
+      collectCancellable(system.scheduler.schedule(0 milliseconds, 50 milliseconds, tickActor, Tick))
 
-    case object Tick
-    val countDownLatch = new CountDownLatch(3)
-    val tickActor = actorOf(new Actor {
-      def receive = { case Tick ⇒ countDownLatch.countDown() }
-    })
-    // run every 50 millisec
-    collectFuture(Scheduler.schedule(tickActor, Tick, 0, 50, TimeUnit.MILLISECONDS))
+      // after max 1 second it should be executed at least the 3 times already
+      assert(countDownLatch.await(2, TimeUnit.SECONDS))
 
-    // after max 1 second it should be executed at least the 3 times already
-    assert(countDownLatch.await(1, TimeUnit.SECONDS))
+      val countDownLatch2 = new CountDownLatch(3)
 
-    val countDownLatch2 = new CountDownLatch(3)
+      collectCancellable(system.scheduler.schedule(0 milliseconds, 50 milliseconds)(countDownLatch2.countDown()))
 
-    collectFuture(Scheduler.schedule(() ⇒ countDownLatch2.countDown(), 0, 50, TimeUnit.MILLISECONDS))
-
-    // after max 1 second it should be executed at least the 3 times already
-    assert(countDownLatch2.await(1, TimeUnit.SECONDS))
-  }
-
-  @Test
-  def schedulerShouldScheduleOnce = {
-    case object Tick
-    val countDownLatch = new CountDownLatch(3)
-    val tickActor = actorOf(new Actor {
-      def receive = { case Tick ⇒ countDownLatch.countDown() }
-    })
-    // run every 50 millisec
-    collectFuture(Scheduler.scheduleOnce(tickActor, Tick, 50, TimeUnit.MILLISECONDS))
-    collectFuture(Scheduler.scheduleOnce(() ⇒ countDownLatch.countDown(), 50, TimeUnit.MILLISECONDS))
-
-    // after 1 second the wait should fail
-    assert(countDownLatch.await(1, TimeUnit.SECONDS) == false)
-    // should still be 1 left
-    assert(countDownLatch.getCount == 1)
-  }
-
-  /**
-   * ticket #372
-   */
-  @Test
-  def schedulerShouldntCreateActors = {
-    object Ping
-    val ticks = new CountDownLatch(1000)
-    val actor = actorOf(new Actor {
-      def receive = { case Ping ⇒ ticks.countDown }
-    })
-    val numActors = Actor.registry.local.actors.length
-    (1 to 1000).foreach(_ ⇒ collectFuture(Scheduler.scheduleOnce(actor, Ping, 1, TimeUnit.MILLISECONDS)))
-    assert(ticks.await(10, TimeUnit.SECONDS))
-    assert(Actor.registry.local.actors.length === numActors)
-  }
-
-  /**
-   * ticket #372
-   */
-  @Test
-  def schedulerShouldBeCancellable = {
-    object Ping
-    val ticks = new CountDownLatch(1)
-
-    val actor = actorOf(new Actor {
-      def receive = { case Ping ⇒ ticks.countDown() }
-    })
-
-    (1 to 10).foreach { i ⇒
-      val future = collectFuture(Scheduler.scheduleOnce(actor, Ping, 1, TimeUnit.SECONDS))
-      future.cancel(true)
+      // after max 1 second it should be executed at least the 3 times already
+      assert(countDownLatch2.await(2, TimeUnit.SECONDS))
     }
-    assert(ticks.await(3, TimeUnit.SECONDS) == false) //No counting down should've been made
-  }
 
-  /**
-   * ticket #307
-   */
-  @Test
-  def actorRestartShouldPickUpScheduleAgain = {
+    "should stop continuous scheduling if the receiving actor has been terminated" taggedAs TimingTest in {
+      val actor = system.actorOf(Props(new Actor {
+        def receive = {
+          case x ⇒ testActor ! x
+        }
+      }))
 
-    object Ping
-    object Crash
+      // run immediately and then every 100 milliseconds
+      collectCancellable(system.scheduler.schedule(0 milliseconds, 100 milliseconds, actor, "msg"))
+      expectNoMsg(1 second)
 
-    val restartLatch = new StandardLatch
-    val pingLatch = new CountDownLatch(6)
+      // stop the actor and, hence, the continuous messaging from happening
+      actor ! PoisonPill
 
-    val actor = actorOf(new Actor {
-      def receive = {
-        case Ping  ⇒ pingLatch.countDown()
-        case Crash ⇒ throw new Exception("CRASH")
+      expectMsg("msg")
+    }
+
+    "schedule once" in {
+      case object Tick
+      val countDownLatch = new CountDownLatch(3)
+      val tickActor = system.actorOf(Props(new Actor {
+        def receive = { case Tick ⇒ countDownLatch.countDown() }
+      }))
+
+      // run after 300 millisec
+      collectCancellable(system.scheduler.scheduleOnce(300 milliseconds, tickActor, Tick))
+      collectCancellable(system.scheduler.scheduleOnce(300 milliseconds)(countDownLatch.countDown()))
+
+      // should not be run immediately
+      assert(countDownLatch.await(100, TimeUnit.MILLISECONDS) == false)
+      countDownLatch.getCount must be(3)
+
+      // after 1 second the wait should fail
+      assert(countDownLatch.await(2, TimeUnit.SECONDS) == false)
+      // should still be 1 left
+      countDownLatch.getCount must be(1)
+    }
+
+    /**
+     * ticket #372
+     */
+    "be cancellable" in {
+      object Ping
+      val ticks = new CountDownLatch(1)
+
+      val actor = system.actorOf(Props(new Actor {
+        def receive = { case Ping ⇒ ticks.countDown() }
+      }))
+
+      (1 to 10).foreach { i ⇒
+        val timeout = collectCancellable(system.scheduler.scheduleOnce(1 second, actor, Ping))
+        timeout.cancel()
       }
 
-      override def postRestart(reason: Throwable) = restartLatch.open
-    })
+      assert(ticks.await(3, TimeUnit.SECONDS) == false) //No counting down should've been made
+    }
 
-    Supervisor(
-      SupervisorConfig(
-        AllForOnePermanentStrategy(List(classOf[Exception]), 3, 1000),
-        Supervise(
-          actor,
-          Permanent)
-          :: Nil))
+    "be cancellable during initial delay" taggedAs TimingTest in {
+      val ticks = new AtomicInteger
 
-    collectFuture(Scheduler.schedule(actor, Ping, 500, 500, TimeUnit.MILLISECONDS))
-    // appx 2 pings before crash
-    collectFuture(Scheduler.scheduleOnce(actor, Crash, 1000, TimeUnit.MILLISECONDS))
+      val initialDelay = 200.milliseconds.dilated
+      val delay = 10.milliseconds.dilated
+      val timeout = collectCancellable(system.scheduler.schedule(initialDelay, delay) {
+        ticks.incrementAndGet()
+      })
+      10.milliseconds.dilated.sleep()
+      timeout.cancel()
+      (initialDelay + 100.milliseconds.dilated).sleep()
 
-    assert(restartLatch.tryAwait(2, TimeUnit.SECONDS))
-    // should be enough time for the ping countdown to recover and reach 6 pings
-    assert(pingLatch.await(4, TimeUnit.SECONDS))
+      ticks.get must be(0)
+    }
+
+    "be cancellable after initial delay" taggedAs TimingTest in {
+      val ticks = new AtomicInteger
+
+      val initialDelay = 20.milliseconds.dilated
+      val delay = 200.milliseconds.dilated
+      val timeout = collectCancellable(system.scheduler.schedule(initialDelay, delay) {
+        ticks.incrementAndGet()
+      })
+      (initialDelay + 100.milliseconds.dilated).sleep()
+      timeout.cancel()
+      (delay + 100.milliseconds.dilated).sleep()
+
+      ticks.get must be(1)
+    }
+
+    /**
+     * ticket #307
+     */
+    "pick up schedule after actor restart" in {
+
+      object Ping
+      object Crash
+
+      val restartLatch = new TestLatch
+      val pingLatch = new TestLatch(6)
+
+      val supervisor = system.actorOf(Props(new Supervisor(AllForOneStrategy(3, 1 second)(List(classOf[Exception])))))
+      val props = Props(new Actor {
+        def receive = {
+          case Ping  ⇒ pingLatch.countDown()
+          case Crash ⇒ throw new Exception("CRASH")
+        }
+
+        override def postRestart(reason: Throwable) = restartLatch.open
+      })
+      val actor = Await.result((supervisor ? props).mapTo[ActorRef], timeout.duration)
+
+      collectCancellable(system.scheduler.schedule(500 milliseconds, 500 milliseconds, actor, Ping))
+      // appx 2 pings before crash
+      EventFilter[Exception]("CRASH", occurrences = 1) intercept {
+        collectCancellable(system.scheduler.scheduleOnce(1000 milliseconds, actor, Crash))
+      }
+
+      Await.ready(restartLatch, 2 seconds)
+      // should be enough time for the ping countdown to recover and reach 6 pings
+      Await.ready(pingLatch, 5 seconds)
+    }
+
+    "never fire prematurely" in {
+      val ticks = new TestLatch(300)
+
+      case class Msg(ts: Long)
+
+      val actor = system.actorOf(Props(new Actor {
+        def receive = {
+          case Msg(ts) ⇒
+            val now = System.nanoTime
+            // Make sure that no message has been dispatched before the scheduled time (10ms) has occurred
+            if (now - ts < 10.millis.toNanos) throw new RuntimeException("Interval is too small: " + (now - ts))
+            ticks.countDown()
+        }
+      }))
+
+      (1 to 300).foreach { i ⇒
+        collectCancellable(system.scheduler.scheduleOnce(10 milliseconds, actor, Msg(System.nanoTime)))
+        Thread.sleep(5)
+      }
+
+      Await.ready(ticks, 3 seconds)
+    }
+
+    "schedule with different initial delay and frequency" taggedAs TimingTest in {
+      val ticks = new TestLatch(3)
+
+      case object Msg
+
+      val actor = system.actorOf(Props(new Actor {
+        def receive = {
+          case Msg ⇒ ticks.countDown()
+        }
+      }))
+
+      val startTime = System.nanoTime()
+      val cancellable = system.scheduler.schedule(1 second, 300 milliseconds, actor, Msg)
+      Await.ready(ticks, 3 seconds)
+      val elapsedTimeMs = (System.nanoTime() - startTime) / 1000000
+
+      assert(elapsedTimeMs > 1600)
+      assert(elapsedTimeMs < 2000) // the precision is not ms exact
+      cancellable.cancel()
+    }
   }
 }

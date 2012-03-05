@@ -1,33 +1,28 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-import org.scalatest.BeforeAndAfterEach
-
 import akka.testkit._
-import akka.testkit.Testing.sleepFor
+import org.scalatest.BeforeAndAfterEach
 import akka.util.duration._
-
-import Actor._
-import akka.config.Supervision._
-import akka.dispatch.Dispatchers
+import akka.dispatch.Await
+import akka.pattern.ask
 
 object ActorFireForgetRequestReplySpec {
 
   class ReplyActor extends Actor {
     def receive = {
       case "Send" ⇒
-        self.reply("Reply")
+        sender ! "Reply"
       case "SendImplicit" ⇒
-        self.channel ! "ReplyImplicit"
+        sender ! "ReplyImplicit"
     }
   }
 
   class CrashingActor extends Actor {
+    import context.system
     def receive = {
       case "Die" ⇒
         state.finished.await
@@ -36,6 +31,7 @@ object ActorFireForgetRequestReplySpec {
   }
 
   class SenderActor(replyActor: ActorRef) extends Actor {
+    import context.system
     def receive = {
       case "Init" ⇒
         replyActor ! "Send"
@@ -57,7 +53,8 @@ object ActorFireForgetRequestReplySpec {
   }
 }
 
-class ActorFireForgetRequestReplySpec extends WordSpec with MustMatchers with BeforeAndAfterEach {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ActorFireForgetRequestReplySpec extends AkkaSpec with BeforeAndAfterEach with DefaultTimeout {
   import ActorFireForgetRequestReplySpec._
 
   override def beforeEach() = {
@@ -67,31 +64,32 @@ class ActorFireForgetRequestReplySpec extends WordSpec with MustMatchers with Be
   "An Actor" must {
 
     "reply to bang message using reply" in {
-      val replyActor = actorOf[ReplyActor]
-      val senderActor = actorOf(new SenderActor(replyActor))
+      val replyActor = system.actorOf(Props[ReplyActor])
+      val senderActor = system.actorOf(Props(new SenderActor(replyActor)))
       senderActor ! "Init"
       state.finished.await
       state.s must be("Reply")
     }
 
     "reply to bang message using implicit sender" in {
-      val replyActor = actorOf[ReplyActor]
-      val senderActor = actorOf(new SenderActor(replyActor))
+      val replyActor = system.actorOf(Props[ReplyActor])
+      val senderActor = system.actorOf(Props(new SenderActor(replyActor)))
       senderActor ! "InitImplicit"
       state.finished.await
       state.s must be("ReplyImplicit")
     }
 
     "should shutdown crashed temporary actor" in {
-      filterEvents(EventFilter[Exception]("Expected")) {
-        val supervisor = actorOf(Props(self ⇒ { case _ ⇒ }).withFaultHandler(OneForOneTemporaryStrategy(List(classOf[Exception]))))
-        val actor = actorOf(Props[CrashingActor].withSupervisor(supervisor))
-        actor.isRunning must be(true)
+      filterEvents(EventFilter[Exception]("Expected exception")) {
+        val supervisor = system.actorOf(Props(new Supervisor(
+          OneForOneStrategy(maxNrOfRetries = 0)(List(classOf[Exception])))))
+        val actor = Await.result((supervisor ? Props[CrashingActor]).mapTo[ActorRef], timeout.duration)
+        actor.isTerminated must be(false)
         actor ! "Die"
         state.finished.await
-        sleepFor(1 second)
-        actor.isShutdown must be(true)
-        supervisor.stop()
+        1.second.dilated.sleep()
+        actor.isTerminated must be(true)
+        system.stop(supervisor)
       }
     }
   }

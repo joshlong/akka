@@ -50,7 +50,7 @@ trait ProducerSupport { this: Actor ⇒
   /**
    * Returns the names of message headers to copy from a request message to a response message.
    * By default only the Message.MessageExchangeId is copied. Applications may override this to
-   * define an application-specific set of message headers to copy.
+   * define an system-specific set of message headers to copy.
    */
   def headersToCopy: Set[String] = headersToCopyDefault
 
@@ -92,16 +92,16 @@ trait ProducerSupport { this: Actor ⇒
    * @param msg message to produce
    * @param pattern exchange pattern
    */
-  protected def produce(msg: Any, pattern: ExchangePattern): Unit = {
+  protected def produce(msg: Any, pattern: ExchangePattern) {
     val cmsg = Message.canonicalize(msg)
     val exchange = createExchange(pattern).fromRequestMessage(cmsg)
     processor.process(exchange, new AsyncCallback {
       val producer = self
-      // Need copies of channel reference here since the callback could be done
+      // Need copies of sender reference here since the callback could be done
       // later by another thread.
-      val channel = self.channel
+      val replyChannel = sender
 
-      def done(doneSync: Boolean): Unit = {
+      def done(doneSync: Boolean) {
         (doneSync, exchange.isFailed) match {
           case (true, true)   ⇒ dispatchSync(exchange.toFailureMessage(cmsg.headers(headersToCopy)))
           case (true, false)  ⇒ dispatchSync(exchange.toResponseMessage(cmsg.headers(headersToCopy)))
@@ -114,11 +114,11 @@ trait ProducerSupport { this: Actor ⇒
         receiveAfterProduce(result)
 
       private def dispatchAsync(result: Any) = {
-        channel match {
+        replyChannel match {
           case _: ActorPromise ⇒
-            producer.postMessageToMailboxAndCreateFutureResultWithTimeout(result, producer.timeout, channel)
+            producer.postMessageToMailboxAndCreateFutureResultWithTimeout(result, producer.timeout, replyChannel)
           case _ ⇒
-            producer.postMessageToMailbox(result, channel)
+            producer.postMessageToMailbox(result, replyChannel)
         }
       }
     })
@@ -159,7 +159,7 @@ trait ProducerSupport { this: Actor ⇒
    * actor).
    */
   protected def receiveAfterProduce: Receive = {
-    case msg ⇒ if (!oneway) self.reply(msg)
+    case msg ⇒ if (!oneway) sender ! msg
   }
 
   /**
@@ -191,13 +191,11 @@ trait Producer extends ProducerSupport { this: Actor ⇒
 }
 
 /**
- * Java-friendly ProducerSupport.
- *
- * @see UntypedProducerActor
+ * Subclass this abstract class to create an untyped producer actor. This class is meant to be used from Java.
  *
  * @author Martin Krasser
  */
-trait UntypedProducer extends ProducerSupport { this: UntypedActor ⇒
+abstract class UntypedProducerActor extends UntypedActor with ProducerSupport {
   final override def endpointUri = getEndpointUri
   final override def oneway = isOneway
 
@@ -243,13 +241,6 @@ trait UntypedProducer extends ProducerSupport { this: UntypedActor ⇒
   @throws(classOf[Exception])
   def onReceiveAfterProduce(message: Any): Unit = super.receiveAfterProduce(message)
 }
-
-/**
- * Subclass this abstract class to create an untyped producer actor. This class is meant to be used from Java.
- *
- * @author Martin Krasser
- */
-abstract class UntypedProducerActor extends UntypedActor with UntypedProducer
 
 /**
  * @author Martin Krasser

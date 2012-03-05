@@ -1,14 +1,13 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.testkit
 
 import akka.util.Duration
-import java.util.concurrent.{ CountDownLatch, TimeUnit }
-
-class TestLatchTimeoutException(message: String) extends RuntimeException(message)
-class TestLatchNoTimeoutException(message: String) extends RuntimeException(message)
+import akka.actor.ActorSystem
+import akka.dispatch.Await.{ CanAwait, Awaitable }
+import java.util.concurrent.{ TimeoutException, CountDownLatch, TimeUnit }
 
 /**
  * A count down latch wrapper for use in testing.
@@ -20,35 +19,27 @@ class TestLatchNoTimeoutException(message: String) extends RuntimeException(mess
 object TestLatch {
   val DefaultTimeout = Duration(5, TimeUnit.SECONDS)
 
-  def apply(count: Int = 1) = new TestLatch(count)
+  def apply(count: Int = 1)(implicit system: ActorSystem) = new TestLatch(count)
 }
 
-class TestLatch(count: Int = 1) {
+class TestLatch(count: Int = 1)(implicit system: ActorSystem) extends Awaitable[Unit] {
   private var latch = new CountDownLatch(count)
 
   def countDown() = latch.countDown()
-
-  def open() = countDown()
-
-  def await(): Boolean = await(TestLatch.DefaultTimeout)
-
-  def await(timeout: Duration): Boolean = {
-    val opened = latch.await(Testing.testTime(timeout.toNanos), TimeUnit.NANOSECONDS)
-    if (!opened) throw new TestLatchTimeoutException(
-      "Timeout of %s with time factor of %s" format (timeout.toString, Duration.timeFactor))
-    opened
-  }
-
-  /**
-   * Timeout is expected. Throws exception if latch is opened before timeout.
-   */
-  def awaitTimeout(timeout: Duration = TestLatch.DefaultTimeout) = {
-    val opened = latch.await(Testing.testTime(timeout.toNanos), TimeUnit.NANOSECONDS)
-    if (opened) throw new TestLatchNoTimeoutException(
-      "Latch opened before timeout of %s with time factor of %s" format (timeout.toString, Duration.timeFactor))
-    opened
-  }
-
+  def isOpen: Boolean = latch.getCount == 0
+  def open() = while (!isOpen) countDown()
   def reset() = latch = new CountDownLatch(count)
+
+  @throws(classOf[TimeoutException])
+  def ready(atMost: Duration)(implicit permit: CanAwait) = {
+    val opened = latch.await(atMost.dilated.toNanos, TimeUnit.NANOSECONDS)
+    if (!opened) throw new TimeoutException(
+      "Timeout of %s with time factor of %s" format (atMost.toString, TestKitExtension(system).TestTimeFactor))
+    this
+  }
+  @throws(classOf[Exception])
+  def result(atMost: Duration)(implicit permit: CanAwait): Unit = {
+    ready(atMost)
+  }
 }
 

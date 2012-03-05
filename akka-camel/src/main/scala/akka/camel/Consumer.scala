@@ -35,7 +35,7 @@ trait Consumer { this: Actor ⇒
 
   /**
    * Determines whether one-way communications between an endpoint and this consumer actor
-   * should be auto-acknowledged or application-acknowledged.
+   * should be auto-acknowledged or system-acknowledged.
    */
   def autoack = true
 
@@ -53,14 +53,14 @@ trait Consumer { this: Actor ⇒
 }
 
 /**
- *  Java-friendly Consumer.
+ * Java-friendly Consumer.
  *
- * @see UntypedConsumerActor
- * @see RemoteUntypedConsumerActor
+ * Subclass this abstract class to create an MDB-style untyped consumer actor. This
+ * class is meant to be used from Java.
  *
  * @author Martin Krasser
  */
-trait UntypedConsumer extends Consumer { self: UntypedActor ⇒
+abstract class UntypedConsumerActor extends UntypedActor with Consumer {
   final override def endpointUri = getEndpointUri
   final override def blocking = isBlocking
   final override def autoack = isAutoack
@@ -79,16 +79,10 @@ trait UntypedConsumer extends Consumer { self: UntypedActor ⇒
 
   /**
    * Determines whether one-way communications between an endpoint and this consumer actor
-   * should be auto-acknowledged or application-acknowledged.
+   * should be auto-acknowledged or system-acknowledged.
    */
   def isAutoack() = super.autoack
 }
-
-/**
- * Subclass this abstract class to create an MDB-style untyped consumer actor. This
- * class is meant to be used from Java.
- */
-abstract class UntypedConsumerActor extends UntypedActor with UntypedConsumer
 
 /**
  * A callback handler for route definitions to consumer actors.
@@ -141,7 +135,7 @@ private[camel] object Consumer {
    */
   def withConsumer[T](actorRef: ActorRef)(f: Consumer ⇒ T): Option[T] = actorRef match {
     case l: LocalActorRef ⇒
-      l.actorInstance.get() match {
+      l.underlyingActorInstance match {
         case c: Consumer ⇒ Some(f(c))
         case _           ⇒ None
       }

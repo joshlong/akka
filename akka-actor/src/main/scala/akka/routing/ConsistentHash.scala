@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.routing
@@ -15,8 +15,6 @@ import scala.collection.mutable.{ Buffer, Map }
  * Consistent Hashing node ring abstraction.
  *
  * Not thread-safe, to be used from within an Actor or protected some other way.
- *
- * @author <a href="http://jonasboner.com">Jonas Bon&#233;r</a>
  */
 class ConsistentHash[T](nodes: Seq[T], replicas: Int) {
   private val cluster = Buffer[T]()

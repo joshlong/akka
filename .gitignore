@@ -1,3 +1,4 @@
+*.vim
 *~
 *#
 src_managed
@@ -9,12 +10,14 @@ project/boot/*
 lib_managed
 etags
 tags
+.tags
+.tags_sorted_by_file
 TAGS
 akka.tmproj
 reports
-dist
 target
 deploy/*.jar
+.history
 data
 out
 logs
@@ -39,8 +42,10 @@ run-codefellow
 .project
 .settings
 .classpath
+.cache
 .idea
 .scala_dependencies
+.cache
 multiverse.log
 .eprj
 .*.swp
@@ -54,3 +59,10 @@ Makefile
 akka.sublime-project
 akka.sublime-workspace
 .target
+.multi-jvm
+_mb
+schoir.props
+worker*.log
+mongoDB/
+redis/
+beanstalk/

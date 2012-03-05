@@ -1,14 +1,17 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.testkit
 
 import org.scalatest.matchers.MustMatchers
 import org.scalatest.{ BeforeAndAfterEach, WordSpec }
 import akka.actor._
-import akka.config.Supervision.OneForOnePermanentStrategy
-import akka.event.EventHandler
-import akka.dispatch.{ Future, Promise }
+import akka.event.Logging.Warning
+import akka.dispatch.{ Future, Promise, Await }
+import akka.util.duration._
+import akka.actor.ActorSystem
+import akka.pattern.ask
+import akka.dispatch.Dispatcher
 
 /**
  * Test whether TestActorRef behaves as an ActorRef should, besides its own spec.
@@ -36,31 +39,28 @@ object TestActorRefSpec {
   }
 
   class ReplyActor extends TActor {
-    var replyTo: Channel[Any] = null
+    import context.system
+    var replyTo: ActorRef = null
 
     def receiveT = {
       case "complexRequest" ⇒ {
-        replyTo = self.channel
+        replyTo = sender
         val worker = TestActorRef(Props[WorkerActor])
         worker ! "work"
       }
       case "complexRequest2" ⇒
         val worker = TestActorRef(Props[WorkerActor])
-        worker ! self.channel
+        worker ! sender
       case "workDone"      ⇒ replyTo ! "complexReply"
-      case "simpleRequest" ⇒ self.reply("simpleReply")
+      case "simpleRequest" ⇒ sender ! "simpleReply"
     }
   }
 
   class WorkerActor() extends TActor {
     def receiveT = {
-      case "work" ⇒ {
-        self.reply("workDone")
-        self.stop()
-      }
-      case replyTo: UntypedChannel ⇒ {
-        replyTo ! "complexReply"
-      }
+      case "work"              ⇒ sender ! "workDone"; context.stop(self)
+      case replyTo: Promise[_] ⇒ replyTo.asInstanceOf[Promise[Any]].success("complexReply")
+      case replyTo: ActorRef   ⇒ replyTo ! "complexReply"
     }
   }
 
@@ -80,21 +80,19 @@ object TestActorRefSpec {
   }
 
   class Logger extends Actor {
-    import EventHandler._
     var count = 0
     var msg: String = _
     def receive = {
-      case Warning(_, m: String) ⇒ count += 1; msg = m
+      case Warning(_, _, m: String) ⇒ count += 1; msg = m
     }
   }
 
 }
 
-class TestActorRefSpec extends WordSpec with MustMatchers with BeforeAndAfterEach {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class TestActorRefSpec extends AkkaSpec("disp1.type=Dispatcher") with BeforeAndAfterEach with DefaultTimeout {
 
   import TestActorRefSpec._
-
-  EventHandler.start()
 
   override def beforeEach {
     otherthread = null
@@ -111,28 +109,28 @@ class TestActorRefSpec extends WordSpec with MustMatchers with BeforeAndAfterEac
       "used with TestActorRef" in {
         val a = TestActorRef(Props(new Actor {
           val nested = TestActorRef(Props(self ⇒ { case _ ⇒ }))
-          def receive = { case _ ⇒ self reply nested }
+          def receive = { case _ ⇒ sender ! nested }
         }))
         a must not be (null)
-        val nested = (a ? "any").as[ActorRef].get
+        val nested = Await.result((a ? "any").mapTo[ActorRef], timeout.duration)
         nested must not be (null)
         a must not be theSameInstanceAs(nested)
       }
 
       "used with ActorRef" in {
         val a = TestActorRef(Props(new Actor {
-          val nested = Actor.actorOf(Props(self ⇒ { case _ ⇒ }))
-          def receive = { case _ ⇒ self reply nested }
+          val nested = context.actorOf(Props(self ⇒ { case _ ⇒ }))
+          def receive = { case _ ⇒ sender ! nested }
         }))
         a must not be (null)
-        val nested = (a ? "any").as[ActorRef].get
+        val nested = Await.result((a ? "any").mapTo[ActorRef], timeout.duration)
         nested must not be (null)
         a must not be theSameInstanceAs(nested)
       }
 
     }
 
-    "support reply via channel" in {
+    "support reply via sender" in {
       val serverRef = TestActorRef(Props[ReplyActor])
       val clientRef = TestActorRef(Props(new SenderActor(serverRef)))
 
@@ -158,31 +156,37 @@ class TestActorRefSpec extends WordSpec with MustMatchers with BeforeAndAfterEac
     }
 
     "stop when sent a poison pill" in {
-      filterEvents(EventFilter[ActorKilledException]) {
+      EventFilter[ActorKilledException]() intercept {
         val a = TestActorRef(Props[WorkerActor])
-        intercept[ActorKilledException] {
-          (a ? PoisonPill).get
+        val forwarder = system.actorOf(Props(new Actor {
+          context.watch(a)
+          def receive = { case x ⇒ testActor forward x }
+        }))
+        a.!(PoisonPill)(testActor)
+        expectMsgPF(5 seconds) {
+          case Terminated(`a`) ⇒ true
         }
-        a must not be ('running)
-        a must be('shutdown)
+        a.isTerminated must be(true)
         assertThread
       }
     }
 
     "restart when Kill:ed" in {
-      filterEvents(EventFilter[ActorKilledException]) {
+      EventFilter[ActorKilledException]() intercept {
         counter = 2
 
         val boss = TestActorRef(Props(new TActor {
-
           val ref = TestActorRef(Props(new TActor {
             def receiveT = { case _ ⇒ }
             override def preRestart(reason: Throwable, msg: Option[Any]) { counter -= 1 }
             override def postRestart(reason: Throwable) { counter -= 1 }
-          }).withSupervisor(self))
+          }), self, "child")
+
+          override def supervisorStrategy =
+            OneForOneStrategy(maxNrOfRetries = 5, withinTimeRange = 1 second)(List(classOf[ActorKilledException]))
 
           def receiveT = { case "sendKill" ⇒ ref ! Kill }
-        }).withFaultHandler(OneForOnePermanentStrategy(List(classOf[ActorKilledException]), 5, 1000)))
+        }))
 
         boss ! "sendKill"
 
@@ -193,9 +197,10 @@ class TestActorRefSpec extends WordSpec with MustMatchers with BeforeAndAfterEac
 
     "support futures" in {
       val a = TestActorRef[WorkerActor]
-      val f = a ? "work" mapTo manifest[String]
+      val f = a ? "work"
+      // CallingThreadDispatcher means that there is no delay
       f must be('completed)
-      f.get must equal("workDone")
+      Await.result(f, timeout.duration) must equal("workDone")
     }
 
   }
@@ -216,40 +221,23 @@ class TestActorRefSpec extends WordSpec with MustMatchers with BeforeAndAfterEac
 
     "set receiveTimeout to None" in {
       val a = TestActorRef[WorkerActor]
-      a.receiveTimeout must be(None)
+      a.underlyingActor.context.receiveTimeout must be(None)
     }
 
     "set CallingThreadDispatcher" in {
       val a = TestActorRef[WorkerActor]
-      a.dispatcher.getClass must be(classOf[CallingThreadDispatcher])
+      a.underlying.dispatcher.getClass must be(classOf[CallingThreadDispatcher])
     }
 
-    "warn about scheduled supervisor" in {
-      val boss = Actor.actorOf(new Actor { def receive = { case _ ⇒ } })
-      val ref = TestActorRef[WorkerActor]
-
-      val filter = EventFilter.custom(_ ⇒ true)
-      EventHandler.notify(TestEvent.Mute(filter))
-      val log = TestActorRef[Logger]
-      EventHandler.addListener(log)
-      val eventHandlerLevel = EventHandler.level
-      EventHandler.level = EventHandler.WarningLevel
-      boss link ref
-      val la = log.underlyingActor
-      la.count must be(1)
-      la.msg must (include("supervisor") and include("CallingThreadDispatcher"))
-      EventHandler.level = eventHandlerLevel
-      EventHandler.removeListener(log)
-      EventHandler.notify(TestEvent.UnMute(filter))
+    "allow override of dispatcher" in {
+      val a = TestActorRef(Props[WorkerActor].withDispatcher("disp1"))
+      a.underlying.dispatcher.getClass must be(classOf[Dispatcher])
     }
 
-    "proxy apply for the underlying actor" in {
+    "proxy receive for the underlying actor" in {
       val ref = TestActorRef[WorkerActor]
-      intercept[IllegalActorStateException] { ref("work") }
-      val ch = Promise.channel()
-      ref ! ch
-      ch must be('completed)
-      ch.get must be("complexReply")
+      ref.receive("work")
+      ref.isTerminated must be(true)
     }
 
   }

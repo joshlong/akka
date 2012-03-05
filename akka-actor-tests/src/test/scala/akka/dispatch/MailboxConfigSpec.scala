@@ -1,18 +1,17 @@
 package akka.dispatch
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-import org.scalatest.{ BeforeAndAfterAll, BeforeAndAfterEach }
-import org.scalatest.junit.JUnitRunner
-import org.junit.runner.RunWith
-import akka.actor.Actor.{ actorOf }
-import java.util.concurrent.{ TimeUnit, CountDownLatch, BlockingQueue }
-import java.util.{ Queue }
-import akka.util._
-import akka.util.Duration._
-import akka.actor.{ LocalActorRef, Actor, ActorRegistry, NullChannel }
 
-@RunWith(classOf[JUnitRunner])
-abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfterAll with BeforeAndAfterEach {
+import org.scalatest.{ BeforeAndAfterAll, BeforeAndAfterEach }
+import java.util.concurrent.{ TimeUnit, BlockingQueue }
+import java.util.concurrent.ConcurrentLinkedQueue
+import akka.util._
+import akka.util.duration._
+import akka.testkit.AkkaSpec
+import akka.actor.{ ActorRef, ActorContext, Props, LocalActorRef }
+import com.typesafe.config.Config
+import akka.actor.ActorSystem
+
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+abstract class MailboxSpec extends AkkaSpec with BeforeAndAfterAll with BeforeAndAfterEach {
   def name: String
 
   def factory: MailboxType ⇒ MessageQueue
@@ -23,34 +22,30 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
       val q = factory(config)
       ensureInitialMailboxState(config, q)
 
-      implicit val within = Duration(1, TimeUnit.SECONDS)
+      val f = spawn { q.dequeue }
 
-      val f = spawn {
-        q.dequeue
-      }
-
-      f.await.resultOrException must be === Some(null)
+      Await.result(f, 1 second) must be(null)
     }
 
     "create a bounded mailbox with 10 capacity and with push timeout" in {
-      val config = BoundedMailbox(10, Duration(10, TimeUnit.MILLISECONDS))
+      val config = BoundedMailbox(10, 10 milliseconds)
       val q = factory(config)
       ensureInitialMailboxState(config, q)
 
       val exampleMessage = createMessageInvocation("test")
 
-      for (i ← 1 to config.capacity) q.enqueue(exampleMessage)
+      for (i ← 1 to config.capacity) q.enqueue(null, exampleMessage)
 
-      q.size must be === config.capacity
-      q.isEmpty must be === false
+      q.numberOfMessages must be === config.capacity
+      q.hasMessages must be === true
 
       intercept[MessageQueueAppendFailedException] {
-        q.enqueue(exampleMessage)
+        q.enqueue(null, exampleMessage)
       }
 
       q.dequeue must be === exampleMessage
-      q.size must be(config.capacity - 1)
-      q.isEmpty must be === false
+      q.numberOfMessages must be(config.capacity - 1)
+      q.hasMessages must be === true
     }
 
     "dequeue what was enqueued properly for unbounded mailboxes" in {
@@ -58,34 +53,29 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
     }
 
     "dequeue what was enqueued properly for bounded mailboxes" in {
-      testEnqueueDequeue(BoundedMailbox(10000, Duration(-1, TimeUnit.MILLISECONDS)))
+      testEnqueueDequeue(BoundedMailbox(10000, -1 millisecond))
     }
 
     "dequeue what was enqueued properly for bounded mailboxes with pushTimeout" in {
-      testEnqueueDequeue(BoundedMailbox(10000, Duration(100, TimeUnit.MILLISECONDS)))
+      testEnqueueDequeue(BoundedMailbox(10000, 100 milliseconds))
     }
   }
 
   //CANDIDATE FOR TESTKIT
-  def spawn[T <: AnyRef](fun: ⇒ T)(implicit within: Duration): Future[T] = {
-    val result = new DefaultPromise[T](within.length, within.unit)
+  def spawn[T <: AnyRef](fun: ⇒ T): Future[T] = {
+    val result = Promise[T]()
     val t = new Thread(new Runnable {
       def run = try {
-        result.completeWithResult(fun)
+        result.success(fun)
       } catch {
-        case e: Throwable ⇒ result.completeWithException(e)
+        case e: Throwable ⇒ result.failure(e)
       }
     })
     t.start
     result
   }
 
-  def createMessageInvocation(msg: Any): MessageInvocation = {
-    new MessageInvocation(
-      actorOf(new Actor { //Dummy actor
-        def receive = { case _ ⇒ }
-      }).asInstanceOf[LocalActorRef], msg, NullChannel)
-  }
+  def createMessageInvocation(msg: Any): Envelope = Envelope(msg, system.deadLetters)(system)
 
   def ensureInitialMailboxState(config: MailboxType, q: MessageQueue) {
     q must not be null
@@ -97,18 +87,18 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
         }
       case _ ⇒
     }
-    q.size must be === 0
-    q.isEmpty must be === true
+    q.numberOfMessages must be === 0
+    q.hasMessages must be === false
   }
 
   def testEnqueueDequeue(config: MailboxType) {
-    implicit val within = Duration(10, TimeUnit.SECONDS)
+    implicit val within = 10 seconds
     val q = factory(config)
     ensureInitialMailboxState(config, q)
 
-    def createProducer(fromNum: Int, toNum: Int): Future[Vector[MessageInvocation]] = spawn {
+    def createProducer(fromNum: Int, toNum: Int): Future[Vector[Envelope]] = spawn {
       val messages = Vector() ++ (for (i ← fromNum to toNum) yield createMessageInvocation(i))
-      for (i ← messages) q.enqueue(i)
+      for (i ← messages) q.enqueue(null, i)
       messages
     }
 
@@ -117,9 +107,9 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
 
     val producers = for (i ← (1 to totalMessages by step).toList) yield createProducer(i, i + step - 1)
 
-    def createConsumer: Future[Vector[MessageInvocation]] = spawn {
-      var r = Vector[MessageInvocation]()
-      while (producers.exists(_.isCompleted == false) || !q.isEmpty) {
+    def createConsumer: Future[Vector[Envelope]] = spawn {
+      var r = Vector[Envelope]()
+      while (producers.exists(_.isCompleted == false) || q.hasMessages) {
         q.dequeue match {
           case null    ⇒
           case message ⇒ r = r :+ message
@@ -130,8 +120,8 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
 
     val consumers = for (i ← (1 to 4).toList) yield createConsumer
 
-    val ps = producers.map(_.await.resultOrException.get)
-    val cs = consumers.map(_.await.resultOrException.get)
+    val ps = producers.map(Await.result(_, within))
+    val cs = consumers.map(Await.result(_, within))
 
     ps.map(_.size).sum must be === totalMessages //Must have produced 1000 messages
     cs.map(_.size).sum must be === totalMessages //Must have consumed all produced messages
@@ -146,8 +136,8 @@ abstract class MailboxSpec extends WordSpec with MustMatchers with BeforeAndAfte
 class DefaultMailboxSpec extends MailboxSpec {
   lazy val name = "The default mailbox implementation"
   def factory = {
-    case UnboundedMailbox()                    ⇒ new DefaultUnboundedMessageQueue()
-    case BoundedMailbox(capacity, pushTimeOut) ⇒ new DefaultBoundedMessageQueue(capacity, pushTimeOut)
+    case u: UnboundedMailbox ⇒ u.create(None)
+    case b: BoundedMailbox   ⇒ b.create(None)
   }
 }
 
@@ -155,7 +145,37 @@ class PriorityMailboxSpec extends MailboxSpec {
   val comparator = PriorityGenerator(_.##)
   lazy val name = "The priority mailbox implementation"
   def factory = {
-    case UnboundedMailbox()                    ⇒ new UnboundedPriorityMessageQueue(comparator)
-    case BoundedMailbox(capacity, pushTimeOut) ⇒ new BoundedPriorityMessageQueue(capacity, pushTimeOut, comparator)
+    case UnboundedMailbox()                    ⇒ new UnboundedPriorityMailbox(comparator).create(None)
+    case BoundedMailbox(capacity, pushTimeOut) ⇒ new BoundedPriorityMailbox(comparator, capacity, pushTimeOut).create(None)
+  }
+}
+
+object CustomMailboxSpec {
+  val config = """
+    my-dispatcher {
+       mailbox-type = "akka.dispatch.CustomMailboxSpec$MyMailboxType"
+    }
+    """
+
+  class MyMailboxType(settings: ActorSystem.Settings, config: Config) extends MailboxType {
+    override def create(owner: Option[ActorContext]) = owner match {
+      case Some(o) ⇒ new MyMailbox(o)
+      case None    ⇒ throw new Exception("no mailbox owner given")
+    }
+  }
+
+  class MyMailbox(owner: ActorContext) extends QueueBasedMessageQueue with UnboundedMessageQueueSemantics {
+    final val queue = new ConcurrentLinkedQueue[Envelope]()
+  }
+}
+
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class CustomMailboxSpec extends AkkaSpec(CustomMailboxSpec.config) {
+  "Dispatcher configuration" must {
+    "support custom mailboxType" in {
+      val actor = system.actorOf(Props.empty.withDispatcher("my-dispatcher"))
+      val queue = actor.asInstanceOf[LocalActorRef].underlying.mailbox.messageQueue
+      queue.getClass must be(classOf[CustomMailboxSpec.MyMailbox])
+    }
   }
 }

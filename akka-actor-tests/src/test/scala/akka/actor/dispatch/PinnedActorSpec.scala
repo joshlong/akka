@@ -1,77 +1,50 @@
 package akka.actor.dispatch
 
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import org.scalatest.junit.JUnitSuite
-import org.junit.{ Test, Before, After }
 
-import akka.actor.Actor._
-
-import akka.event.EventHandler
-import akka.testkit.TestEvent._
-import akka.testkit.EventFilter
-import akka.dispatch.{ PinnedDispatcher, Dispatchers }
+import akka.testkit._
 import akka.actor.{ Props, Actor }
+import akka.testkit.AkkaSpec
+import org.scalatest.BeforeAndAfterEach
+import akka.dispatch.{ Await, PinnedDispatcher, Dispatchers }
+import akka.pattern.ask
 
 object PinnedActorSpec {
+  val config = """
+    pinned-dispatcher {
+      executor = thread-pool-executor
+      type = PinnedDispatcher
+    }
+    """
+
   class TestActor extends Actor {
     def receive = {
-      case "Hello"   ⇒ self.reply("World")
+      case "Hello"   ⇒ sender ! "World"
       case "Failure" ⇒ throw new RuntimeException("Expected exception; to test fault-tolerance")
     }
   }
 }
 
-class PinnedActorSpec extends JUnitSuite {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class PinnedActorSpec extends AkkaSpec(PinnedActorSpec.config) with BeforeAndAfterEach with DefaultTimeout {
   import PinnedActorSpec._
 
   private val unit = TimeUnit.MILLISECONDS
 
-  @Before
-  def beforeEach {
-    EventHandler.notify(Mute(EventFilter[RuntimeException]("Failure")))
-  }
+  "A PinnedActor" must {
 
-  @After
-  def afterEach {
-    EventHandler.notify(UnMuteAll)
-  }
-
-  @Test
-  def shouldTell {
-    var oneWay = new CountDownLatch(1)
-    val actor = actorOf(Props(self ⇒ { case "OneWay" ⇒ oneWay.countDown() }).withDispatcher(new PinnedDispatcher()))
-    val result = actor ! "OneWay"
-    assert(oneWay.await(1, TimeUnit.SECONDS))
-    actor.stop()
-  }
-
-  @Test
-  def shouldSendReplySync = {
-    val actor = actorOf(Props[TestActor].withDispatcher(new PinnedDispatcher()))
-    val result = (actor.?("Hello", 10000)).as[String]
-    assert("World" === result.get)
-    actor.stop()
-  }
-
-  @Test
-  def shouldSendReplyAsync = {
-    val actor = actorOf(Props[TestActor].withDispatcher(new PinnedDispatcher()))
-    val result = (actor ? "Hello").as[String]
-    assert("World" === result.get)
-    actor.stop()
-  }
-
-  @Test
-  def shouldSendReceiveException = {
-    val actor = actorOf(Props[TestActor].withDispatcher(new PinnedDispatcher()))
-    EventHandler.notify(Mute(EventFilter[RuntimeException]("Expected exception; to test fault-tolerance")))
-    try {
-      (actor ? "Failure").get
-      fail("Should have thrown an exception")
-    } catch {
-      case e ⇒
-        assert("Expected exception; to test fault-tolerance" === e.getMessage())
+    "support tell" in {
+      var oneWay = new CountDownLatch(1)
+      val actor = system.actorOf(Props(self ⇒ { case "OneWay" ⇒ oneWay.countDown() }).withDispatcher("pinned-dispatcher"))
+      val result = actor ! "OneWay"
+      assert(oneWay.await(1, TimeUnit.SECONDS))
+      system.stop(actor)
     }
-    actor.stop()
+
+    "support ask/reply" in {
+      val actor = system.actorOf(Props[TestActor].withDispatcher("pinned-dispatcher"))
+      assert("World" === Await.result(actor ? "Hello", timeout.duration))
+      system.stop(actor)
+    }
   }
 }

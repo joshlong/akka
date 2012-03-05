@@ -1,178 +1,117 @@
+
 .. _serialization-java:
 
-Serialization (Java)
-====================
+#####################
+ Serialization (Java)
+#####################
 
 .. sidebar:: Contents
 
    .. contents:: :local:
 
-Akka serialization module has been documented extensively under the :ref:`serialization-scala` section. In this section we will point out the different APIs that are available in Akka for Java based serialization of ActorRefs. The Scala APIs of ActorSerialization has implicit Format objects that set up the type class based serialization. In the Java API, the Format objects need to be specified explicitly.
+Akka has a built-in Extension for serialization,
+and it is both possible to use the built-in serializers and to write your own.
 
-Serialization of a Stateless Actor
-----------------------------------
+The serialization mechanism is both used by Akka internally to serialize messages,
+and available for ad-hoc serialization of whatever you might need it for.
 
-Step 1: Define the Actor
+Usage
+=====
 
-.. code-block:: scala
+Configuration
+-------------
 
-  import akka.actor.UntypedActor;
+For Akka to know which ``Serializer`` to use for what, you need edit your :ref:`configuration`,
+in the "akka.actor.serializers"-section you bind names to implementations of the ``akka.serialization.Serializer``
+you wish to use, like this:
 
-  public class SerializationTestActor extends UntypedActor {
-      public void onReceive(Object msg) {
-          getContext().tryReply("got it!");
-      }
+.. includecode:: ../scala/code/akka/docs/serialization/SerializationDocSpec.scala#serialize-serializers-config
+
+After you've bound names to different implementations of ``Serializer`` you need to wire which classes
+should be serialized using which ``Serializer``, this is done in the "akka.actor.serialization-bindings"-section:
+
+.. includecode:: ../scala/code/akka/docs/serialization/SerializationDocSpec.scala#serialization-bindings-config
+
+You only need to specify the name of an interface or abstract base class of the
+messages. In case of ambiguity, i.e. the message implements several of the
+configured classes, the most specific configured class will be used, i.e. the
+one of which all other candidates are superclasses. If this condition cannot be
+met, because e.g. ``java.io.Serializable`` and ``MyOwnSerializable`` both apply
+and neither is a subtype of the other, a warning will be issued.
+
+Akka provides serializers for :class:`java.io.Serializable` and `protobuf
+<http://code.google.com/p/protobuf/>`_
+:class:`com.google.protobuf.GeneratedMessage` by default (the latter only if
+depending on the akka-remote module), so normally you don't need to add
+configuration for that; since :class:`com.google.protobuf.GeneratedMessage`
+implements :class:`java.io.Serializable`, protobuf messages will always by
+serialized using the protobuf protocol unless specifically overridden. In order
+to disable a default serializer, map its marker type to “none”::
+
+  akka.actor.serialization-bindings {
+    "java.io.Serializable" = none
   }
 
-Step 2: Define the typeclass instance for the actor
+Verification
+------------
 
-Note how the generated Java classes are accessed using the $class based naming convention of the Scala compiler.
+If you want to verify that your messages are serializable you can enable the following config option:
 
-.. code-block:: scala
+.. includecode:: ../scala/code/akka/docs/serialization/SerializationDocSpec.scala#serialize-messages-config
 
-  import akka.serialization.StatelessActorFormat;
+.. warning::
 
-  class SerializationTestActorFormat implements StatelessActorFormat<SerializationTestActor>  {
-      @Override
-      public SerializationTestActor fromBinary(byte[] bytes, SerializationTestActor act) {
-          return (SerializationTestActor) StatelessActorFormat$class.fromBinary(this, bytes, act);
-      }
+   We only recommend using the config option turned on when you're running tests.
+   It is completely pointless to have it turned on in other scenarios.
 
-      @Override
-      public byte[] toBinary(SerializationTestActor ac) {
-          return StatelessActorFormat$class.toBinary(this, ac);
-      }
-  }
+If you want to verify that your ``Props`` are serializable you can enable the following config option:
 
-Step 3: Serialize and de-serialize
+.. includecode:: ../scala/code/akka/docs/serialization/SerializationDocSpec.scala#serialize-creators-config
 
-The following JUnit snippet first creates an actor using the default constructor. The actor is, as we saw above a stateless one. Then it is serialized and de-serialized to get back the original actor. Being stateless, the de-serialized version behaves in the same way on a message as the original actor.
+.. warning::
 
-.. code-block:: java
+   We only recommend using the config option turned on when you're running tests.
+   It is completely pointless to have it turned on in other scenarios.
 
-  import akka.actor.ActorRef;
-  import akka.actor.ActorTimeoutException;
-  import akka.actor.Actors;
-  import akka.actor.UntypedActor;
-  import akka.serialization.Format;
-  import akka.serialization.StatelessActorFormat;
-  import static akka.serialization.ActorSerialization.*;
+Programmatic
+------------
 
-  @Test public void mustBeAbleToSerializeAfterCreateActorRefFromClass() {
-      ActorRef ref = Actors.actorOf(SerializationTestActor.class);
-      assertNotNull(ref);
-      try {
-          Object result = ref.sendRequestReply("Hello");
-          assertEquals("got it!", result);
-      } catch (ActorTimeoutException ex) {
-          fail("actor should not time out");
-      }
+If you want to programmatically serialize/deserialize using Akka Serialization,
+here's some examples:
 
-      Format<SerializationTestActor> f = new SerializationTestActorFormat();
-      byte[] bytes = toBinaryJ(ref, f, false);
-      ActorRef r = fromBinaryJ(bytes, f);
-      assertNotNull(r);
+.. includecode:: code/akka/docs/serialization/SerializationDocTestBase.java
+   :include: imports,programmatic
 
-      try {
-          Object result = r.sendRequestReply("Hello");
-          assertEquals("got it!", result);
-      } catch (ActorTimeoutException ex) {
-          fail("actor should not time out");
-      }
-      ref.stop();
-      r.stop();
-  }
+For more information, have a look at the ``ScalaDoc`` for ``akka.serialization._``
 
-Serialization of a Stateful Actor
----------------------------------
 
-Let's now have a look at how to serialize an actor that carries a state with it. Here the expectation is that the serialization of the actor will also persist the state information. And after de-serialization we will get back the state with which it was serialized.
+Customization
+=============
 
-Step 1: Define the Actor
+So, lets say that you want to create your own ``Serializer``,
+you saw the ``akka.docs.serialization.MyOwnSerializer`` in the config example above?
 
-.. code-block:: scala
+Creating new Serializers
+------------------------
 
-  import akka.actor.UntypedActor;
+First you need to create a class definition of your ``Serializer``,
+which is done by extending ``akka.serialization.JSerializer``, like this:
 
-  public class MyUntypedActor extends UntypedActor {
-    int count = 0;
+.. includecode:: code/akka/docs/serialization/SerializationDocTestBase.java
+   :include: imports,my-own-serializer
+   :exclude: ...
 
-    public void onReceive(Object msg) {
-      if (msg.equals("hello")) {
-        count = count + 1;
-        getContext().reply("world " + count);
-      } else if (msg instanceof String) {
-        count = count + 1;
-        getContext().reply("hello " + msg + " " + count);
-      } else {
-        throw new IllegalArgumentException("invalid message type");
-      }
-    }
-  }
+Then you only need to fill in the blanks, bind it to a name in your :ref:`configuration` and then
+list which classes that should be serialized using it.
 
-Note the actor has a state in the form of an Integer. And every message that the actor receives, it replies with an addition to the integer member.
+A Word About Java Serialization
+===============================
 
-Step 2: Define the instance of the typeclass
+When using Java serialization without employing the :class:`JavaSerializer` for
+the task, you must make sure to supply a valid :class:`ExtendedActorSystem` in
+the dynamic variable ``JavaSerializer.currentSystem``. This is used when
+reading in the representation of an :class:`ActorRef` for turning the string
+representation into a real reference. :class:`DynamicVariable` is a
+thread-local variable, so be sure to have it set while deserializing anything
+which might contain actor references.
 
-.. code-block:: java
-
-  import akka.actor.UntypedActor;
-  import akka.serialization.Format;
-  import akka.serialization.SerializerFactory;
-
-  class MyUntypedActorFormat implements Format<MyUntypedActor> {
-    @Override
-    public MyUntypedActor fromBinary(byte[] bytes, MyUntypedActor act) {
-      ProtobufProtocol.Counter p =
-        (ProtobufProtocol.Counter) new SerializerFactory().getProtobuf().fromBinary(bytes, ProtobufProtocol.Counter.class);
-      act.count = p.getCount();
-      return act;
-    }
-
-    @Override
-    public byte[] toBinary(MyUntypedActor ac) {
-      return ProtobufProtocol.Counter.newBuilder().setCount(ac.count()).build().toByteArray();
-    }
-  }
-
-Note the usage of Protocol Buffers to serialize the state of the actor. ProtobufProtocol.Counter is something
-you need to define yourself
-
-Step 3: Serialize and de-serialize
-
-.. code-block:: java
-
-  import akka.actor.ActorRef;
-  import akka.actor.ActorTimeoutException;
-  import akka.actor.Actors;
-  import static akka.serialization.ActorSerialization.*;
-
-  @Test public void mustBeAbleToSerializeAStatefulActor() {
-      ActorRef ref = Actors.actorOf(MyUntypedActor.class);
-      assertNotNull(ref);
-      try {
-          Object result = ref.sendRequestReply("hello");
-          assertEquals("world 1", result);
-          result = ref.sendRequestReply("hello");
-  	assertEquals("world 2", result);
-      } catch (ActorTimeoutException ex) {
-          fail("actor should not time out");
-      }
-
-      Format<MyUntypedActor> f = new MyUntypedActorFormat();
-      byte[] bytes = toBinaryJ(ref, f, false);
-      ActorRef r = fromBinaryJ(bytes, f);
-      assertNotNull(r);
-      try {
-          Object result = r.sendRequestReply("hello");
-          assertEquals("world 3", result);
-          result = r.sendRequestReply("hello");
-          assertEquals("world 4", result);
-      } catch (ActorTimeoutException ex) {
-          fail("actor should not time out");
-      }
-      ref.stop();
-      r.stop();
-  }
-
-Note how the de-serialized version starts with the state value with which it was earlier serialized.

@@ -1,154 +1,80 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-
 import akka.testkit._
 
-import Actor._
-
-class HotSwapSpec extends WordSpec with MustMatchers {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class HotSwapSpec extends AkkaSpec with ImplicitSender {
 
   "An Actor" must {
 
-    "be able to hotswap its behavior with HotSwap(..)" in {
-      val barrier = TestBarrier(2)
-      @volatile
-      var _log = ""
-      val a = actorOf(new Actor {
-        def receive = { case _ ⇒ _log += "default" }
-      })
-      a ! HotSwap(self ⇒ {
-        case _ ⇒
-          _log += "swapped"
-          barrier.await
-      })
-      a ! "swapped"
-      barrier.await
-      _log must be("swapped")
-    }
-
     "be able to hotswap its behavior with become(..)" in {
-      val barrier = TestBarrier(2)
-      @volatile
-      var _log = ""
-      val a = actorOf(new Actor {
+      val a = system.actorOf(Props(new Actor {
         def receive = {
-          case "init" ⇒
-            _log += "init"
-            barrier.await
-          case "swap" ⇒ become({
-            case _ ⇒
-              _log += "swapped"
-              barrier.await
-          })
+          case "init" ⇒ sender ! "init"
+          case "swap" ⇒ context.become({ case x: String ⇒ context.sender ! x })
         }
-      })
+      }))
 
       a ! "init"
-      barrier.await
-      _log must be("init")
-
-      barrier.reset
-      _log = ""
+      expectMsg("init")
       a ! "swap"
       a ! "swapped"
-      barrier.await
-      _log must be("swapped")
-    }
-
-    "be able to revert hotswap its behavior with RevertHotSwap(..)" in {
-      val barrier = TestBarrier(2)
-      @volatile
-      var _log = ""
-      val a = actorOf(new Actor {
-        def receive = {
-          case "init" ⇒
-            _log += "init"
-            barrier.await
-        }
-      })
-
-      a ! "init"
-      barrier.await
-      _log must be("init")
-
-      barrier.reset
-      _log = ""
-      a ! HotSwap(self ⇒ {
-        case "swapped" ⇒
-          _log += "swapped"
-          barrier.await
-      })
-
-      a ! "swapped"
-      barrier.await
-      _log must be("swapped")
-
-      barrier.reset
-      _log = ""
-      a ! RevertHotSwap
-
-      a ! "init"
-      barrier.await
-      _log must be("init")
-
-      // try to revert hotswap below the bottom of the stack
-      barrier.reset
-      _log = ""
-      a ! RevertHotSwap
-
-      a ! "init"
-      barrier.await
-      _log must be("init")
+      expectMsg("swapped")
     }
 
     "be able to revert hotswap its behavior with unbecome" in {
-      val barrier = TestBarrier(2)
-      @volatile
-      var _log = ""
-      val a = actorOf(new Actor {
+      val a = system.actorOf(Props(new Actor {
         def receive = {
-          case "init" ⇒
-            _log += "init"
-            barrier.await
+          case "init" ⇒ sender ! "init"
           case "swap" ⇒
-            become({
+            context.become({
               case "swapped" ⇒
-                _log += "swapped"
-                barrier.await
+                sender ! "swapped"
               case "revert" ⇒
-                unbecome()
+                context.unbecome()
             })
-            barrier.await
         }
-      })
+      }))
 
       a ! "init"
-      barrier.await
-      _log must be("init")
-
-      barrier.reset
-      _log = ""
+      expectMsg("init")
       a ! "swap"
-      barrier.await
 
-      barrier.reset
-      _log = ""
       a ! "swapped"
-      barrier.await
-      _log must be("swapped")
+      expectMsg("swapped")
 
-      barrier.reset
-      _log = ""
       a ! "revert"
       a ! "init"
-      barrier.await
-      _log must be("init")
+      expectMsg("init")
+    }
+
+    "revert to initial state on restart" in {
+
+      val a = system.actorOf(Props(new Actor {
+        def receive = {
+          case "state" ⇒ sender ! "0"
+          case "swap" ⇒
+            context.become({
+              case "state"   ⇒ sender ! "1"
+              case "swapped" ⇒ sender ! "swapped"
+              case "crash"   ⇒ throw new Exception("Crash (expected)!")
+            })
+            sender ! "swapped"
+        }
+      }))
+      a ! "state"
+      expectMsg("0")
+      a ! "swap"
+      expectMsg("swapped")
+      a ! "state"
+      expectMsg("1")
+      EventFilter[Exception](message = "Crash (expected)!", occurrences = 1) intercept { a ! "crash" }
+      a ! "state"
+      expectMsg("0")
     }
   }
 }

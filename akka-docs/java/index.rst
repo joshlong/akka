@@ -8,14 +8,18 @@ Java API
 
    untyped-actors
    typed-actors
-   actor-registry
+   logging
+   event-bus
+   scheduler
    futures
-   dataflow
-   stm
-   transactors
-   remote-actors
-   serialization
    fault-tolerance
    dispatchers
    routing
-   guice-integration
+   remoting
+   serialization
+   stm
+   agents
+   transactors
+   fsm
+   extending-akka
+   zeromq

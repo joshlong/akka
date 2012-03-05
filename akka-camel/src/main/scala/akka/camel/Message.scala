@@ -208,7 +208,7 @@ object Message {
 }
 
 /**
- * Positive acknowledgement message (used for application-acknowledged message receipts).
+ * Positive acknowledgement message (used for system-acknowledged message receipts).
  *
  * @author Martin Krasser
  */

@@ -1,78 +1,53 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-
 import akka.testkit._
 import akka.util.duration._
 
-import Actor._
 import java.util.concurrent.atomic.AtomicInteger
+import akka.dispatch.Await
+import java.util.concurrent.TimeoutException
 
-class ReceiveTimeoutSpec extends WordSpec with MustMatchers {
-  import Actor._
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ReceiveTimeoutSpec extends AkkaSpec {
 
   "An actor with receive timeout" must {
 
     "get timeout" in {
       val timeoutLatch = TestLatch()
 
-      val timeoutActor = actorOf(new Actor {
-        self.receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
-      timeoutLatch.await
-      timeoutActor.stop()
-    }
-
-    "get timeout when swapped" in {
-      val timeoutLatch = TestLatch()
-
-      val timeoutActor = actorOf(new Actor {
-        self.receiveTimeout = Some(500L)
-
-        protected def receive = {
-          case ReceiveTimeout ⇒ timeoutLatch.open
-        }
-      })
-
-      timeoutLatch.await
-
-      val swappedLatch = TestLatch()
-
-      timeoutActor ! HotSwap(self ⇒ {
-        case ReceiveTimeout ⇒ swappedLatch.open
-      })
-
-      swappedLatch.await
-      timeoutActor.stop()
+      Await.ready(timeoutLatch, TestLatch.DefaultTimeout)
+      system.stop(timeoutActor)
     }
 
     "reschedule timeout after regular receive" in {
       val timeoutLatch = TestLatch()
       case object Tick
 
-      val timeoutActor = actorOf(new Actor {
-        self.receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case Tick           ⇒ ()
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
       timeoutActor ! Tick
 
-      timeoutLatch.await
-      timeoutActor.stop()
+      Await.ready(timeoutLatch, TestLatch.DefaultTimeout)
+      system.stop(timeoutActor)
     }
 
     "be able to turn off timeout if desired" in {
@@ -80,40 +55,40 @@ class ReceiveTimeoutSpec extends WordSpec with MustMatchers {
       val timeoutLatch = TestLatch()
       case object Tick
 
-      val timeoutActor = actorOf(new Actor {
-        self.receiveTimeout = Some(500L)
+      val timeoutActor = system.actorOf(Props(new Actor {
+        context.setReceiveTimeout(500 milliseconds)
 
         protected def receive = {
           case Tick ⇒ ()
           case ReceiveTimeout ⇒
             count.incrementAndGet
             timeoutLatch.open
-            self.receiveTimeout = None
+            context.resetReceiveTimeout()
         }
-      })
+      }))
 
       timeoutActor ! Tick
 
-      timeoutLatch.await
+      Await.ready(timeoutLatch, TestLatch.DefaultTimeout)
       count.get must be(1)
-      timeoutActor.stop()
+      system.stop(timeoutActor)
     }
 
     "not receive timeout message when not specified" in {
       val timeoutLatch = TestLatch()
 
-      val timeoutActor = actorOf(new Actor {
+      val timeoutActor = system.actorOf(Props(new Actor {
         protected def receive = {
           case ReceiveTimeout ⇒ timeoutLatch.open
         }
-      })
+      }))
 
-      timeoutLatch.awaitTimeout(1 second) // timeout expected
-      timeoutActor.stop()
+      intercept[TimeoutException] { Await.ready(timeoutLatch, 1 second) }
+      system.stop(timeoutActor)
     }
 
     "have ReceiveTimeout eq to Actors ReceiveTimeout" in {
-      akka.actor.Actors.receiveTimeout() must be theSameInstanceAs (ReceiveTimeout)
+      akka.actor.Actors.receiveTimeout must be theSameInstanceAs (ReceiveTimeout)
     }
   }
 }

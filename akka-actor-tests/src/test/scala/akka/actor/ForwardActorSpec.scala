@@ -1,54 +1,54 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-
 import akka.testkit._
 import akka.util.duration._
-
 import Actor._
 import akka.util.Duration
+import akka.dispatch.Await
+import akka.pattern.ask
 
 object ForwardActorSpec {
   val ExpectedMessage = "FOO"
 
-  def createForwardingChain(): ActorRef = {
-    val replier = actorOf(new Actor {
-      def receive = { case x ⇒ self reply x }
-    })
+  def createForwardingChain(system: ActorSystem): ActorRef = {
+    val replier = system.actorOf(Props(new Actor {
+      def receive = { case x ⇒ sender ! x }
+    }))
 
-    def mkforwarder(forwardTo: ActorRef) = actorOf(
+    def mkforwarder(forwardTo: ActorRef) = system.actorOf(Props(
       new Actor {
         def receive = { case x ⇒ forwardTo forward x }
-      })
+      }))
 
     mkforwarder(mkforwarder(mkforwarder(replier)))
   }
 }
 
-class ForwardActorSpec extends WordSpec with MustMatchers {
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class ForwardActorSpec extends AkkaSpec {
   import ForwardActorSpec._
 
   "A Forward Actor" must {
 
-    "forward actor reference when invoking forward on bang" in {
+    "forward actor reference when invoking forward on tell" in {
       val latch = new TestLatch(1)
 
-      val replyTo = actorOf(new Actor { def receive = { case ExpectedMessage ⇒ latch.countDown() } })
+      val replyTo = system.actorOf(Props(new Actor { def receive = { case ExpectedMessage ⇒ testActor ! ExpectedMessage } }))
 
-      val chain = createForwardingChain()
+      val chain = createForwardingChain(system)
 
       chain.tell(ExpectedMessage, replyTo)
-      latch.await(Duration(5, "s")) must be === true
+      expectMsg(5 seconds, ExpectedMessage)
     }
 
-    "forward actor reference when invoking forward on bang bang" in {
-      val chain = createForwardingChain()
-      chain.ask(ExpectedMessage, 5000).get must be === ExpectedMessage
+    "forward actor reference when invoking forward on ask" in {
+      val chain = createForwardingChain(system)
+      chain.ask(ExpectedMessage)(5 seconds) onSuccess { case ExpectedMessage ⇒ testActor ! ExpectedMessage }
+      expectMsg(5 seconds, ExpectedMessage)
     }
   }
 }

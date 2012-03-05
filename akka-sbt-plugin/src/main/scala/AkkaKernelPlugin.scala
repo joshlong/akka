@@ -1,6 +1,8 @@
 /**
- *  Copyright (C) 2011 Typesafe <http://typesafe.com/>
+ *  Copyright (C) 2011-2012 Typesafe <http://typesafe.com/>
  */
+
+package akka.sbt
 
 import sbt._
 import sbt.Keys._
@@ -9,7 +11,6 @@ import sbt.classpath.ClasspathUtilities
 import sbt.Project.Initialize
 import sbt.CommandSupport._
 import java.io.File
-import scala.collection.mutable.{ Set => MutableSet }
 
 object AkkaKernelPlugin extends Plugin {
 
@@ -38,13 +39,13 @@ object AkkaKernelPlugin extends Plugin {
 
   val distNeedsPackageBin = dist <<= dist.dependsOn(packageBin in Compile)
 
-  override lazy val settings =
+  lazy val distSettings: Seq[Setting[_]] =
     inConfig(Dist)(Seq(
-      dist <<= packageBin.identity,
+      dist <<= packageBin,
       packageBin <<= distTask,
       distClean <<= distCleanTask,
-      dependencyClasspath <<= (dependencyClasspath in Runtime).identity,
-      unmanagedResourceDirectories <<= (unmanagedResourceDirectories in Runtime).identity,
+      dependencyClasspath <<= (dependencyClasspath in Runtime),
+      unmanagedResourceDirectories <<= (unmanagedResourceDirectories in Runtime),
       outputDirectory <<= target / "dist",
       configSourceDirs <<= defaultConfigSourceDirs,
       distJvmOptions := "-Xms1024M -Xmx1024M -Xss1M -XX:MaxPermSize=256M -XX:+UseParallelGC",
@@ -52,12 +53,10 @@ object AkkaKernelPlugin extends Plugin {
       libFilter := { f ⇒ true },
       additionalLibs <<= defaultAdditionalLibs,
       distConfig <<= (outputDirectory, configSourceDirs, distJvmOptions, distMainClass, libFilter, additionalLibs) map DistConfig)) ++
-      Seq(
-        dist <<= (dist in Dist).identity, distNeedsPackageBin)
+      Seq(dist <<= (dist in Dist), distNeedsPackageBin)
 
   private def distTask: Initialize[Task[File]] =
-    (distConfig, sourceDirectory, crossTarget, dependencyClasspath, projectDependencies, allDependencies, buildStructure, state) map {
-    (conf, src, tgt, cp, projDeps, allDeps, buildStruct, st) ⇒
+    (distConfig, sourceDirectory, crossTarget, dependencyClasspath, projectDependencies, allDependencies, buildStructure, state) map { (conf, src, tgt, cp, projDeps, allDeps, buildStruct, st) ⇒
 
       if (isKernelProject(allDeps)) {
         val log = logger(st)
@@ -76,7 +75,7 @@ object AkkaKernelPlugin extends Plugin {
 
         copyFiles(libFiles(cp, conf.libFilter), distLibPath)
         copyFiles(conf.additionalLibs, distLibPath)
-        for (subTarget <- subProjectDependencies.map(_.target)) {
+        for (subTarget ← subProjectDependencies.map(_.target)) {
           copyJars(subTarget, distLibPath)
         }
         log.info("Distribution created.")
@@ -95,7 +94,9 @@ object AkkaKernelPlugin extends Plugin {
     }
 
   def isKernelProject(dependencies: Seq[ModuleID]): Boolean = {
-    dependencies.exists(moduleId => moduleId.organization == "se.scalablesolutions.akka" && moduleId.name == "akka-kernel")
+    dependencies.exists { d ⇒
+      (d.organization == "com.typesafe.akka" || d.organization == "se.scalablesolutions.akka") && d.name == "akka-kernel"
+    }
   }
 
   private def defaultConfigSourceDirs = (sourceDirectory, unmanagedResourceDirectories) map { (src, resources) ⇒
@@ -125,19 +126,19 @@ object AkkaKernelPlugin extends Plugin {
       """|#!/bin/sh
     |
     |AKKA_HOME="$(cd "$(cd "$(dirname "$0")"; pwd -P)"/..; pwd)"
-    |AKKA_CLASSPATH="$AKKA_HOME/lib/*:$AKKA_HOME/config"
+    |AKKA_CLASSPATH="$AKKA_HOME/config:$AKKA_HOME/lib/*"
     |JAVA_OPTS="%s"
     |
-    |java $JAVA_OPTS -cp "$AKKA_CLASSPATH" -Dakka.home="$AKKA_HOME" %s
+    |java $JAVA_OPTS -cp "$AKKA_CLASSPATH" -Dakka.home="$AKKA_HOME" %s "$@"
     |""".stripMargin.format(jvmOptions, mainClass)
 
     private def distBatScript =
       """|@echo off
     |set AKKA_HOME=%%~dp0..
-    |set AKKA_CLASSPATH=%%AKKA_HOME%%\lib\*;%%AKKA_HOME%%\config
+    |set AKKA_CLASSPATH=%%AKKA_HOME%%\config;%%AKKA_HOME%%\lib\*
     |set JAVA_OPTS=%s
     |
-    |java %%JAVA_OPTS%% -cp "%%AKKA_CLASSPATH%%" -Dakka.home="%%AKKA_HOME%%" %s
+    |java %%JAVA_OPTS%% -cp "%%AKKA_CLASSPATH%%" -Dakka.home="%%AKKA_HOME%%" %s %%*
     |""".stripMargin.format(jvmOptions, mainClass)
 
     private def setExecutable(target: File, executable: Boolean): Option[String] = {
@@ -178,25 +179,25 @@ object AkkaKernelPlugin extends Plugin {
     val buildUnit = buildStruct.units(buildStruct.root)
     val uri = buildStruct.root
     val allProjects = buildUnit.defined.map {
-      case (id, proj) => (ProjectRef(uri, id) -> proj)
+      case (id, proj) ⇒ (ProjectRef(uri, id) -> proj)
     }
 
     val projDepsNames = projDeps.map(_.name)
     def include(project: ResolvedProject): Boolean = projDepsNames.exists(_ == project.id)
     val subProjects: Seq[SubProjectInfo] = allProjects.collect {
-      case (projRef, project) if include(project) => projectInfo(projRef, project, buildStruct, state, allProjects)
+      case (projRef, project) if include(project) ⇒ projectInfo(projRef, project, buildStruct, state, allProjects)
     }.toList
 
     val allSubProjects = subProjects.map(_.recursiveSubProjects).flatten.toSet
     allSubProjects
-}
+  }
 
   private def projectInfo(projectRef: ProjectRef, project: ResolvedProject, buildStruct: BuildStructure, state: State,
-      allProjects: Map[ProjectRef, ResolvedProject]): SubProjectInfo = {
+                          allProjects: Map[ProjectRef, ResolvedProject]): SubProjectInfo = {
 
-    def optionalSetting[A](key: ScopedSetting[A]) = key in projectRef get buildStruct.data
+    def optionalSetting[A](key: SettingKey[A]) = key in projectRef get buildStruct.data
 
-    def setting[A](key: ScopedSetting[A], errorMessage: => String) = {
+    def setting[A](key: SettingKey[A], errorMessage: ⇒ String) = {
       optionalSetting(key) getOrElse {
         logger(state).error(errorMessage);
         throw new IllegalArgumentException()
@@ -204,18 +205,18 @@ object AkkaKernelPlugin extends Plugin {
     }
 
     def evaluateTask[T](taskKey: sbt.Project.ScopedKey[sbt.Task[T]]) = {
-      EvaluateTask.evaluateTask(buildStruct, taskKey, state, projectRef, false, EvaluateTask.SystemProcessors)
+      EvaluateTask(buildStruct, taskKey, state, projectRef).map(_._2)
     }
 
     val projDeps: Seq[ModuleID] = evaluateTask(Keys.projectDependencies) match {
-      case Some(Value(moduleIds)) => moduleIds
-      case _ => Seq.empty
+      case Some(Value(moduleIds)) ⇒ moduleIds
+      case _                      ⇒ Seq.empty
     }
 
     val projDepsNames = projDeps.map(_.name)
     def include(project: ResolvedProject): Boolean = projDepsNames.exists(_ == project.id)
     val subProjects = allProjects.collect {
-      case (projRef, proj) if include(proj) => projectInfo(projRef, proj, buildStruct, state, allProjects)
+      case (projRef, proj) if include(proj) ⇒ projectInfo(projRef, proj, buildStruct, state, allProjects)
     }.toList
 
     val target = setting(Keys.crossTarget, "Missing crossTarget directory")
@@ -226,8 +227,8 @@ object AkkaKernelPlugin extends Plugin {
 
     def recursiveSubProjects: Set[SubProjectInfo] = {
       val flatSubProjects = for {
-        x <- subProjects
-        y <- x.recursiveSubProjects
+        x ← subProjects
+        y ← x.recursiveSubProjects
       } yield y
 
       flatSubProjects.toSet + this

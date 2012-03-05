@@ -4,235 +4,327 @@
 
 package akka.actor
 
-import org.scalatest.WordSpec
-import org.scalatest.matchers.MustMatchers
-import org.scalatest.BeforeAndAfterEach
-
-import akka.util.ByteString
-import akka.util.cps._
-import akka.dispatch.Future
+import akka.util.{ ByteString, Duration, Deadline }
+import akka.util.duration._
 import scala.util.continuations._
+import akka.testkit._
+import akka.dispatch.{ Await, Future, Promise, ExecutionContext, MessageDispatcher }
+import java.net.{ SocketAddress }
+import akka.pattern.ask
 
 object IOActorSpec {
-  import IO._
 
-  class SimpleEchoServer(host: String, port: Int, ioManager: ActorRef) extends Actor {
+  class SimpleEchoServer(addressPromise: Promise[SocketAddress]) extends Actor {
 
-    override def preStart = {
-      listen(ioManager, host, port)
-    }
+    val server = IOManager(context.system) listen ("localhost", 0)
 
-    def createWorker = Actor.actorOf(Props(new Actor with IO {
-      def receiveIO = {
-        case NewClient(server) ⇒
-          val socket = server.accept()
-          loopC {
-            val bytes = socket.read()
-            socket write bytes
-          }
-      }
-    }).withSupervisor(optionSelf))
+    val state = IO.IterateeRef.Map.sync[IO.Handle]()
 
     def receive = {
-      case msg: NewClient ⇒
-        createWorker forward msg
+
+      case IO.Listening(`server`, address) ⇒
+        addressPromise success address
+
+      case IO.NewClient(`server`) ⇒
+        val socket = server.accept()
+        state(socket) flatMap (_ ⇒ IO repeat (IO.takeAny map socket.write))
+
+      case IO.Read(socket, bytes) ⇒
+        state(socket)(IO Chunk bytes)
+
+      case IO.Closed(socket, cause) ⇒
+        state -= socket
+
     }
 
+    override def postStop {
+      server.close()
+      state.keySet foreach (_.close())
+    }
   }
 
-  class SimpleEchoClient(host: String, port: Int, ioManager: ActorRef) extends Actor with IO {
+  class SimpleEchoClient(address: SocketAddress) extends Actor {
 
-    lazy val socket: SocketHandle = connect(ioManager, host, port, reader)
-    lazy val reader: ActorRef = Actor.actorOf {
-      new Actor with IO {
-        def receiveIO = {
-          case length: Int ⇒
-            val bytes = socket.read(length)
-            self reply bytes
-        }
-      }
-    }
+    val socket = IOManager(context.system) connect (address)
 
-    def receiveIO = {
+    val state = IO.IterateeRef.sync()
+
+    def receive = {
+
       case bytes: ByteString ⇒
+        val source = sender
         socket write bytes
-        reader forward bytes.length
+        state flatMap { _ ⇒
+          IO take bytes.length map (source ! _) recover {
+            case e ⇒ source ! Status.Failure(e)
+          }
+        }
+
+      case IO.Read(`socket`, bytes) ⇒
+        state(IO Chunk bytes)
+
+      case IO.Closed(`socket`, cause) ⇒
+        state(IO EOF cause)
+        throw (cause getOrElse new RuntimeException("Socket closed"))
+
     }
+
+    override def postStop {
+      socket.close()
+      state(IO EOF None)
+    }
+  }
+
+  sealed trait KVCommand {
+    def bytes: ByteString
+  }
+
+  case class KVSet(key: String, value: String) extends KVCommand {
+    val bytes = ByteString("SET " + key + " " + value.length + "\r\n" + value + "\r\n")
+  }
+
+  case class KVGet(key: String) extends KVCommand {
+    val bytes = ByteString("GET " + key + "\r\n")
+  }
+
+  case object KVGetAll extends KVCommand {
+    val bytes = ByteString("GETALL\r\n")
   }
 
   // Basic Redis-style protocol
-  class KVStore(host: String, port: Int, ioManager: ActorRef) extends Actor {
+  class KVStore(addressPromise: Promise[SocketAddress]) extends Actor {
 
-    var kvs: Map[String, ByteString] = Map.empty
+    import context.system
 
-    override def preStart = {
-      listen(ioManager, host, port)
-    }
+    val state = IO.IterateeRef.Map.sync[IO.Handle]()
 
-    def createWorker = Actor.actorOf(Props(new Actor with IO {
-      def receiveIO = {
-        case NewClient(server) ⇒
-          val socket = server.accept()
-          loopC {
-            val cmd = socket.read(ByteString("\r\n")).utf8String
-            val result = matchC(cmd.split(' ')) {
-              case Array("SET", key, length) ⇒
-                val value = socket read length.toInt
-                server.owner ? (('set, key, value)) map ((x: Any) ⇒ ByteString("+OK\r\n"))
-              case Array("GET", key) ⇒
-                server.owner ? (('get, key)) map {
-                  case Some(b: ByteString) ⇒ ByteString("$" + b.length + "\r\n") ++ b
-                  case None                ⇒ ByteString("$-1\r\n")
-                }
-              case Array("GETALL") ⇒
-                server.owner ? 'getall map {
-                  case m: Map[_, _] ⇒
-                    (ByteString("*" + (m.size * 2) + "\r\n") /: m) {
-                      case (result, (k: String, v: ByteString)) ⇒
-                        val kBytes = ByteString(k)
-                        result ++ ByteString("$" + kBytes.length + "\r\n") ++ kBytes ++ ByteString("$" + v.length + "\r\n") ++ v
-                    }
-                }
-            }
-            result recover {
-              case e ⇒ ByteString("-" + e.getClass.toString + "\r\n")
-            } foreach { bytes ⇒
-              socket write bytes
-            }
-          }
-      }
-    }).withSupervisor(self))
+    var kvs: Map[String, String] = Map.empty
+
+    val server = IOManager(context.system) listen ("localhost", 0)
+
+    val EOL = ByteString("\r\n")
 
     def receive = {
-      case msg: NewClient ⇒ createWorker forward msg
-      case ('set, key: String, value: ByteString) ⇒
-        kvs += (key -> value)
-        self tryReply (())
-      case ('get, key: String) ⇒ self tryReply kvs.get(key)
-      case 'getall             ⇒ self tryReply kvs
+
+      case IO.Listening(`server`, address) ⇒
+        addressPromise success address
+
+      case IO.NewClient(`server`) ⇒
+        val socket = server.accept()
+        state(socket) flatMap { _ ⇒
+          IO repeat {
+            IO takeUntil EOL map (_.utf8String split ' ') flatMap {
+
+              case Array("SET", key, length) ⇒
+                for {
+                  value ← IO take length.toInt
+                  _ ← IO takeUntil EOL
+                } yield {
+                  kvs += (key -> value.utf8String)
+                  ByteString("+OK\r\n")
+                }
+
+              case Array("GET", key) ⇒
+                IO Iteratee {
+                  kvs get key map { value ⇒
+                    ByteString("$" + value.length + "\r\n" + value + "\r\n")
+                  } getOrElse ByteString("$-1\r\n")
+                }
+
+              case Array("GETALL") ⇒
+                IO Iteratee {
+                  (ByteString("*" + (kvs.size * 2) + "\r\n") /: kvs) {
+                    case (result, (k, v)) ⇒
+                      val kBytes = ByteString(k)
+                      val vBytes = ByteString(v)
+                      result ++
+                        ByteString("$" + kBytes.length) ++ EOL ++
+                        kBytes ++ EOL ++
+                        ByteString("$" + vBytes.length) ++ EOL ++
+                        vBytes ++ EOL
+                  }
+                }
+
+            } map (socket write)
+          }
+        }
+
+      case IO.Read(socket, bytes) ⇒
+        state(socket)(IO Chunk bytes)
+
+      case IO.Closed(socket, cause) ⇒
+        state -= socket
+
     }
 
+    override def postStop {
+      server.close()
+      state.keySet foreach (_.close())
+    }
   }
 
-  class KVClient(host: String, port: Int, ioManager: ActorRef) extends Actor with IO {
+  class KVClient(address: SocketAddress) extends Actor {
 
-    var socket: SocketHandle = _
+    val socket = IOManager(context.system) connect (address)
 
-    override def preStart: Unit = {
-      socket = connect(ioManager, host, port)
-    }
+    val state = IO.IterateeRef.sync()
 
-    def receiveIO = {
-      case ('set, key: String, value: ByteString) ⇒
-        socket write (ByteString("SET " + key + " " + value.length + "\r\n") ++ value)
-        self tryReply readResult
+    val EOL = ByteString("\r\n")
 
-      case ('get, key: String) ⇒
-        socket write ByteString("GET " + key + "\r\n")
-        self tryReply readResult
-
-      case 'getall ⇒
-        socket write ByteString("GETALL\r\n")
-        self tryReply readResult
-    }
-
-    def readResult = {
-      val resultType = socket.read(1).utf8String
-      resultType match {
-        case "+" ⇒ socket.read(ByteString("\r\n")).utf8String
-        case "-" ⇒ sys error socket.read(ByteString("\r\n")).utf8String
-        case "$" ⇒
-          val length = socket.read(ByteString("\r\n")).utf8String
-          socket.read(length.toInt)
-        case "*" ⇒
-          val count = socket.read(ByteString("\r\n")).utf8String
-          var result: Map[String, ByteString] = Map.empty
-          repeatC(count.toInt / 2) {
-            val k = readBytes
-            val v = readBytes
-            result += (k.utf8String -> v)
+    def receive = {
+      case cmd: KVCommand ⇒
+        val source = sender
+        socket write cmd.bytes
+        state flatMap { _ ⇒
+          readResult map (source !) recover {
+            case e ⇒ source ! Status.Failure(e)
           }
-          result
-        case _ ⇒ sys error "Unexpected response"
+        }
+
+      case IO.Read(`socket`, bytes) ⇒
+        state(IO Chunk bytes)
+
+      case IO.Closed(`socket`, cause) ⇒
+        state(IO EOF cause)
+        throw (cause getOrElse new RuntimeException("Socket closed"))
+
+    }
+
+    override def postStop {
+      socket.close()
+      state(IO EOF None)
+    }
+
+    def readResult: IO.Iteratee[Any] = {
+      IO take 1 map (_.utf8String) flatMap {
+        case "+" ⇒ IO takeUntil EOL map (msg ⇒ msg.utf8String)
+        case "-" ⇒ IO takeUntil EOL flatMap (err ⇒ IO throwErr new RuntimeException(err.utf8String))
+        case "$" ⇒
+          IO takeUntil EOL map (_.utf8String.toInt) flatMap {
+            case -1 ⇒ IO Done None
+            case length ⇒
+              for {
+                value ← IO take length
+                _ ← IO takeUntil EOL
+              } yield Some(value.utf8String)
+          }
+        case "*" ⇒
+          IO takeUntil EOL map (_.utf8String.toInt) flatMap {
+            case -1 ⇒ IO Done None
+            case length ⇒
+              IO.takeList(length)(readResult) flatMap { list ⇒
+                ((Right(Map()): Either[String, Map[String, String]]) /: list.grouped(2)) {
+                  case (Right(m), List(Some(k: String), Some(v: String))) ⇒ Right(m + (k -> v))
+                  case (Right(_), _) ⇒ Left("Unexpected Response")
+                  case (left, _) ⇒ left
+                } fold (msg ⇒ IO throwErr new RuntimeException(msg), IO Done _)
+              }
+          }
+        case _ ⇒ IO throwErr new RuntimeException("Unexpected Response")
+      }
+    }
+  }
+}
+
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
+class IOActorSpec extends AkkaSpec with DefaultTimeout {
+  import IOActorSpec._
+
+  /**
+   * Retries the future until a result is returned or until one of the limits are hit. If no
+   * limits are provided the future will be retried indefinitely until a result is returned.
+   *
+   * @param count number of retries
+   * @param timeout duration to retry within
+   * @param delay duration to wait before retrying
+   * @param filter determines which exceptions should be retried
+   * @return a future containing the result or the last exception before a limit was hit.
+   */
+  def retry[T](count: Option[Int] = None, timeout: Option[Duration] = None, delay: Option[Duration] = Some(100 millis), filter: Option[Throwable ⇒ Boolean] = None)(future: ⇒ Future[T])(implicit executor: ExecutionContext): Future[T] = {
+
+    val promise = Promise[T]()(executor)
+
+    val timer: Option[Deadline] = timeout match {
+      case Some(duration) ⇒ Some(duration fromNow)
+      case None           ⇒ None
+    }
+
+    def check(n: Int, e: Throwable): Boolean =
+      (count.isEmpty || (n < count.get)) && (timer.isEmpty || timer.get.hasTimeLeft()) && (filter.isEmpty || filter.get(e))
+
+    def run(n: Int) {
+      future onComplete {
+        case Left(e) if check(n, e) ⇒
+          if (delay.isDefined) {
+            executor match {
+              case m: MessageDispatcher ⇒ m.prerequisites.scheduler.scheduleOnce(delay.get)(run(n + 1))
+              case _                    ⇒ // Thread.sleep, ignore, or other?
+            }
+          } else run(n + 1)
+        case v ⇒ promise complete v
       }
     }
 
-    def readBytes = {
-      val resultType = socket.read(1).utf8String
-      if (resultType != "$") sys error "Unexpected response"
-      val length = socket.read(ByteString("\r\n")).utf8String
-      socket.read(length.toInt)
-    }
+    run(0)
+
+    promise
   }
-
-}
-
-class IOActorSpec extends WordSpec with MustMatchers with BeforeAndAfterEach {
-  import IOActorSpec._
 
   "an IO Actor" must {
     "run echo server" in {
-      val ioManager = Actor.actorOf(new IOManager(2)) // teeny tiny buffer
-      val server = Actor.actorOf(new SimpleEchoServer("localhost", 8064, ioManager))
-      val client = Actor.actorOf(new SimpleEchoClient("localhost", 8064, ioManager))
-      val f1 = client ? ByteString("Hello World!1")
-      val f2 = client ? ByteString("Hello World!2")
-      val f3 = client ? ByteString("Hello World!3")
-      f1.get must equal(ByteString("Hello World!1"))
-      f2.get must equal(ByteString("Hello World!2"))
-      f3.get must equal(ByteString("Hello World!3"))
-      client.stop
-      server.stop
-      ioManager.stop
+      filterException[java.net.ConnectException] {
+        val addressPromise = Promise[SocketAddress]()
+        val server = system.actorOf(Props(new SimpleEchoServer(addressPromise)))
+        val address = Await.result(addressPromise, TestLatch.DefaultTimeout)
+        val client = system.actorOf(Props(new SimpleEchoClient(address)))
+        val f1 = retry() { client ? ByteString("Hello World!1") }
+        val f2 = retry() { client ? ByteString("Hello World!2") }
+        val f3 = retry() { client ? ByteString("Hello World!3") }
+        Await.result(f1, TestLatch.DefaultTimeout) must equal(ByteString("Hello World!1"))
+        Await.result(f2, TestLatch.DefaultTimeout) must equal(ByteString("Hello World!2"))
+        Await.result(f3, TestLatch.DefaultTimeout) must equal(ByteString("Hello World!3"))
+        system.stop(client)
+        system.stop(server)
+      }
     }
 
     "run echo server under high load" in {
-      val ioManager = Actor.actorOf(new IOManager())
-      val server = Actor.actorOf(new SimpleEchoServer("localhost", 8065, ioManager))
-      val client = Actor.actorOf(new SimpleEchoClient("localhost", 8065, ioManager))
-      val list = List.range(0, 1000)
-      val f = Future.traverse(list)(i ⇒ client ? ByteString(i.toString))
-      assert(f.get.size === 1000)
-      client.stop
-      server.stop
-      ioManager.stop
-    }
-
-    "run echo server under high load with small buffer" in {
-      val ioManager = Actor.actorOf(new IOManager(2))
-      val server = Actor.actorOf(new SimpleEchoServer("localhost", 8066, ioManager))
-      val client = Actor.actorOf(new SimpleEchoClient("localhost", 8066, ioManager))
-      val list = List.range(0, 1000)
-      val f = Future.traverse(list)(i ⇒ client ? ByteString(i.toString))
-      assert(f.get.size === 1000)
-      client.stop
-      server.stop
-      ioManager.stop
+      filterException[java.net.ConnectException] {
+        val addressPromise = Promise[SocketAddress]()
+        val server = system.actorOf(Props(new SimpleEchoServer(addressPromise)))
+        val address = Await.result(addressPromise, TestLatch.DefaultTimeout)
+        val client = system.actorOf(Props(new SimpleEchoClient(address)))
+        val list = List.range(0, 100)
+        val f = Future.traverse(list)(i ⇒ retry() { client ? ByteString(i.toString) })
+        assert(Await.result(f, TestLatch.DefaultTimeout).size === 100)
+        system.stop(client)
+        system.stop(server)
+      }
     }
 
     "run key-value store" in {
-      val ioManager = Actor.actorOf(new IOManager(2)) // teeny tiny buffer
-      val server = Actor.actorOf(new KVStore("localhost", 8067, ioManager))
-      val client1 = Actor.actorOf(new KVClient("localhost", 8067, ioManager))
-      val client2 = Actor.actorOf(new KVClient("localhost", 8067, ioManager))
-      val f1 = client1 ? (('set, "hello", ByteString("World")))
-      val f2 = client1 ? (('set, "test", ByteString("No one will read me")))
-      val f3 = client1 ? (('get, "hello"))
-      f2.await
-      val f4 = client2 ? (('set, "test", ByteString("I'm a test!")))
-      f4.await
-      val f5 = client1 ? (('get, "test"))
-      val f6 = client2 ? 'getall
-      f1.get must equal("OK")
-      f2.get must equal("OK")
-      f3.get must equal(ByteString("World"))
-      f4.get must equal("OK")
-      f5.get must equal(ByteString("I'm a test!"))
-      f6.get must equal(Map("hello" -> ByteString("World"), "test" -> ByteString("I'm a test!")))
-      client1.stop
-      client2.stop
-      server.stop
-      ioManager.stop
+      filterException[java.net.ConnectException] {
+        val addressPromise = Promise[SocketAddress]()
+        val server = system.actorOf(Props(new KVStore(addressPromise)))
+        val address = Await.result(addressPromise, TestLatch.DefaultTimeout)
+        val client1 = system.actorOf(Props(new KVClient(address)))
+        val client2 = system.actorOf(Props(new KVClient(address)))
+        val f1 = retry() { client1 ? KVSet("hello", "World") }
+        val f2 = retry() { client1 ? KVSet("test", "No one will read me") }
+        val f3 = f1 flatMap { _ ⇒ retry() { client1 ? KVGet("hello") } }
+        val f4 = f2 flatMap { _ ⇒ retry() { client2 ? KVSet("test", "I'm a test!") } }
+        val f5 = f4 flatMap { _ ⇒ retry() { client1 ? KVGet("test") } }
+        val f6 = Future.sequence(List(f3, f5)) flatMap { _ ⇒ retry() { client2 ? KVGetAll } }
+        Await.result(f1, TestLatch.DefaultTimeout) must equal("OK")
+        Await.result(f2, TestLatch.DefaultTimeout) must equal("OK")
+        Await.result(f3, TestLatch.DefaultTimeout) must equal(Some("World"))
+        Await.result(f4, TestLatch.DefaultTimeout) must equal("OK")
+        Await.result(f5, TestLatch.DefaultTimeout) must equal(Some("I'm a test!"))
+        Await.result(f6, TestLatch.DefaultTimeout) must equal(Map("hello" -> "World", "test" -> "I'm a test!"))
+        system.stop(client1)
+        system.stop(client2)
+        system.stop(server)
+      }
     }
   }
 
