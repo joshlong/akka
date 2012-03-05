@@ -2,30 +2,50 @@ package akka.dispatch
 
 import akka.actor.{ Props, LocalActorRef, Actor }
 import akka.testkit.AkkaSpec
-import akka.util.Duration
+import akka.pattern.ask
+import akka.util.duration._
 import akka.testkit.DefaultTimeout
+import com.typesafe.config.Config
+import akka.actor.ActorSystem
+
+object PriorityDispatcherSpec {
+  val config = """
+    unbounded-prio-dispatcher {
+      mailbox-type = "akka.dispatch.PriorityDispatcherSpec$Unbounded"
+    }
+    bounded-prio-dispatcher {
+      mailbox-type = "akka.dispatch.PriorityDispatcherSpec$Bounded"
+    }
+    """
+
+  class Unbounded(settings: ActorSystem.Settings, config: Config) extends UnboundedPriorityMailbox(PriorityGenerator({
+    case i: Int  ⇒ i //Reverse order
+    case 'Result ⇒ Int.MaxValue
+  }: Any ⇒ Int))
+
+  class Bounded(settings: ActorSystem.Settings, config: Config) extends BoundedPriorityMailbox(PriorityGenerator({
+    case i: Int  ⇒ i //Reverse order
+    case 'Result ⇒ Int.MaxValue
+  }: Any ⇒ Int), 1000, 10 seconds)
+
+}
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class PriorityDispatcherSpec extends AkkaSpec with DefaultTimeout {
+class PriorityDispatcherSpec extends AkkaSpec(PriorityDispatcherSpec.config) with DefaultTimeout {
 
   "A PriorityDispatcher" must {
     "Order it's messages according to the specified comparator using an unbounded mailbox" in {
-      testOrdering(UnboundedPriorityMailbox(PriorityGenerator({
-        case i: Int  ⇒ i //Reverse order
-        case 'Result ⇒ Int.MaxValue
-      }: Any ⇒ Int)))
+      val dispatcherKey = "unbounded-prio-dispatcher"
+      testOrdering(dispatcherKey)
     }
 
     "Order it's messages according to the specified comparator using a bounded mailbox" in {
-      testOrdering(BoundedPriorityMailbox(PriorityGenerator({
-        case i: Int  ⇒ i //Reverse order
-        case 'Result ⇒ Int.MaxValue
-      }: Any ⇒ Int), 1000, system.settings.MailboxPushTimeout))
+      val dispatcherKey = "bounded-prio-dispatcher"
+      testOrdering(dispatcherKey)
     }
   }
 
-  def testOrdering(mboxType: MailboxType) {
-    val dispatcher = system.dispatcherFactory.newDispatcher("Test", 1, Duration.Zero, mboxType).build
+  def testOrdering(dispatcherKey: String) {
 
     val actor = system.actorOf(Props(new Actor {
       var acc: List[Int] = Nil
@@ -34,7 +54,7 @@ class PriorityDispatcherSpec extends AkkaSpec with DefaultTimeout {
         case i: Int  ⇒ acc = i :: acc
         case 'Result ⇒ sender.tell(acc)
       }
-    }).withDispatcher(dispatcher)).asInstanceOf[LocalActorRef]
+    }).withDispatcher(dispatcherKey)).asInstanceOf[LocalActorRef]
 
     actor.suspend //Make sure the actor isn't treating any messages, let it buffer the incoming messages
 

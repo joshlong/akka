@@ -1,3 +1,5 @@
+.. _jmm:
+
 Akka and the Java Memory Model
 ================================
 
@@ -42,6 +44,18 @@ To prevent visibility and reordering problems on actors, Akka guarantees the fol
 *  **The actor subsequent processing rule:** processing of one message happens before processing of the next message by the same actor.
 
 Both rules only apply for the same actor instance and are not valid if different actors are used.
+
+Futures and the Java Memory Model
+---------------------------------
+
+The completion of a Future "happens before" the invocation of any callbacks registered to it are executed.
+
+We recommend not to close over non-final fields (final in Java and val in Scala), and if you *do* choose to close over
+non-final fields, they must be marked *volatile* in order for the current value of the field to be visible to the callback.
+
+If you close over a reference, you must also ensure that the instance that is referred to is thread safe.
+We highly recommend staying away from objects that use locking, since it can introduce performance problems and in the worst case, deadlocks.
+Such are the perils of synchronized.
 
 STM and the Java Memory Model
 -----------------------------

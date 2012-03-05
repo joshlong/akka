@@ -1,25 +1,19 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.event
 
 import akka.actor._
 import akka.AkkaException
 import akka.actor.ActorSystem.Settings
-import akka.util.ReflectiveAccess
 import akka.config.ConfigurationException
 import akka.util.ReentrantGuard
 import akka.util.duration._
 import akka.util.Timeout
 import java.util.concurrent.atomic.AtomicInteger
-import akka.actor.ActorRefProvider
 import scala.util.control.NoStackTrace
 import java.util.concurrent.TimeoutException
 import akka.dispatch.Await
-
-object LoggingBus {
-  implicit def fromActorSystem(system: ActorSystem): LoggingBus = system.eventStream
-}
 
 /**
  * This trait brings log level handling to the EventStream: it reads the log
@@ -55,7 +49,7 @@ trait LoggingBus extends ActorEventBus {
    * will not participate in the automatic management of log level
    * subscriptions!
    */
-  def logLevel_=(level: LogLevel): Unit = guard.withGuard {
+  def setLogLevel(level: LogLevel): Unit = guard.withGuard {
     for {
       l ← AllLogLevels
       // subscribe if previously ignored and now requested
@@ -71,9 +65,12 @@ trait LoggingBus extends ActorEventBus {
     _logLevel = level
   }
 
+  /**
+   * Internal Akka use only
+   */
   private[akka] def startStdoutLogger(config: Settings) {
     val level = levelFor(config.StdoutLogLevel) getOrElse {
-      StandardOutLogger.print(Error(new EventHandlerException, simpleName(this), "unknown akka.stdout-loglevel " + config.StdoutLogLevel))
+      StandardOutLogger.print(Error(new EventHandlerException, simpleName(this), this.getClass, "unknown akka.stdout-loglevel " + config.StdoutLogLevel))
       ErrorLevel
     }
     AllLogLevels filter (level >= _) foreach (l ⇒ subscribe(StandardOutLogger, classFor(l)))
@@ -81,12 +78,16 @@ trait LoggingBus extends ActorEventBus {
       loggers = Seq(StandardOutLogger)
       _logLevel = level
     }
-    publish(Debug(simpleName(this), "StandardOutLogger started"))
+    publish(Debug(simpleName(this), this.getClass, "StandardOutLogger started"))
   }
 
+  /**
+   * Internal Akka use only
+   */
   private[akka] def startDefaultLoggers(system: ActorSystemImpl) {
+    val logName = simpleName(this) + "(" + system + ")"
     val level = levelFor(system.settings.LogLevel) getOrElse {
-      StandardOutLogger.print(Error(new EventHandlerException, simpleName(this), "unknown akka.stdout-loglevel " + system.settings.LogLevel))
+      StandardOutLogger.print(Error(new EventHandlerException, logName, this.getClass, "unknown akka.stdout-loglevel " + system.settings.LogLevel))
       ErrorLevel
     }
     try {
@@ -99,8 +100,8 @@ trait LoggingBus extends ActorEventBus {
         if loggerName != StandardOutLoggerName
       } yield {
         try {
-          ReflectiveAccess.getClassFor[Actor](loggerName) match {
-            case Right(actorClass) ⇒ addLogger(system, actorClass, level)
+          system.dynamicAccess.getClassFor[Actor](loggerName) match {
+            case Right(actorClass) ⇒ addLogger(system, actorClass, level, logName)
             case Left(exception)   ⇒ throw exception
           }
         } catch {
@@ -114,7 +115,7 @@ trait LoggingBus extends ActorEventBus {
         loggers = myloggers
         _logLevel = level
       }
-      publish(Debug(simpleName(this), "Default Loggers started"))
+      publish(Debug(logName, this.getClass, "Default Loggers started"))
       if (!(defaultLoggers contains StandardOutLoggerName)) {
         unsubscribe(StandardOutLogger)
       }
@@ -126,11 +127,14 @@ trait LoggingBus extends ActorEventBus {
     }
   }
 
+  /**
+   * Internal Akka use only
+   */
   private[akka] def stopDefaultLoggers() {
     val level = _logLevel // volatile access before reading loggers
     if (!(loggers contains StandardOutLogger)) {
       AllLogLevels filter (level >= _) foreach (l ⇒ subscribe(StandardOutLogger, classFor(l)))
-      publish(Debug(simpleName(this), "shutting down: StandardOutLogger started"))
+      publish(Debug(simpleName(this), this.getClass, "shutting down: StandardOutLogger started"))
     }
     for {
       logger ← loggers
@@ -143,33 +147,106 @@ trait LoggingBus extends ActorEventBus {
         case _                     ⇒
       }
     }
-    publish(Debug(simpleName(this), "all default loggers stopped"))
+    publish(Debug(simpleName(this), this.getClass, "all default loggers stopped"))
   }
 
-  private def addLogger(system: ActorSystemImpl, clazz: Class[_ <: Actor], level: LogLevel): ActorRef = {
+  private def addLogger(system: ActorSystemImpl, clazz: Class[_ <: Actor], level: LogLevel, logName: String): ActorRef = {
     val name = "log" + Extension(system).id() + "-" + simpleName(clazz)
     val actor = system.systemActorOf(Props(clazz), name)
     implicit val timeout = Timeout(3 seconds)
+    import akka.pattern.ask
     val response = try Await.result(actor ? InitializeLogger(this), timeout.duration) catch {
       case _: TimeoutException ⇒
-        publish(Warning(simpleName(this), "Logger " + name + " did not respond within " + timeout + " to InitializeLogger(bus)"))
+        publish(Warning(logName, this.getClass, "Logger " + name + " did not respond within " + timeout + " to InitializeLogger(bus)"))
     }
     if (response != LoggerInitialized)
       throw new LoggerInitializationException("Logger " + name + " did not respond with LoggerInitialized, sent instead " + response)
     AllLogLevels filter (level >= _) foreach (l ⇒ subscribe(actor, classFor(l)))
-    publish(Debug(simpleName(this), "logger " + name + " started"))
+    publish(Debug(logName, this.getClass, "logger " + name + " started"))
     actor
   }
 
 }
 
+/**
+ * This trait defines the interface to be provided by a “log source formatting
+ * rule” as used by [[akka.event.Logging]]’s `apply`/`create` method.
+ *
+ * See the companion object for default implementations.
+ *
+ * Example:
+ * {{{
+ * trait MyType { // as an example
+ *   def name: String
+ * }
+ *
+ * implicit val myLogSourceType: LogSource[MyType] = new LogSource {
+ *   def genString(a: MyType) = a.name
+ * }
+ *
+ * class MyClass extends MyType {
+ *   val log = Logging(eventStream, this) // will use "hallo" as logSource
+ *   def name = "hallo"
+ * }
+ * }}}
+ *
+ * The second variant is used for including the actor system’s address:
+ * {{{
+ * trait MyType { // as an example
+ *   def name: String
+ * }
+ *
+ * implicit val myLogSourceType: LogSource[MyType] = new LogSource {
+ *   def genString(a: MyType) = a.name
+ *   def genString(a: MyType, s: ActorSystem) = a.name + "," + s
+ * }
+ *
+ * class MyClass extends MyType {
+ *   val sys = ActorSyste("sys")
+ *   val log = Logging(sys, this) // will use "hallo,akka://sys" as logSource
+ *   def name = "hallo"
+ * }
+ * }}}
+ *
+ * The default implementation of the second variant will just call the first.
+ */
 trait LogSource[-T] {
   def genString(t: T): String
+  def genString(t: T, system: ActorSystem): String = genString(t)
+  def getClazz(t: T): Class[_] = t.getClass
 }
 
+/**
+ * This is a “marker” class which is inserted as originator class into
+ * [[akka.event.LogEvent]] when the string representation was supplied
+ * directly.
+ */
+class DummyClassForStringSources
+
+/**
+ * This object holds predefined formatting rules for log sources.
+ *
+ * In case an [[akka.actor.ActorSystem]] is provided, the following apply:
+ * <ul>
+ * <li>[[akka.actor.Actor]] and [[akka.actor.ActorRef]] will be represented by their absolute physical path</li>
+ * <li>providing a `String` as source will append "(<system address>)" and use the result</li>
+ * <li>providing a `Class` will extract its simple name, append "(<system address>)" and use the result</li>
+ * <li>anything else gives compile error unless implicit [[akka.event.LogSource]] is in scope for it</li>
+ * </ul>
+ *
+ * In case a [[akka.event.LoggingBus]] is provided, the following apply:
+ * <ul>
+ * <li>[[akka.actor.Actor]] and [[akka.actor.ActorRef]] will be represented by their absolute physical path</li>
+ * <li>providing a `String` as source will be used as is</li>
+ * <li>providing a `Class` will extract its simple name</li>
+ * <li>anything else gives compile error unless implicit [[akka.event.LogSource]] is in scope for it</li>
+ * </ul>
+ */
 object LogSource {
   implicit val fromString: LogSource[String] = new LogSource[String] {
     def genString(s: String) = s
+    override def genString(s: String, system: ActorSystem) = s + "(" + system + ")"
+    override def getClazz(s: String) = classOf[DummyClassForStringSources]
   }
 
   implicit val fromActor: LogSource[Actor] = new LogSource[Actor] {
@@ -183,18 +260,55 @@ object LogSource {
   // this one unfortunately does not work as implicit, because existential types have some weird behavior
   val fromClass: LogSource[Class[_]] = new LogSource[Class[_]] {
     def genString(c: Class[_]) = simpleName(c)
+    override def genString(c: Class[_], system: ActorSystem) = simpleName(c) + "(" + system + ")"
+    override def getClazz(c: Class[_]) = c
   }
   implicit def fromAnyClass[T]: LogSource[Class[T]] = fromClass.asInstanceOf[LogSource[Class[T]]]
 
-  def apply[T: LogSource](o: T) = implicitly[LogSource[T]].genString(o)
+  /**
+   * Convenience converter access: given an implicit `LogSource`, generate the
+   * string representation and originating class.
+   */
+  def apply[T: LogSource](o: T): (String, Class[_]) = {
+    val ls = implicitly[LogSource[T]]
+    (ls.genString(o), ls.getClazz(o))
+  }
 
-  def fromAnyRef(o: AnyRef): String =
+  /**
+   * Convenience converter access: given an implicit `LogSource` and
+   * [[akka.actor.ActorSystem]], generate the string representation and
+   * originating class.
+   */
+  def apply[T: LogSource](o: T, system: ActorSystem): (String, Class[_]) = {
+    val ls = implicitly[LogSource[T]]
+    (ls.genString(o, system), ls.getClazz(o))
+  }
+
+  /**
+   * construct string representation for any object according to
+   * rules above with fallback to its `Class`’s simple name.
+   */
+  def fromAnyRef(o: AnyRef): (String, Class[_]) =
     o match {
-      case c: Class[_] ⇒ fromClass.genString(c)
-      case a: Actor    ⇒ fromActor.genString(a)
-      case a: ActorRef ⇒ fromActorRef.genString(a)
-      case s: String   ⇒ s
-      case x           ⇒ simpleName(x)
+      case c: Class[_] ⇒ apply(c)
+      case a: Actor    ⇒ apply(a)
+      case a: ActorRef ⇒ apply(a)
+      case s: String   ⇒ apply(s)
+      case x           ⇒ (simpleName(x), x.getClass)
+    }
+
+  /**
+   * construct string representation for any object according to
+   * rules above (including the actor system’s address) with fallback to its
+   * `Class`’s simple name.
+   */
+  def fromAnyRef(o: AnyRef, system: ActorSystem): (String, Class[_]) =
+    o match {
+      case c: Class[_] ⇒ apply(c)
+      case a: Actor    ⇒ apply(a)
+      case a: ActorRef ⇒ apply(a)
+      case s: String   ⇒ apply(s)
+      case x           ⇒ (simpleName(x) + "(" + system + ")", x.getClass)
     }
 }
 
@@ -209,6 +323,11 @@ object LogSource {
  * ...
  * log.info("hello world!")
  * </code></pre>
+ *
+ * The source object is used in two fashions: its `Class[_]` will be part of
+ * all log events produced by this logger, plus a string representation is
+ * generated which may contain per-instance information, see `apply` or `create`
+ * below.
  *
  * Loggers are attached to the level-specific channels <code>Error</code>,
  * <code>Warning</code>, <code>Info</code> and <code>Debug</code> as
@@ -230,7 +349,7 @@ object Logging {
 
   object Extension extends ExtensionKey[LogExt]
 
-  class LogExt(system: ActorSystemImpl) extends Extension {
+  class LogExt(system: ExtendedActorSystem) extends Extension {
     private val loggerId = new AtomicInteger
     def id() = loggerId.incrementAndGet()
   }
@@ -252,6 +371,11 @@ object Logging {
   final val InfoLevel = 3.asInstanceOf[Int with LogLevelType]
   final val DebugLevel = 4.asInstanceOf[Int with LogLevelType]
 
+  /**
+   * Returns the LogLevel associated with the given string,
+   * valid inputs are upper or lowercase (not mixed) versions of:
+   * "error", "warning", "info" and "debug"
+   */
   def levelFor(s: String): Option[LogLevel] = s match {
     case "ERROR" | "error"     ⇒ Some(ErrorLevel)
     case "WARNING" | "warning" ⇒ Some(WarningLevel)
@@ -260,7 +384,11 @@ object Logging {
     case unknown               ⇒ None
   }
 
-  def levelFor(eventClass: Class[_ <: LogEvent]) = {
+  /**
+   * Returns the LogLevel associated with the given event class.
+   * Defaults to DebugLevel.
+   */
+  def levelFor(eventClass: Class[_ <: LogEvent]): LogLevel = {
     if (classOf[Error].isAssignableFrom(eventClass)) ErrorLevel
     else if (classOf[Warning].isAssignableFrom(eventClass)) WarningLevel
     else if (classOf[Info].isAssignableFrom(eventClass)) InfoLevel
@@ -268,6 +396,9 @@ object Logging {
     else DebugLevel
   }
 
+  /**
+   * Returns the event class associated with the given LogLevel
+   */
   def classFor(level: LogLevel): Class[_ <: LogEvent] = level match {
     case ErrorLevel   ⇒ classOf[Error]
     case WarningLevel ⇒ classOf[Warning]
@@ -285,42 +416,80 @@ object Logging {
   val debugFormat = "[DEBUG] [%s] [%s] [%s] %s".intern
 
   /**
-   * Obtain LoggingAdapter for the given event stream (system) and source object.
-   * Note that there is an implicit conversion from [[akka.actor.ActorSystem]]
-   * to [[akka.event.LoggingBus]].
+   * Obtain LoggingAdapter for the given actor system and source object. This
+   * will use the system’s event stream and include the system’s address in the
+   * log source string.
    *
-   * The source is used to identify the source of this logging channel and must have
-   * a corresponding LogSource[T] instance in scope; by default these are
-   * provided for Class[_], Actor, ActorRef and String types. The source
-   * object is translated to a String according to the following rules:
-   * <ul>
-   * <li>if it is an Actor or ActorRef, its path is used</li>
-   * <li>in case of a String it is used as is</li>
-   * <li>in case of a class an approximation of its simpleName
-   * <li>and in all other cases the simpleName of its class</li>
-   * </ul>
+   * <b>Do not use this if you want to supply a log category string (like
+   * “com.example.app.whatever”) unaltered,</b> supply `system.eventStream` in this
+   * case or use
+   *
+   * {{{
+   * Logging(system, this.getClass)
+   * }}}
+   *
+   * The source is used to identify the source of this logging channel and
+   * must have a corresponding implicit LogSource[T] instance in scope; by
+   * default these are provided for Class[_], Actor, ActorRef and String types.
+   * See the companion object of [[akka.event.LogSource]] for details.
+   *
+   * You can add your own rules quite easily, see [[akka.event.LogSource]].
    */
-  def apply[T: LogSource](eventStream: LoggingBus, logSource: T): LoggingAdapter =
-    new BusLogging(eventStream, implicitly[LogSource[T]].genString(logSource))
+  def apply[T: LogSource](system: ActorSystem, logSource: T): LoggingAdapter = {
+    val (str, clazz) = LogSource(logSource, system)
+    new BusLogging(system.eventStream, str, clazz)
+  }
 
   /**
-   * Java API: Obtain LoggingAdapter for the given system and source object. The
-   * source object is used to identify the source of this logging channel. The source
-   * object is translated to a String according to the following rules:
-   * <ul>
-   * <li>if it is an Actor or ActorRef, its path is used</li>
-   * <li>in case of a String it is used as is</li>
-   * <li>in case of a class an approximation of its simpleName
-   * <li>and in all other cases the simpleName of its class</li>
-   * </ul>
+   * Obtain LoggingAdapter for the given logging bus and source object.
+   *
+   * The source is used to identify the source of this logging channel and
+   * must have a corresponding implicit LogSource[T] instance in scope; by
+   * default these are provided for Class[_], Actor, ActorRef and String types.
+   * See the companion object of [[akka.event.LogSource]] for details.
+   *
+   * You can add your own rules quite easily, see [[akka.event.LogSource]].
    */
-  def getLogger(system: ActorSystem, logSource: AnyRef): LoggingAdapter = apply(system.eventStream, LogSource.fromAnyRef(logSource))
+  def apply[T: LogSource](bus: LoggingBus, logSource: T): LoggingAdapter = {
+    val (str, clazz) = LogSource(logSource)
+    new BusLogging(bus, str, clazz)
+  }
 
   /**
-   * Java API: Obtain LoggingAdapter for the given event bus and source object. The
-   * source object is used to identify the source of this logging channel.
+   * Obtain LoggingAdapter for the given actor system and source object. This
+   * will use the system’s event stream and include the system’s address in the
+   * log source string.
+   *
+   * <b>Do not use this if you want to supply a log category string (like
+   * “com.example.app.whatever”) unaltered,</b> supply `system.eventStream` in this
+   * case or use
+   *
+   * {{{
+   * Logging.getLogger(system, this.getClass());
+   * }}}
+   *
+   * The source is used to identify the source of this logging channel and
+   * must have a corresponding implicit LogSource[T] instance in scope; by
+   * default these are provided for Class[_], Actor, ActorRef and String types.
+   * See the companion object of [[akka.event.LogSource]] for details.
    */
-  def getLogger(bus: LoggingBus, logSource: AnyRef): LoggingAdapter = apply(bus, LogSource.fromAnyRef(logSource))
+  def getLogger(system: ActorSystem, logSource: AnyRef): LoggingAdapter = {
+    val (str, clazz) = LogSource.fromAnyRef(logSource, system)
+    new BusLogging(system.eventStream, str, clazz)
+  }
+
+  /**
+   * Obtain LoggingAdapter for the given logging bus and source object.
+   *
+   * The source is used to identify the source of this logging channel and
+   * must have a corresponding implicit LogSource[T] instance in scope; by
+   * default these are provided for Class[_], Actor, ActorRef and String types.
+   * See the companion object of [[akka.event.LogSource]] for details.
+   */
+  def getLogger(bus: LoggingBus, logSource: AnyRef): LoggingAdapter = {
+    val (str, clazz) = LogSource.fromAnyRef(logSource)
+    new BusLogging(bus, str, clazz)
+  }
 
   /**
    * Artificial exception injected into Error events if no Throwable is
@@ -328,32 +497,80 @@ object Logging {
    */
   class EventHandlerException extends AkkaException
 
-  sealed trait LogEvent {
-    @transient
-    val thread: Thread = Thread.currentThread
-    def level: LogLevel
+  /**
+   * Exception that wraps a LogEvent.
+   */
+  class LogEventException(val event: LogEvent, cause: Throwable) extends NoStackTrace {
+    override def getMessage: String = event.toString
+    override def getCause: Throwable = cause
   }
 
-  case class Error(cause: Throwable, logSource: String, message: Any = "") extends LogEvent {
-    def level = ErrorLevel
+  /**
+   * Base type of LogEvents
+   */
+  sealed trait LogEvent {
+    /**
+     * The thread that created this log event
+     */
+    @transient
+    val thread: Thread = Thread.currentThread
+
+    /**
+     * The LogLevel of this LogEvent
+     */
+    def level: LogLevel
+
+    /**
+     * The source of this event
+     */
+    def logSource: String
+
+    /**
+     * The class of the source of this event
+     */
+    def logClass: Class[_]
+
+    /**
+     * The message, may be any object or null.
+     */
+    def message: Any
   }
+
+  /**
+   * For ERROR Logging
+   */
+  case class Error(cause: Throwable, logSource: String, logClass: Class[_], message: Any = "") extends LogEvent {
+    def this(logSource: String, logClass: Class[_], message: Any) = this(Error.NoCause, logSource, logClass, message)
+
+    override def level = ErrorLevel
+  }
+
   object Error {
-    def apply(logSource: String, message: Any) = new Error(NoCause, logSource, message)
+    def apply(logSource: String, logClass: Class[_], message: Any) = new Error(NoCause, logSource, logClass, message)
 
     /** Null Object used for errors without cause Throwable */
     object NoCause extends NoStackTrace
   }
 
-  case class Warning(logSource: String, message: Any = "") extends LogEvent {
-    def level = WarningLevel
+  /**
+   * For WARNING Logging
+   */
+  case class Warning(logSource: String, logClass: Class[_], message: Any = "") extends LogEvent {
+    override def level = WarningLevel
   }
 
-  case class Info(logSource: String, message: Any = "") extends LogEvent {
-    def level = InfoLevel
+  /**
+   * For INFO Logging
+   */
+  case class Info(logSource: String, logClass: Class[_], message: Any = "") extends LogEvent {
+    override def level = InfoLevel
   }
 
-  case class Debug(logSource: String, message: Any = "") extends LogEvent {
-    def level = DebugLevel
+  /**
+   * For DEBUG Logging
+   */
+  case class Debug(logSource: String, logClass: Class[_], message: Any = "") extends LogEvent {
+    override def level = DebugLevel
   }
 
   /**
@@ -364,7 +581,7 @@ object Logging {
    * message. This is necessary to ensure that additional subscriptions are in
    * effect when the logging system finished starting.
    */
-  case class InitializeLogger(bus: LoggingBus)
+  case class InitializeLogger(bus: LoggingBus) extends NoSerializationVerificationNeeded
 
   /**
    * Response message each logger must send within 1 second after receiving the
@@ -394,7 +611,7 @@ object Logging {
         case e: Warning ⇒ warning(e)
         case e: Info    ⇒ info(e)
         case e: Debug   ⇒ debug(e)
-        case e          ⇒ warning(Warning(simpleName(this), "received unexpected event of class " + e.getClass + ": " + e))
+        case e          ⇒ warning(Warning(simpleName(this), this.getClass, "received unexpected event of class " + e.getClass + ": " + e))
       }
     }
 
@@ -438,7 +655,8 @@ object Logging {
    * <code>akka.stdout-loglevel</code> in <code>akka.conf</code>.
    */
   class StandardOutLogger extends MinimalActorRef with StdOutLogger {
-    val path: ActorPath = new RootActorPath(LocalAddress("all-systems"), "/StandardOutLogger")
+    val path: ActorPath = new RootActorPath(Address("akka", "all-systems"), "/StandardOutLogger")
+    def provider: ActorRefProvider = throw new UnsupportedOperationException("StandardOutLogger does not provide")
     override val toString = "StandardOutLogger"
     override def !(message: Any)(implicit sender: ActorRef = null): Unit = print(message)
   }
@@ -457,16 +675,16 @@ object Logging {
     }
   }
 
-  def stackTraceFor(e: Throwable) = {
-    if ((e eq null) || e == Error.NoCause) {
-      ""
-    } else {
-      import java.io.{ StringWriter, PrintWriter }
-      val sw = new StringWriter
-      val pw = new PrintWriter(sw)
-      e.printStackTrace(pw)
+  /**
+   * Returns the StackTrace for the given Throwable as a String
+   */
+  def stackTraceFor(e: Throwable): String = e match {
+    case null | Error.NoCause ⇒ ""
+    case other ⇒
+      val sw = new java.io.StringWriter
+      val pw = new java.io.PrintWriter(sw)
+      other.printStackTrace(pw)
       sw.toString
-    }
   }
 
 }
@@ -516,34 +734,60 @@ trait LoggingAdapter {
    */
 
   def error(cause: Throwable, message: String) { if (isErrorEnabled) notifyError(cause, message) }
-  def error(cause: Throwable, template: String, arg1: Any) { if (isErrorEnabled) error(cause, format(template, arg1)) }
-  def error(cause: Throwable, template: String, arg1: Any, arg2: Any) { if (isErrorEnabled) error(cause, format(template, arg1, arg2)) }
-  def error(cause: Throwable, template: String, arg1: Any, arg2: Any, arg3: Any) { if (isErrorEnabled) error(cause, format(template, arg1, arg2, arg3)) }
-  def error(cause: Throwable, template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isErrorEnabled) error(cause, format(template, arg1, arg2, arg3, arg4)) }
+  def error(cause: Throwable, template: String, arg1: Any) { if (isErrorEnabled) notifyError(cause, format1(template, arg1)) }
+  def error(cause: Throwable, template: String, arg1: Any, arg2: Any) { if (isErrorEnabled) notifyError(cause, format(template, arg1, arg2)) }
+  def error(cause: Throwable, template: String, arg1: Any, arg2: Any, arg3: Any) { if (isErrorEnabled) notifyError(cause, format(template, arg1, arg2, arg3)) }
+  def error(cause: Throwable, template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isErrorEnabled) notifyError(cause, format(template, arg1, arg2, arg3, arg4)) }
 
   def error(message: String) { if (isErrorEnabled) notifyError(message) }
-  def error(template: String, arg1: Any) { if (isErrorEnabled) error(format(template, arg1)) }
-  def error(template: String, arg1: Any, arg2: Any) { if (isErrorEnabled) error(format(template, arg1, arg2)) }
-  def error(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isErrorEnabled) error(format(template, arg1, arg2, arg3)) }
-  def error(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isErrorEnabled) error(format(template, arg1, arg2, arg3, arg4)) }
+  def error(template: String, arg1: Any) { if (isErrorEnabled) notifyError(format1(template, arg1)) }
+  def error(template: String, arg1: Any, arg2: Any) { if (isErrorEnabled) notifyError(format(template, arg1, arg2)) }
+  def error(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isErrorEnabled) notifyError(format(template, arg1, arg2, arg3)) }
+  def error(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isErrorEnabled) notifyError(format(template, arg1, arg2, arg3, arg4)) }
 
   def warning(message: String) { if (isWarningEnabled) notifyWarning(message) }
-  def warning(template: String, arg1: Any) { if (isWarningEnabled) warning(format(template, arg1)) }
-  def warning(template: String, arg1: Any, arg2: Any) { if (isWarningEnabled) warning(format(template, arg1, arg2)) }
-  def warning(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isWarningEnabled) warning(format(template, arg1, arg2, arg3)) }
-  def warning(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isWarningEnabled) warning(format(template, arg1, arg2, arg3, arg4)) }
+  def warning(template: String, arg1: Any) { if (isWarningEnabled) notifyWarning(format1(template, arg1)) }
+  def warning(template: String, arg1: Any, arg2: Any) { if (isWarningEnabled) notifyWarning(format(template, arg1, arg2)) }
+  def warning(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isWarningEnabled) notifyWarning(format(template, arg1, arg2, arg3)) }
+  def warning(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isWarningEnabled) notifyWarning(format(template, arg1, arg2, arg3, arg4)) }
 
   def info(message: String) { if (isInfoEnabled) notifyInfo(message) }
-  def info(template: String, arg1: Any) { if (isInfoEnabled) info(format(template, arg1)) }
-  def info(template: String, arg1: Any, arg2: Any) { if (isInfoEnabled) info(format(template, arg1, arg2)) }
-  def info(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isInfoEnabled) info(format(template, arg1, arg2, arg3)) }
-  def info(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isInfoEnabled) info(format(template, arg1, arg2, arg3, arg4)) }
+  def info(template: String, arg1: Any) { if (isInfoEnabled) notifyInfo(format1(template, arg1)) }
+  def info(template: String, arg1: Any, arg2: Any) { if (isInfoEnabled) notifyInfo(format(template, arg1, arg2)) }
+  def info(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isInfoEnabled) notifyInfo(format(template, arg1, arg2, arg3)) }
+  def info(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isInfoEnabled) notifyInfo(format(template, arg1, arg2, arg3, arg4)) }
 
   def debug(message: String) { if (isDebugEnabled) notifyDebug(message) }
-  def debug(template: String, arg1: Any) { if (isDebugEnabled) debug(format(template, arg1)) }
-  def debug(template: String, arg1: Any, arg2: Any) { if (isDebugEnabled) debug(format(template, arg1, arg2)) }
-  def debug(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isDebugEnabled) debug(format(template, arg1, arg2, arg3)) }
-  def debug(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isDebugEnabled) debug(format(template, arg1, arg2, arg3, arg4)) }
+  def debug(template: String, arg1: Any) { if (isDebugEnabled) notifyDebug(format1(template, arg1)) }
+  def debug(template: String, arg1: Any, arg2: Any) { if (isDebugEnabled) notifyDebug(format(template, arg1, arg2)) }
+  def debug(template: String, arg1: Any, arg2: Any, arg3: Any) { if (isDebugEnabled) notifyDebug(format(template, arg1, arg2, arg3)) }
+  def debug(template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isDebugEnabled) notifyDebug(format(template, arg1, arg2, arg3, arg4)) }
+
+  def log(level: Logging.LogLevel, message: String) { if (isEnabled(level)) notifyLog(level, message) }
+  def log(level: Logging.LogLevel, template: String, arg1: Any) { if (isEnabled(level)) notifyLog(level, format1(template, arg1)) }
+  def log(level: Logging.LogLevel, template: String, arg1: Any, arg2: Any) { if (isEnabled(level)) notifyLog(level, format(template, arg1, arg2)) }
+  def log(level: Logging.LogLevel, template: String, arg1: Any, arg2: Any, arg3: Any) { if (isEnabled(level)) notifyLog(level, format(template, arg1, arg2, arg3)) }
+  def log(level: Logging.LogLevel, template: String, arg1: Any, arg2: Any, arg3: Any, arg4: Any) { if (isEnabled(level)) notifyLog(level, format(template, arg1, arg2, arg3, arg4)) }
+
+  final def isEnabled(level: Logging.LogLevel): Boolean = level match {
+    case Logging.ErrorLevel   ⇒ isErrorEnabled
+    case Logging.WarningLevel ⇒ isWarningEnabled
+    case Logging.InfoLevel    ⇒ isInfoEnabled
+    case Logging.DebugLevel   ⇒ isDebugEnabled
+  }
+
+  final def notifyLog(level: Logging.LogLevel, message: String): Unit = level match {
+    case Logging.ErrorLevel   ⇒ if (isErrorEnabled) notifyError(message)
+    case Logging.WarningLevel ⇒ if (isWarningEnabled) notifyWarning(message)
+    case Logging.InfoLevel    ⇒ if (isInfoEnabled) notifyInfo(message)
+    case Logging.DebugLevel   ⇒ if (isDebugEnabled) notifyDebug(message)
+  }
+
+  private def format1(t: String, arg: Any) = arg match {
+    case a: Array[_] if !a.getClass.getComponentType.isPrimitive ⇒ format(t, a: _*)
+    case a: Array[_] ⇒ format(t, (a map (_.asInstanceOf[AnyRef]): _*))
+    case x ⇒ format(t, x)
+  }
 
   def format(t: String, arg: Any*) = {
     val sb = new StringBuilder
@@ -551,17 +795,23 @@ trait LoggingAdapter {
     var rest = t
     while (p < arg.length) {
       val index = rest.indexOf("{}")
-      sb.append(rest.substring(0, index))
-      sb.append(arg(p))
-      rest = rest.substring(index + 2)
-      p += 1
+      if (index == -1) {
+        sb.append(rest).append(" WARNING arguments left: ").append(arg.length - p)
+        rest = ""
+        p = arg.length
+      } else {
+        sb.append(rest.substring(0, index))
+        sb.append(arg(p))
+        rest = rest.substring(index + 2)
+        p += 1
+      }
     }
     sb.append(rest)
     sb.toString
   }
 }
 
-class BusLogging(val bus: LoggingBus, val logSource: String) extends LoggingAdapter {
+class BusLogging(val bus: LoggingBus, val logSource: String, val logClass: Class[_]) extends LoggingAdapter {
 
   import Logging._
 
@@ -570,14 +820,14 @@ class BusLogging(val bus: LoggingBus, val logSource: String) extends LoggingAdap
   def isInfoEnabled = bus.logLevel >= InfoLevel
   def isDebugEnabled = bus.logLevel >= DebugLevel
 
-  protected def notifyError(message: String) { bus.publish(Error(logSource, message)) }
+  protected def notifyError(message: String) { bus.publish(Error(logSource, logClass, message)) }
 
-  protected def notifyError(cause: Throwable, message: String) { bus.publish(Error(cause, logSource, message)) }
+  protected def notifyError(cause: Throwable, message: String) { bus.publish(Error(cause, logSource, logClass, message)) }
 
-  protected def notifyWarning(message: String) { bus.publish(Warning(logSource, message)) }
+  protected def notifyWarning(message: String) { bus.publish(Warning(logSource, logClass, message)) }
 
-  protected def notifyInfo(message: String) { bus.publish(Info(logSource, message)) }
+  protected def notifyInfo(message: String) { bus.publish(Info(logSource, logClass, message)) }
 
-  protected def notifyDebug(message: String) { bus.publish(Debug(logSource, message)) }
+  protected def notifyDebug(message: String) { bus.publish(Debug(logSource, logClass, message)) }
 
 }

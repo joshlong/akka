@@ -62,15 +62,22 @@ The durable mailboxes and their configuration options reside in the
 
 You configure durable mailboxes through the dispatcher. The
 actor is oblivious to which type of mailbox it is using.
-Here is an example in Scala:
+
+In the configuration of the dispatcher you specify the fully qualified class name
+of the mailbox:
 
 .. includecode:: code/akka/docs/actor/mailbox/DurableMailboxDocSpec.scala
-   :include: imports,define-dispatcher
+   :include: dispatcher-config
+
+Here is an example of how to create an actor with a durable dispatcher, in Scala:
+
+.. includecode:: code/akka/docs/actor/mailbox/DurableMailboxDocSpec.scala
+   :include: imports,dispatcher-config-use
 
 Corresponding example in Java:
 
 .. includecode:: code/akka/docs/actor/mailbox/DurableMailboxDocTestBase.java
-   :include: imports,define-dispatcher
+   :include: imports,dispatcher-config-use
 
 The actor is oblivious to which type of mailbox it is using.
 
@@ -89,14 +96,11 @@ you need.
 You configure durable mailboxes through the dispatcher, as described in
 :ref:`DurableMailbox.General` with the following mailbox type.
 
-Scala::
+Config::
 
-  mailbox = akka.actor.mailbox.FileDurableMailboxType
-
-Java::
-
-  akka.actor.mailbox.DurableMailboxType.fileDurableMailboxType()
-
+  my-dispatcher {
+    mailbox-type = akka.actor.mailbox.FileBasedMailboxType
+  }
 
 You can also configure and tune the file-based durable mailbox. This is done in
 the ``akka.actor.mailbox.file-based`` section in the :ref:`configuration`.
@@ -117,14 +121,11 @@ mailboxes. Read more in the Redis documentation on how to do that.
 You configure durable mailboxes through the dispatcher, as described in
 :ref:`DurableMailbox.General` with the following mailbox type.
 
-Scala::
+Config::
 
-  mailbox = akka.actor.mailbox.RedisDurableMailboxType
-
-Java::
-
-  akka.actor.mailbox.DurableMailboxType.redisDurableMailboxType()
-
+  my-dispatcher {
+    mailbox-type = akka.actor.mailbox.RedisBasedMailboxType
+  }
 
 You also need to configure the IP and port for the Redis server. This is done in
 the ``akka.actor.mailbox.redis`` section in the :ref:`configuration`.
@@ -140,19 +141,17 @@ This mailbox is backed by `ZooKeeper <http://zookeeper.apache.org/>`_. ZooKeeper
 is a centralized service for maintaining configuration information, naming,
 providing distributed synchronization, and providing group services This means
 that you have to start up a ZooKeeper server (for production a ZooKeeper server
-ensamble) that can host these durable mailboxes. Read more in the ZooKeeper
+ensemble) that can host these durable mailboxes. Read more in the ZooKeeper
 documentation on how to do that.
 
 You configure durable mailboxes through the dispatcher, as described in
 :ref:`DurableMailbox.General` with the following mailbox type.
 
-Scala::
+Config::
 
-  mailbox = akka.actor.mailbox.ZooKeeperDurableMailboxType
-
-Java::
-
-  akka.actor.mailbox.DurableMailboxType.zooKeeperDurableMailboxType()
+  my-dispatcher {
+    mailbox-type = akka.actor.mailbox.ZooKeeperBasedMailboxType
+  }
 
 You also need to configure ZooKeeper server addresses, timeouts, etc. This is
 done in the ``akka.actor.mailbox.zookeeper`` section in the :ref:`configuration`.
@@ -171,13 +170,11 @@ Beanstalk documentation on how to do that.
 You configure durable mailboxes through the dispatcher, as described in
 :ref:`DurableMailbox.General` with the following mailbox type.
 
-Scala::
+Config::
 
-  mailbox = akka.actor.mailbox.BeanstalkDurableMailboxType
-
-Java::
-
-  akka.actor.mailbox.DurableMailboxType.beanstalkDurableMailboxType()
+  my-dispatcher {
+    mailbox-type = akka.actor.mailbox.BeanstalkBasedMailboxType
+  }
 
 You also need to configure the IP, and port, and so on, for the Beanstalk
 server. This is done in the ``akka.actor.mailbox.beanstalk`` section in the
@@ -202,13 +199,11 @@ lightweight versus building on other MongoDB implementations such as
 You configure durable mailboxes through the dispatcher, as described in
 :ref:`DurableMailbox.General` with the following mailbox type.
 
-Scala::
+Config::
 
-  mailbox = akka.actor.mailbox.MongoDurableMailboxType
-
-Java::
-
-  akka.actor.mailbox.DurableMailboxType.mongoDurableMailboxType()
+  my-dispatcher {
+    mailbox-type = akka.actor.mailbox.MongoBasedMailboxType
+  }
 
 You will need to configure the URI for the MongoDB server, using the URI Format specified in the
 `MongoDB Documentation <http://www.mongodb.org/display/DOCS/Connections>`_. This is done in

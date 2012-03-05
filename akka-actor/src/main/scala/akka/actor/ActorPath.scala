@@ -1,8 +1,9 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor
 import scala.annotation.tailrec
+import java.net.MalformedURLException
 
 object ActorPath {
   def split(s: String): List[String] = {
@@ -15,6 +16,16 @@ object ActorPath {
     }
     rec(s.length, Nil)
   }
+
+  /**
+   * Parse string as actor path; throws java.net.MalformedURLException if unable to do so.
+   */
+  def fromString(s: String): ActorPath = s match {
+    case ActorPathExtractor(addr, elems) ⇒ RootActorPath(addr) / elems
+    case _                               ⇒ throw new MalformedURLException("cannot parse as ActorPath: " + s)
+  }
+
+  val ElementRegex = """[-\w:@&=+,.!~*'_;][-\w:@&=+,.!~*'$_;]*""".r
 }
 
 /**
@@ -27,6 +38,7 @@ object ActorPath {
  * is sorted by path elements FROM RIGHT TO LEFT, where RootActorPath >
  * ChildActorPath in case the number of elements is different.
  */
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
 sealed trait ActorPath extends Comparable[ActorPath] with Serializable {
   /**
    * The Address under which this path can be reached; walks up the tree to
@@ -57,7 +69,7 @@ sealed trait ActorPath extends Comparable[ActorPath] with Serializable {
   /**
    * Recursively create a descendant’s path by appending all child names.
    */
-  def /(child: Iterable[String]): ActorPath = (this /: child)(_ / _)
+  def /(child: Iterable[String]): ActorPath = (this /: child)((path, elem) ⇒ if (elem.isEmpty) path else path / elem)
 
   /**
    * ''Java API'': Recursively create a descendant’s path by appending all child names.
@@ -85,12 +97,19 @@ sealed trait ActorPath extends Comparable[ActorPath] with Serializable {
    */
   def root: RootActorPath
 
+  /**
+   * Generate String representation, replacing the Address in the RootActor
+   * Path with the given one unless this path’s address includes host and port
+   * information.
+   */
+  def toStringWithAddress(address: Address): String
 }
 
 /**
  * Root of the hierarchy of ActorPaths. There is exactly root per ActorSystem
  * and node (for remote-enabled or clustered systems).
  */
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
 final case class RootActorPath(address: Address, name: String = "/") extends ActorPath {
 
   def parent: ActorPath = this
@@ -103,13 +122,19 @@ final case class RootActorPath(address: Address, name: String = "/") extends Act
 
   override val toString = address + name
 
+  def toStringWithAddress(addr: Address): String =
+    if (address.host.isDefined) address + name
+    else addr + name
+
   def compareTo(other: ActorPath) = other match {
     case r: RootActorPath  ⇒ toString compareTo r.toString
     case c: ChildActorPath ⇒ 1
   }
 }
 
+//TODO add @SerialVersionUID(1L) when SI-4804 is fixed
 final class ChildActorPath(val parent: ActorPath, val name: String) extends ActorPath {
+  if (name.indexOf('/') != -1) throw new IllegalArgumentException("/ is a path separator and is not legal in ActorPath names: [%s]" format name)
 
   def address: Address = root.address
 
@@ -135,7 +160,7 @@ final class ChildActorPath(val parent: ActorPath, val name: String) extends Acto
 
   // TODO research whether this should be cached somehow (might be fast enough, but creates GC pressure)
   /*
-   * idea: add one field which holds the total length (because that is known) 
+   * idea: add one field which holds the total length (because that is known)
    * so that only one String needs to be allocated before traversal; this is
    * cheaper than any cache
    */
@@ -143,6 +168,15 @@ final class ChildActorPath(val parent: ActorPath, val name: String) extends Acto
     @tailrec
     def rec(p: ActorPath, s: StringBuilder): StringBuilder = p match {
       case r: RootActorPath ⇒ s.insert(0, r.toString)
+      case _                ⇒ rec(p.parent, s.insert(0, '/').insert(0, p.name))
+    }
+    rec(parent, new StringBuilder(32).append(name)).toString
+  }
+
+  override def toStringWithAddress(addr: Address) = {
+    @tailrec
+    def rec(p: ActorPath, s: StringBuilder): StringBuilder = p match {
+      case r: RootActorPath ⇒ s.insert(0, r.toStringWithAddress(addr))
       case _                ⇒ rec(p.parent, s.insert(0, '/').insert(0, p.name))
     }
     rec(parent, new StringBuilder(32).append(name)).toString

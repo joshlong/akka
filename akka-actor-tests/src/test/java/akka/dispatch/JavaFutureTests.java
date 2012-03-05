@@ -5,6 +5,7 @@ import akka.actor.ActorSystem;
 
 import akka.japi.*;
 import akka.util.Duration;
+import akka.testkit.TestKitExtension;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -14,6 +15,7 @@ import java.util.LinkedList;
 import java.lang.Iterable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import static akka.japi.Util.manifest;
 
 import akka.testkit.AkkaSpec;
 
@@ -27,7 +29,7 @@ public class JavaFutureTests {
   @BeforeClass
   public static void beforeAll() {
     system = ActorSystem.create("JavaFutureTests", AkkaSpec.testConf());
-    t = system.settings().ActorTimeout();
+    t = TestKitExtension.get(system).DefaultTimeout();
   }
 
   @AfterClass
@@ -37,7 +39,7 @@ public class JavaFutureTests {
   }
 
   @Test
-  public void mustBeAbleToMapAFuture() {
+  public void mustBeAbleToMapAFuture() throws Exception {
 
     Future<String> f1 = Futures.future(new Callable<String>() {
       public String call() {
@@ -45,7 +47,7 @@ public class JavaFutureTests {
       }
     }, system.dispatcher());
 
-    Future<String> f2 = f1.map(new Function<String, String>() {
+    Future<String> f2 = f1.map(new Mapper<String, String>() {
       public String apply(String s) {
         return s + " World";
       }
@@ -59,11 +61,11 @@ public class JavaFutureTests {
     final CountDownLatch latch = new CountDownLatch(1);
     Promise<String> cf = Futures.promise(system.dispatcher());
     Future<String> f = cf;
-    f.onSuccess(new Procedure<String>() {
-        public void apply(String result) {
-            if (result.equals("foo"))
-                latch.countDown();
-        }
+    f.onSuccess(new OnSuccess<String>() {
+      public void onSuccess(String result) {
+        if (result.equals("foo"))
+          latch.countDown();
+      }
     });
 
     cf.success("foo");
@@ -76,11 +78,11 @@ public class JavaFutureTests {
     final CountDownLatch latch = new CountDownLatch(1);
     Promise<String> cf = Futures.promise(system.dispatcher());
     Future<String> f = cf;
-    f.onFailure(new Procedure<Throwable>() {
-        public void apply(Throwable t) {
-            if (t instanceof NullPointerException)
-                latch.countDown();
-        }
+    f.onFailure(new OnFailure() {
+      public void onFailure(Throwable t) {
+        if (t instanceof NullPointerException)
+          latch.countDown();
+      }
     });
 
     Throwable exception = new NullPointerException();
@@ -94,8 +96,8 @@ public class JavaFutureTests {
     final CountDownLatch latch = new CountDownLatch(1);
     Promise<String> cf = Futures.promise(system.dispatcher());
     Future<String> f = cf;
-    f.onComplete(new Procedure2<Throwable,String>() {
-      public void apply(Throwable t, String r) {
+    f.onComplete(new OnComplete<String>() {
+      public void onComplete(Throwable t, String r) {
         latch.countDown();
       }
     });
@@ -110,8 +112,8 @@ public class JavaFutureTests {
     final CountDownLatch latch = new CountDownLatch(1);
     Promise<String> cf = Futures.promise(system.dispatcher());
     Future<String> f = cf;
-    f.foreach(new Procedure<String>() {
-      public void apply(String future) {
+    f.foreach(new Foreach<String>() {
+      public void each(String future) {
         latch.countDown();
       }
     });
@@ -127,7 +129,7 @@ public class JavaFutureTests {
     Promise<String> cf = Futures.promise(system.dispatcher());
     cf.success("1000");
     Future<String> f = cf;
-    Future<Integer> r = f.flatMap(new Function<String, Future<Integer>>() {
+    Future<Integer> r = f.flatMap(new Mapper<String, Future<Integer>>() {
       public Future<Integer> apply(String r) {
         latch.countDown();
         Promise<Integer> cf = Futures.promise(system.dispatcher());
@@ -146,12 +148,12 @@ public class JavaFutureTests {
     final CountDownLatch latch = new CountDownLatch(1);
     Promise<String> cf = Futures.promise(system.dispatcher());
     Future<String> f = cf;
-    Future<String> r = f.filter(new Function<String, Boolean>() {
+    Future<String> r = f.filter(Filter.filterOf(new Function<String, Boolean>() {
       public Boolean apply(String r) {
         latch.countDown();
         return r.equals("foo");
       }
-    });
+    }));
 
     cf.success("foo");
     assertTrue(latch.await(5000, TimeUnit.MILLISECONDS));
@@ -161,7 +163,7 @@ public class JavaFutureTests {
 
   // TODO: Improve this test, perhaps with an Actor
   @Test
-  public void mustSequenceAFutureList() {
+  public void mustSequenceAFutureList() throws Exception{
     LinkedList<Future<String>> listFutures = new LinkedList<Future<String>>();
     LinkedList<String> listExpected = new LinkedList<String>();
 
@@ -181,7 +183,7 @@ public class JavaFutureTests {
 
   // TODO: Improve this test, perhaps with an Actor
   @Test
-  public void foldForJavaApiMustWork() {
+  public void foldForJavaApiMustWork() throws Exception{
     LinkedList<Future<String>> listFutures = new LinkedList<Future<String>>();
     StringBuilder expected = new StringBuilder();
 
@@ -204,7 +206,7 @@ public class JavaFutureTests {
   }
 
   @Test
-  public void reduceForJavaApiMustWork() {
+  public void reduceForJavaApiMustWork() throws Exception{
     LinkedList<Future<String>> listFutures = new LinkedList<Future<String>>();
     StringBuilder expected = new StringBuilder();
 
@@ -227,7 +229,7 @@ public class JavaFutureTests {
   }
 
   @Test
-  public void traverseForJavaApiMustWork() {
+  public void traverseForJavaApiMustWork() throws Exception{
     LinkedList<String> listStrings = new LinkedList<String>();
     LinkedList<String> expectedStrings = new LinkedList<String>();
 
@@ -250,7 +252,7 @@ public class JavaFutureTests {
   }
 
   @Test
-  public void findForJavaApiMustWork() {
+  public void findForJavaApiMustWork() throws Exception{
     LinkedList<Future<Integer>> listFutures = new LinkedList<Future<Integer>>();
     for (int i = 0; i < 10; i++) {
       final Integer fi = i;
@@ -267,15 +269,59 @@ public class JavaFutureTests {
       }
     }, system.dispatcher());
 
-    assertEquals(expect, Await.result(f, timeout));
+    assertEquals(expect, Await.result(f, timeout).get());
   }
 
   @Test
-  public void BlockMustBeCallable() {
+  public void blockMustBeCallable() throws Exception {
     Promise<String> p = Futures.promise(system.dispatcher());
     Duration d = Duration.create(1, TimeUnit.SECONDS);
     p.success("foo");
     Await.ready(p, d);
     assertEquals(Await.result(p, d), "foo");
+  }
+
+  @Test
+  public void mapToMustBeCallable() throws Exception {
+    Promise<Object> p = Futures.promise(system.dispatcher());
+    Future<String> f = p.future().mapTo(manifest(String.class));
+    Duration d = Duration.create(1, TimeUnit.SECONDS);
+    p.success("foo");
+    Await.ready(p, d);
+    assertEquals(Await.result(p, d), "foo");
+  }
+
+  @Test
+  public void recoverToMustBeCallable() throws Exception {
+    final IllegalStateException fail = new IllegalStateException("OHNOES");
+    Promise<Object> p = Futures.promise(system.dispatcher());
+    Future<Object> f = p.future().recover(new Recover<Object>() {
+      public Object recover(Throwable t) throws Throwable {
+        if (t == fail)
+          return "foo";
+        else
+          throw t;
+      }
+    });
+    Duration d = Duration.create(1, TimeUnit.SECONDS);
+    p.failure(fail);
+    assertEquals(Await.result(f, d), "foo");
+  }
+
+  @Test
+  public void recoverWithToMustBeCallable() throws Exception{
+    final IllegalStateException fail = new IllegalStateException("OHNOES");
+    Promise<Object> p = Futures.promise(system.dispatcher());
+    Future<Object> f = p.future().recoverWith(new Recover<Future<Object>>() {
+      public Future<Object> recover(Throwable t) throws Throwable {
+        if (t == fail)
+          return Futures.<Object> successful("foo", system.dispatcher()).future();
+        else
+          throw t;
+      }
+    });
+    Duration d = Duration.create(1, TimeUnit.SECONDS);
+    p.failure(fail);
+    assertEquals(Await.result(f, d), "foo");
   }
 }

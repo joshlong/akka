@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor;
 
 //#imports1
@@ -31,7 +34,7 @@ public class SchedulerDocTestBase {
   @Before
   public void setUp() {
     system = ActorSystem.create("MySystem", AkkaSpec.testConf());
-    testActor = system.actorOf(new Props().withCreator(MyUntypedActor.class));
+    testActor = system.actorOf(new Props(MyUntypedActor.class));
   }
 
   @After
@@ -66,6 +69,8 @@ public class SchedulerDocTestBase {
           public void onReceive(Object message) {
             if (message.equals("Tick")) {
               // Do someting
+            } else {
+              unhandled(message);
             }
           }
         };

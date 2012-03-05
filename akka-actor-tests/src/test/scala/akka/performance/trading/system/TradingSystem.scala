@@ -13,9 +13,7 @@ trait TradingSystem {
 
   val allOrderbookSymbols: List[String] = OrderbookRepository.allOrderbookSymbols
 
-  val orderbooksGroupedByMatchingEngine: List[List[Orderbook]] =
-    for (groupOfSymbols: List[String] ← OrderbookRepository.orderbookSymbolsGroupedByMatchingEngine)
-      yield groupOfSymbols map (s ⇒ Orderbook(s, false))
+  def orderbooksGroupedByMatchingEngine: List[List[Orderbook]]
 
   def useStandByEngines: Boolean = true
 
@@ -38,14 +36,16 @@ class AkkaTradingSystem(val system: ActorSystem) extends TradingSystem {
   type ME = ActorRef
   type OR = ActorRef
 
-  val orDispatcher = createOrderReceiverDispatcher
-  val meDispatcher = createMatchingEngineDispatcher
+  val orDispatcher = orderReceiverDispatcher
+  val meDispatcher = matchingEngineDispatcher
 
-  // by default we use default-dispatcher that is defined in akka.conf
-  def createOrderReceiverDispatcher: Option[MessageDispatcher] = None
+  def orderReceiverDispatcher: Option[String] = Some("benchmark.trading-dispatcher")
 
-  // by default we use default-dispatcher that is defined in akka.conf
-  def createMatchingEngineDispatcher: Option[MessageDispatcher] = None
+  def matchingEngineDispatcher: Option[String] = Some("benchmark.trading-dispatcher")
+
+  override val orderbooksGroupedByMatchingEngine: List[List[Orderbook]] =
+    for (groupOfSymbols: List[String] ← OrderbookRepository.orderbookSymbolsGroupedByMatchingEngine)
+      yield groupOfSymbols map (s ⇒ Orderbook(s, false, system))
 
   var matchingEngineForOrderbook: Map[String, ActorRef] = Map()
 
@@ -55,7 +55,7 @@ class AkkaTradingSystem(val system: ActorSystem) extends TradingSystem {
       n = i + 1
     } yield {
       val me = createMatchingEngine("ME" + n, orderbooks)
-      val orderbooksCopy = orderbooks map (o ⇒ Orderbook(o.symbol, true))
+      val orderbooksCopy = orderbooks map (o ⇒ Orderbook(o.symbol, true, system))
       val standbyOption =
         if (useStandByEngines) {
           val meStandby = createMatchingEngine("ME" + n + "s", orderbooksCopy)

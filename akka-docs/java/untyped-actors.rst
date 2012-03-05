@@ -28,6 +28,10 @@ its syntax from Erlang.
 Creating Actors
 ===============
 
+Since Akka enforces parental supervision every actor is supervised and
+(potentially) the supervisor of its children; it is advisable that you
+familiarize yourself with :ref:`actor-systems` and :ref:`supervision` and it
+may also help to read :ref:`actorOf-vs-actorFor`.
 
 Defining an Actor class
 -----------------------
@@ -116,16 +120,23 @@ UntypedActor API
 The :class:`UntypedActor` class defines only one abstract method, the above mentioned
 :meth:`onReceive(Object message)`, which implements the behavior of the actor.
 
+If the current actor behavior does not match a received message,
+:meth:`unhandled` is called, which by default publishes a ``new
+akka.actor.UnhandledMessage(message, sender, recipient)`` on the actor system’s
+event stream.
+
 In addition, it offers:
 
 * :obj:`getSelf()` reference to the :class:`ActorRef` of the actor
 * :obj:`getSender()` reference sender Actor of the last received message, typically used as described in :ref:`UntypedActor.Reply`
+* :obj:`supervisorStrategy()` user overridable definition the strategy to use for supervising child actors
 * :obj:`getContext()` exposes contextual information for the actor and the current message, such as:
 
   * factory methods to create child actors (:meth:`actorOf`)
   * system that the actor belongs to
   * parent supervisor
   * supervised children
+  * lifecycle monitoring
   * hotswap behavior stack as described in :ref:`UntypedActor.HotSwap`
 
 The remaining visible methods are user-overridable life-cycle hooks which are
@@ -136,6 +147,36 @@ described in the following:
 The implementations shown above are the defaults provided by the :class:`UntypedActor`
 class.
 
+.. _deathwatch-java:
+
+Lifecycle Monitoring aka DeathWatch
+-----------------------------------
+
+In order to be notified when another actor terminates (i.e. stops permanently,
+not temporary failure and restart), an actor may register itself for reception
+of the :class:`Terminated` message dispatched by the other actor upon
+termination (see `Stopping Actors`_). This service is provided by the
+:class:`DeathWatch` component of the actor system.
+
+Registering a monitor is easy (see fourth line, the rest is for demonstrating
+the whole functionality):
+
+.. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java#watch
+
+It should be noted that the :class:`Terminated` message is generated
+independent of the order in which registration and termination occur.
+Registering multiple times does not necessarily lead to multiple messages being
+generated, but there is no guarantee that only exactly one such message is
+received: if termination of the watched actor has generated and queued the
+message, and another registration is done before this message has been
+processed, then a second message will be queued, because registering for
+monitoring of an already terminated actor leads to the immediate generation of
+the :class:`Terminated` message.
+
+It is also possible to deregister from watching another actor’s liveliness
+using ``context.unwatch(target)``, but obviously this cannot guarantee
+non-reception of the :class:`Terminated` message because that may already have
+been queued.
 
 Start Hook
 ----------
@@ -173,8 +214,8 @@ processing a message. This restart involves the hooks mentioned above:
 
 
 An actor restart replaces only the actual actor object; the contents of the
-mailbox and the hotswap stack are unaffected by the restart, so processing of
-messages will resume after the :meth:`postRestart` hook returns. The message
+mailbox is unaffected by the restart, so processing of messages will resume
+after the :meth:`postRestart` hook returns. The message
 that triggered the exception will not be received again. Any message
 sent to an actor while it is being restarted will be queued to its mailbox as
 usual.
@@ -205,16 +246,27 @@ result::
   getContext().actorFor("/user/serviceA/aggregator") // will look up this absolute path
   getContext().actorFor("../joe")                    // will look up sibling beneath same supervisor
 
+The supplied path is parsed as a :class:`java.net.URI`, which basically means
+that it is split on ``/`` into path elements. If the path starts with ``/``, it
+is absolute and the look-up starts at the root guardian (which is the parent of
+``"/user"``); otherwise it starts at the current actor. If a path element equals
+``..``, the look-up will take a step “up” towards the supervisor of the
+currently traversed actor, otherwise it will step “down” to the named child.
 It should be noted that the ``..`` in actor paths here always means the logical
-structure, i.e. the supervisor. Remote actor addresses may also be looked up,
-if remoting is enabled::
+structure, i.e. the supervisor.
+
+If the path being looked up does not exist, a special actor reference is
+returned which behaves like the actor system’s dead letter queue but retains
+its identity (i.e. the path which was looked up).
+
+Remote actor addresses may also be looked up, if remoting is enabled::
 
   getContext().actorFor("akka://app@otherhost:1234/user/serviceB")
 
 These look-ups return a (possibly remote) actor reference immediately, so you
 will have to send to it and await a reply in order to verify that ``serviceB``
-is actually reachable and running.
-
+is actually reachable and running. An example demonstrating actor look-up is
+given in :ref:`remote-lookup-sample-java`.
 
 Messages and immutability
 =========================
@@ -268,25 +320,37 @@ If invoked without the sender parameter the sender will be
 Ask: Send-And-Receive-Future
 ----------------------------
 
-Using ``ask`` will send a message to the receiving Actor asynchronously and
-will immediately return a :class:`Future`:
+The ``ask`` pattern involves actors as well as futures, hence it is offered as
+a use pattern rather than a method on :class:`ActorRef`:
 
-.. code-block:: java
+.. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java#import-askPipe
 
-  long timeoutMillis = 1000;
-  Future future = actorRef.ask("Hello", timeoutMillis);
+.. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java#ask-pipe
 
-The receiving actor should reply to this message, which will complete the
-future with the reply message as value; ``getSender.tell(result)``.
+This example demonstrates ``ask`` together with the ``pipe`` pattern on
+futures, because this is likely to be a common combination. Please note that
+all of the above is completely non-blocking and asynchronous: ``ask`` produces
+a :class:`Future`, two of which are composed into a new future using the
+:meth:`Futures.sequence` and :meth:`map` methods and then ``pipe`` installs
+an ``onComplete``-handler on the future to effect the submission of the
+aggregated :class:`Result` to another actor.
+
+Using ``ask`` will send a message to the receiving Actor as with ``tell``, and
+the receiving actor must reply with ``getSender().tell(reply)`` in order to
+complete the returned :class:`Future` with a value. The ``ask`` operation
+involves creating an internal actor for handling this reply, which needs to
+have a timeout after which it is destroyed in order not to leak resources; see
+more below.
 
 To complete the future with an exception you need send a Failure message to the sender.
-This is not done automatically when an actor throws an exception while processing a
+This is *not done automatically* when an actor throws an exception while processing a
 message.
 
 .. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java#reply-exception
 
 If the actor does not complete the future, it will expire after the timeout period,
-specified as parameter to the ``ask`` method.
+specified as parameter to the ``ask`` method; this will complete the
+:class:`Future` with an :class:`AskTimeoutException`.
 
 See :ref:`futures-java` for more information on how to await or query a
 future.
@@ -304,15 +368,6 @@ Gives you a way to avoid blocking.
   the callback will be scheduled concurrently to the enclosing actor. Unfortunately
   there is not yet a way to detect these illegal accesses at compile time. See also:
   :ref:`jmm-shared-state`
-
-The future returned from the ``ask`` method can conveniently be passed around or
-chained with further processing steps, but sometimes you just need the value,
-even if that entails waiting for it (but keep in mind that waiting inside an
-actor is prone to dead-locks, e.g. if obtaining the result depends on
-processing another message on this actor).
-
-.. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java
-   :include: import-future,using-ask
 
 Forward message
 ---------------
@@ -370,6 +425,8 @@ message.
 
 .. includecode:: code/akka/docs/actor/MyReceivedTimeoutUntypedActor.java#receive-timeout
 
+.. _stopping-actors-java:
+
 Stopping actors
 ===============
 
@@ -384,20 +441,39 @@ but additional messages in the mailbox will not be processed. By default these
 messages are sent to the :obj:`deadLetters` of the :obj:`ActorSystem`, but that
 depends on the mailbox implementation.
 
-When stop is called then a call to the ``def postStop`` callback method will
-take place. The ``Actor`` can use this callback to implement shutdown behavior.
+Termination of an actor proceeds in two steps: first the actor suspends its
+mailbox processing and sends a stop command to all its children, then it keeps
+processing the termination messages from its children until the last one is
+gone, finally terminating itself (invoking :meth:`postStop`, dumping mailbox,
+publishing :class:`Terminated` on the :ref:`DeathWatch <deathwatch-java>`, telling
+its supervisor). This procedure ensures that actor system sub-trees terminate
+in an orderly fashion, propagating the stop command to the leaves and
+collecting their confirmation back to the stopped supervisor. If one of the
+actors does not respond (i.e. processing a message for extended periods of time
+and therefore not receiving the stop command), this whole process will be
+stuck.
+
+Upon :meth:`ActorSystem.shutdown()`, the system guardian actors will be
+stopped, and the aforementioned process will ensure proper termination of the
+whole system.
+
+The :meth:`postStop()` hook is invoked after an actor is fully stopped. This
+enables cleaning up of resources:
 
 .. code-block:: java
 
+  @Override
   public void postStop() {
-    ... // clean up resources
+    // close some file or database connection
   }
 
+.. note::
 
-All Actors are stopped when the ``ActorSystem`` is stopped.
-Supervised actors are stopped when the supervisor is stopped, i.e. children are stopped
-when parent is stopped.
-
+  Since stopping an actor is asynchronous, you cannot immediately reuse the
+  name of the child you just stopped; this will result in an
+  :class:`InvalidActorNameException`. Instead, :meth:`watch()` the terminating
+  actor and create its replacement in response to the :class:`Terminated`
+  message which will eventually arrive.
 
 PoisonPill
 ----------
@@ -407,13 +483,20 @@ stop the actor when the message is processed. ``PoisonPill`` is enqueued as
 ordinary messages and will be handled after messages that were already queued
 in the mailbox.
 
-If the ``PoisonPill`` was sent with ``ask``, the ``Future`` will be completed with an
-``akka.actor.ActorKilledException("PoisonPill")``.
-
 Use it like this:
 
 .. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java
    :include: import-actors,poison-pill
+
+Graceful Stop
+-------------
+
+:meth:`gracefulStop` is useful if you need to wait for termination or compose ordered
+termination of several actors:
+
+.. includecode:: code/akka/docs/actor/UntypedActorDocTestBase.java
+   :include: import-gracefulStop,gracefulStop
+
 
 .. _UntypedActor.HotSwap:
 

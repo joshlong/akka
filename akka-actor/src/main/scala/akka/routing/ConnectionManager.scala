@@ -1,15 +1,10 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.routing
 
 import akka.actor._
-
-import scala.annotation.tailrec
-
-import java.util.concurrent.atomic.{ AtomicReference, AtomicInteger }
-import collection.JavaConverters
 
 /**
  * An Iterable that also contains a version.
@@ -50,7 +45,7 @@ trait ConnectionManager {
   def shutdown()
 
   /**
-   * Returns a VersionedIterator containing all connectected ActorRefs at some moment in time. Since there is
+   * Returns a VersionedIterator containing all connected ActorRefs at some moment in time. Since there is
    * the time element, also the version is included to be able to read the data (the connections) and the version
    * in an atomic manner.
    *

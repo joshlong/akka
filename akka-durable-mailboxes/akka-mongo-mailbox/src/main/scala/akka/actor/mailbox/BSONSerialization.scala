@@ -1,5 +1,5 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
@@ -8,20 +8,16 @@ import java.io.InputStream
 import org.bson.collection.BSONDocument
 import org.bson.io.BasicOutputBuffer
 import org.bson.io.OutputBuffer
-import org.bson.util.Logging
 import org.bson.SerializableBSONObject
 import org.bson.BSONSerializer
 import org.bson.DefaultBSONDeserializer
 import org.bson.DefaultBSONSerializer
 
-import akka.actor.SerializedActorRef
 import akka.remote.RemoteProtocol.MessageProtocol
 import akka.remote.MessageSerializer
-import akka.actor.{ ActorSystem, ActorSystemImpl, Props }
+import akka.actor.ExtendedActorSystem
 
-class BSONSerializableMailbox(system: ActorSystem) extends SerializableBSONObject[MongoDurableMessage] with Logging {
-
-  val systemImpl = system.asInstanceOf[ActorSystemImpl]
+class BSONSerializableMessageQueue(system: ExtendedActorSystem) extends SerializableBSONObject[MongoDurableMessage] {
 
   protected[akka] def serializeDurableMsg(msg: MongoDurableMessage)(implicit serializer: BSONSerializer) = {
 
@@ -29,7 +25,7 @@ class BSONSerializableMailbox(system: ActorSystem) extends SerializableBSONObjec
     val b = Map.newBuilder[String, Any]
     b += "_id" -> msg._id
     b += "ownerPath" -> msg.ownerPath
-    b += "senderPath" -> msg.sender.path
+    b += "senderPath" -> msg.sender.path.toString
 
     /**
      * TODO - Figure out a way for custom serialization of the message instance
@@ -38,7 +34,6 @@ class BSONSerializableMailbox(system: ActorSystem) extends SerializableBSONObjec
     val msgData = MessageSerializer.serialize(system, msg.message.asInstanceOf[AnyRef])
     b += "message" -> new org.bson.types.Binary(0, msgData.toByteArray)
     val doc = b.result
-    system.log.debug("Serialized Document: {}", doc)
     serializer.putObject(doc)
   }
 
@@ -66,12 +61,11 @@ class BSONSerializableMailbox(system: ActorSystem) extends SerializableBSONObjec
     val deserializer = new DefaultBSONDeserializer
     // TODO - Skip the whole doc step for performance, fun, and profit! (Needs Salat / custom Deser)
     val doc = deserializer.decodeAndFetch(in).asInstanceOf[BSONDocument]
-    system.log.debug("Deserializing a durable message from MongoDB: {}", doc)
     val msgData = MessageProtocol.parseFrom(doc.as[org.bson.types.Binary]("message").getData)
     val msg = MessageSerializer.deserialize(system, msgData)
     val ownerPath = doc.as[String]("ownerPath")
     val senderPath = doc.as[String]("senderPath")
-    val sender = systemImpl.actorFor(senderPath)
+    val sender = system.actorFor(senderPath)
 
     MongoDurableMessage(ownerPath, msg, sender)
   }

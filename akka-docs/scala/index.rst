@@ -9,6 +9,7 @@ Scala API
    actors
    typed-actors
    logging
+   event-bus
    scheduler
    futures
    dataflow
@@ -18,7 +19,10 @@ Scala API
    remoting
    serialization
    fsm
-   testing
-   extending-akka
+   stm
    agents
    transactors
+   io
+   testing
+   extending-akka
+   zeromq

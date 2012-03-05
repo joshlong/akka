@@ -15,27 +15,25 @@ import akka.performance.trading.domain.Order
 import akka.performance.trading.domain.TotalTradeCounter
 import akka.performance.workbench.PerformanceSpec
 import akka.performance.trading.domain.Orderbook
+import akka.performance.trading.domain.TotalTradeCounterExtension
 
 // -server -Xms512M -Xmx1024M -XX:+UseConcMarkSweepGC -Dbenchmark=true -Dbenchmark.repeatFactor=500 -Dbenchmark.useDummyOrderbook=true
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class TradingLatencyPerformanceSpec extends PerformanceSpec {
-
-  val clientDispatcher = system.dispatcherFactory.newDispatcher("client-dispatcher")
-    .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
-    .setCorePoolSize(maxClients)
-    .build
 
   var tradingSystem: AkkaTradingSystem = _
 
   var stat: DescriptiveStatistics = _
   val random: Random = new Random(0)
 
+  def totalTradeCounter: TotalTradeCounter = TotalTradeCounterExtension(system)
+
   override def beforeEach() {
     super.beforeEach()
     stat = new SynchronizedDescriptiveStatistics
     tradingSystem = new AkkaTradingSystem(system)
     tradingSystem.start()
-    TotalTradeCounter.reset()
+    totalTradeCounter.reset()
     stat = new SynchronizedDescriptiveStatistics
   }
 
@@ -86,6 +84,8 @@ class TradingLatencyPerformanceSpec extends PerformanceSpec {
       } yield Bid(s + i, 100 - i, 1000)
       val orders = askOrders.zip(bidOrders).map(x ⇒ Seq(x._1, x._2)).flatten
 
+      val latencyDispatcher = "benchmark.trading-dispatcher"
+
       val ordersPerClient = repeat * orders.size / numberOfClients
       val totalNumberOfOrders = ordersPerClient * numberOfClients
       val latch = new CountDownLatch(numberOfClients)
@@ -93,7 +93,7 @@ class TradingLatencyPerformanceSpec extends PerformanceSpec {
       val start = System.nanoTime
       val clients = (for (i ← 0 until numberOfClients) yield {
         val receiver = receivers(i % receivers.size)
-        val props = Props(new Client(receiver, orders, latch, ordersPerClient, clientDelay.toMicros.toInt)).withDispatcher(clientDispatcher)
+        val props = Props(new Client(receiver, orders, latch, ordersPerClient, clientDelay.toMicros.toInt)).withDispatcher(latencyDispatcher)
         system.actorOf(props)
       })
 
@@ -104,7 +104,7 @@ class TradingLatencyPerformanceSpec extends PerformanceSpec {
       if (!warmup) {
         ok must be(true)
         if (!Orderbook.useDummyOrderbook) {
-          TotalTradeCounter.counter.get must be(totalNumberOfOrders / 2)
+          totalTradeCounter.count must be(totalNumberOfOrders / 2)
         }
         logMeasurement(numberOfClients, durationNs, stat)
       }

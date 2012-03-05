@@ -1,22 +1,24 @@
+/**
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor
 
 //#imports1
 import akka.actor.Actor
 import akka.actor.Props
 import akka.event.Logging
-import akka.dispatch.Future
 
 //#imports1
 
-//#imports2
-import akka.actor.ActorSystem
-//#imports2
-
+import akka.dispatch.Future
+import akka.actor.{ ActorRef, ActorSystem }
 import org.scalatest.{ BeforeAndAfterAll, WordSpec }
 import org.scalatest.matchers.MustMatchers
 import akka.testkit._
 import akka.util._
 import akka.util.duration._
+import akka.actor.Actor.Receive
+import akka.dispatch.Await
 
 //#my-actor
 class MyActor extends Actor {
@@ -35,6 +37,12 @@ case class Message(s: String)
 class FirstActor extends Actor {
   val myActor = context.actorOf(Props[MyActor], name = "myactor")
   //#context-actorOf
+  def receive = {
+    case x ⇒ sender ! x
+  }
+}
+
+class AnonymousActor extends Actor {
   //#anonymous-actor
   def receive = {
     case m: DoIt ⇒
@@ -46,9 +54,7 @@ class FirstActor extends Actor {
             context.stop(self)
         }
         def doSomeDangerousWork(msg: ImmutableMessage): String = { "done" }
-      })) ! m
-
-    case replyMsg: String ⇒ sender ! replyMsg
+      })) forward m
   }
   //#anonymous-actor
 }
@@ -109,7 +115,6 @@ object SwapperApp extends App {
 //#swapper
 
 //#receive-orElse
-import akka.actor.Actor.Receive
 
 abstract class GenericActor extends Actor {
   // to be defined in subclassing actor
@@ -132,6 +137,29 @@ class SpecificActor extends GenericActor {
 case class MyMsg(subject: String)
 //#receive-orElse
 
+//#receive-orElse2
+trait ComposableActor extends Actor {
+  private var receives: List[Receive] = List()
+  protected def registerReceive(receive: Receive) {
+    receives = receive :: receives
+  }
+
+  def receive = receives reduce { _ orElse _ }
+}
+
+class MyComposableActor extends ComposableActor {
+  override def preStart() {
+    registerReceive({
+      case "foo" ⇒ /* Do something */
+    })
+
+    registerReceive({
+      case "bar" ⇒ /* Do something */
+    })
+  }
+}
+
+//#receive-orElse2
 class ActorDocSpec extends AkkaSpec(Map("akka.loglevel" -> "INFO")) {
 
   "import context" in {
@@ -164,10 +192,10 @@ class ActorDocSpec extends AkkaSpec(Map("akka.loglevel" -> "INFO")) {
     system.eventStream.subscribe(testActor, classOf[Logging.Info])
 
     myActor ! "test"
-    expectMsgPF(1 second) { case Logging.Info(_, "received test") ⇒ true }
+    expectMsgPF(1 second) { case Logging.Info(_, _, "received test") ⇒ true }
 
     myActor ! "unknown"
-    expectMsgPF(1 second) { case Logging.Info(_, "received unknown message") ⇒ true }
+    expectMsgPF(1 second) { case Logging.Info(_, _, "received unknown message") ⇒ true }
 
     system.eventStream.unsubscribe(testActor)
     system.eventStream.publish(TestEvent.UnMute(filter))
@@ -189,7 +217,6 @@ class ActorDocSpec extends AkkaSpec(Map("akka.loglevel" -> "INFO")) {
   }
 
   "creating a Props config" in {
-    val dispatcher = system.dispatcherFactory.lookup("my-dispatcher")
     //#creating-props-config
     import akka.actor.Props
     val props1 = Props()
@@ -197,42 +224,42 @@ class ActorDocSpec extends AkkaSpec(Map("akka.loglevel" -> "INFO")) {
     val props3 = Props(new MyActor)
     val props4 = Props(
       creator = { () ⇒ new MyActor },
-      dispatcher = dispatcher,
-      timeout = Timeout(100))
+      dispatcher = "my-dispatcher")
     val props5 = props1.withCreator(new MyActor)
-    val props6 = props5.withDispatcher(dispatcher)
-    val props7 = props6.withTimeout(Timeout(100))
+    val props6 = props5.withDispatcher("my-dispatcher")
     //#creating-props-config
   }
 
   "creating actor with Props" in {
     //#creating-props
     import akka.actor.Props
-    val dispatcher = system.dispatcherFactory.lookup("my-dispatcher")
-    val myActor = system.actorOf(Props[MyActor].withDispatcher(dispatcher), name = "myactor")
+    val myActor = system.actorOf(Props[MyActor].withDispatcher("my-dispatcher"), name = "myactor2")
     //#creating-props
 
     system.stop(myActor)
   }
 
-  "using ask" in {
-    //#using-ask
-    class MyActor extends Actor {
-      def receive = {
-        case x: String ⇒ sender ! x.toUpperCase
-        case n: Int    ⇒ sender ! (n + 1)
-      }
-    }
-
-    val myActor = system.actorOf(Props(new MyActor), name = "myactor")
-    implicit val timeout = system.settings.ActorTimeout
+  "using implicit timeout" in {
+    val myActor = system.actorOf(Props(new FirstActor))
+    //#using-implicit-timeout
+    import akka.util.duration._
+    import akka.util.Timeout
+    import akka.pattern.ask
+    implicit val timeout = Timeout(5 seconds)
     val future = myActor ? "hello"
-    for (x ← future) println(x) //Prints "hello"
+    //#using-implicit-timeout
+    Await.result(future, timeout.duration) must be("hello")
 
-    val result: Future[Int] = for (x ← (myActor ? 3).mapTo[Int]) yield { 2 * x }
-    //#using-ask
+  }
 
-    system.stop(myActor)
+  "using explicit timeout" in {
+    val myActor = system.actorOf(Props(new FirstActor))
+    //#using-explicit-timeout
+    import akka.util.duration._
+    import akka.pattern.ask
+    val future = myActor.ask("hello")(5 seconds)
+    //#using-explicit-timeout
+    Await.result(future, 5 seconds) must be("hello")
   }
 
   "using receiveTimeout" in {
@@ -272,4 +299,90 @@ class ActorDocSpec extends AkkaSpec(Map("akka.loglevel" -> "INFO")) {
 
     val actor = system.actorOf(Props(new HotSwapActor), name = "hot")
   }
+
+  "using watch" in {
+    //#watch
+    import akka.actor.{ Actor, Props, Terminated }
+
+    class WatchActor extends Actor {
+      val child = context.actorOf(Props.empty, "child")
+      context.watch(child) // <-- this is the only call needed for registration
+      var lastSender = system.deadLetters
+
+      def receive = {
+        case "kill"              ⇒ context.stop(child); lastSender = sender
+        case Terminated(`child`) ⇒ lastSender ! "finished"
+      }
+    }
+    //#watch
+    val a = system.actorOf(Props(new WatchActor))
+    implicit val sender = testActor
+    a ! "kill"
+    expectMsg("finished")
+  }
+
+  "using pattern gracefulStop" in {
+    val actorRef = system.actorOf(Props[MyActor])
+    //#gracefulStop
+    import akka.pattern.gracefulStop
+    import akka.dispatch.Await
+    import akka.actor.ActorTimeoutException
+
+    try {
+      val stopped: Future[Boolean] = gracefulStop(actorRef, 5 seconds)(system)
+      Await.result(stopped, 6 seconds)
+      // the actor has been stopped
+    } catch {
+      case e: ActorTimeoutException ⇒ // the actor wasn't stopped within 5 seconds
+    }
+    //#gracefulStop
+  }
+
+  "using pattern ask / pipeTo" in {
+    val actorA, actorB, actorC, actorD = system.actorOf(Props.empty)
+    //#ask-pipeTo
+    import akka.pattern.{ ask, pipe }
+
+    case class Result(x: Int, s: String, d: Double)
+    case object Request
+
+    implicit val timeout = Timeout(5 seconds) // needed for `?` below
+
+    val f: Future[Result] =
+      for {
+        x ← ask(actorA, Request).mapTo[Int] // call pattern directly
+        s ← actorB ask Request mapTo manifest[String] // call by implicit conversion
+        d ← actorC ? Request mapTo manifest[Double] // call by symbolic name
+      } yield Result(x, s, d)
+
+    f pipeTo actorD // .. or ..
+    pipe(f) to actorD
+    //#ask-pipeTo
+  }
+
+  "replying with own or other sender" in {
+    val actor = system.actorOf(Props(new Actor {
+      def receive = {
+        case ref: ActorRef ⇒
+          //#reply-with-sender
+          sender.tell("reply", context.parent) // replies will go back to parent
+          sender.!("reply")(context.parent) // alternative syntax (beware of the parens!)
+        //#reply-with-sender
+        case x ⇒
+          //#reply-without-sender
+          sender ! x // replies will go to this actor
+        //#reply-without-sender
+      }
+    }))
+    implicit val me = testActor
+    actor ! 42
+    expectMsg(42)
+    lastSender must be === actor
+    actor ! me
+    expectMsg("reply")
+    lastSender must be === system.actorFor("/user")
+    expectMsg("reply")
+    lastSender must be === system.actorFor("/user")
+  }
+
 }

@@ -30,7 +30,7 @@ it's located in ``akka.actor.TypedActor``.
    :include: typed-actor-extension-tools
 
 .. warning::
-    
+
     Same as not exposing ``this`` of an Akka Actor, it's important not to expose ``this`` of a Typed Actor,
     instead you should pass the external proxy reference, which is obtained from within your Typed Actor as
     ``TypedActor.self``, this is your external identity, as the ``ActorRef`` is the external identity of
@@ -127,7 +127,7 @@ Request-reply-with-future message send
 .. includecode:: code/akka/docs/actor/TypedActorDocSpec.scala
    :include: typed-actor-call-future
 
-This call is asynchronous, and the Future returned can be used for asynchronous composition. 
+This call is asynchronous, and the Future returned can be used for asynchronous composition.
 
 Stopping Typed Actors
 ---------------------
@@ -153,6 +153,13 @@ you can create child Typed Actors by invoking ``typedActorOf(..)`` on that.
 
 This also works for creating child Typed Actors in regular Akka Actors.
 
+Supervisor Strategy
+-------------------
+
+By having your Typed Actor implementation class implement ``TypedActor.Supervisor``
+you can define the strategy to use for supervising child actors, as described in
+:ref:`supervision` and :ref:`fault-tolerance-scala`.
+
 Lifecycle callbacks
 -------------------
 
@@ -164,6 +171,25 @@ By having your Typed Actor implementation class implement any and all of the fol
     * ``TypedActor.PostRestart``
 
  You can hook into the lifecycle of your Typed Actor.
+
+Receive arbitrary messages
+--------------------------
+
+If your implementation class of your TypedActor extends ``akka.actor.TypedActor.Receiver``,
+all messages that are not ``MethodCall``s will be passed into the ``onReceive``-method.
+
+This allows you to react to DeathWatch ``Terminated``-messages and other types of messages,
+e.g. when interfacing with untyped actors.
+
+Proxying
+--------
+
+You can use the ``typedActorOf`` that takes a TypedProps and an ActorRef to proxy the given ActorRef as a TypedActor.
+This is usable if you want to communicate remotely with TypedActors on other machines, just look them up with ``actorFor`` and pass the ``ActorRef`` to ``typedActorOf``.
+
+.. note::
+
+  The ActorRef needs to accept ``MethodCall`` messages.
 
 Supercharging
 -------------

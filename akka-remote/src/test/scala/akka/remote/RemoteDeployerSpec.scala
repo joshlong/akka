@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.remote
 
@@ -11,7 +11,6 @@ import com.typesafe.config._
 object RemoteDeployerSpec {
   val deployerConf = ConfigFactory.parseString("""
       akka.actor.provider = "akka.remote.RemoteActorRefProvider"
-      akka.cluster.nodename = Whatever
       akka.actor.deployment {
         /user/service2 {
           router = round-robin
@@ -19,6 +18,7 @@ object RemoteDeployerSpec {
           remote = "akka://sys@wallace:2552"
         }
       }
+      akka.remote.netty.port = 0
       """, ConfigParseOptions.defaults)
 
   class RecipeActor extends Actor {
@@ -41,9 +41,8 @@ class RemoteDeployerSpec extends AkkaSpec(RemoteDeployerSpec.deployerConf) {
         Deploy(
           service,
           deployment.get.config,
-          None,
           RoundRobinRouter(3),
-          RemoteScope(UnparsedSystemAddress(Some("sys"), UnparsedTransportAddress("akka", "wallace", 2552))))))
+          RemoteScope(Address("akka", "sys", "wallace", 2552)))))
     }
 
   }

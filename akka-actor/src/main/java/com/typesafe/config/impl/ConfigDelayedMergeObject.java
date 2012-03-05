@@ -1,8 +1,9 @@
 /**
- *   Copyright (C) 2011 Typesafe Inc. <http://typesafe.com>
+ *   Copyright (C) 2011-2012 Typesafe Inc. <http://typesafe.com>
  */
 package com.typesafe.config.impl;
 
+import java.io.ObjectStreamException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -17,8 +18,10 @@ import com.typesafe.config.ConfigValue;
 
 // This is just like ConfigDelayedMerge except we know statically
 // that it will turn out to be an object.
-class ConfigDelayedMergeObject extends AbstractConfigObject implements
+final class ConfigDelayedMergeObject extends AbstractConfigObject implements
         Unmergeable {
+
+    private static final long serialVersionUID = 1L;
 
     final private List<AbstractConfigValue> stack;
     final private boolean ignoresFallbacks;
@@ -111,6 +114,31 @@ class ConfigDelayedMergeObject extends AbstractConfigObject implements
     }
 
     @Override
+    public ConfigDelayedMergeObject withOnlyKey(String key) {
+        throw notResolved();
+    }
+
+    @Override
+    public ConfigDelayedMergeObject withoutKey(String key) {
+        throw notResolved();
+    }
+
+    @Override
+    protected AbstractConfigObject withOnlyPathOrNull(Path path) {
+        throw notResolved();
+    }
+
+    @Override
+    AbstractConfigObject withOnlyPath(Path path) {
+        throw notResolved();
+    }
+
+    @Override
+    AbstractConfigObject withoutPath(Path path) {
+        throw notResolved();
+    }
+
+    @Override
     public Collection<AbstractConfigValue> unmergedValues() {
         return stack;
     }
@@ -191,5 +219,15 @@ class ConfigDelayedMergeObject extends AbstractConfigObject implements
     @Override
     protected AbstractConfigValue peek(String key) {
         throw notResolved();
+    }
+
+    // This ridiculous hack is because some JDK versions apparently can't
+    // serialize an array, which is used to implement ArrayList and EmptyList.
+    // maybe
+    // http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=6446627
+    private Object writeReplace() throws ObjectStreamException {
+        // switch to LinkedList
+        return new ConfigDelayedMergeObject(origin(),
+                new java.util.LinkedList<AbstractConfigValue>(stack), ignoresFallbacks);
     }
 }

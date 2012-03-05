@@ -1,11 +1,10 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
 
-import akka.japi.{ Creator, Procedure }
-import akka.dispatch.{ MessageDispatcher, Promise }
+import akka.japi.{ Creator }
 
 /**
  * Actor base trait that should be extended by or mixed to create an Actor with the semantics of the 'Actor Model':
@@ -35,6 +34,27 @@ import akka.dispatch.{ MessageDispatcher, Promise }
  *        this.sender = sender;
  *        this.result = result;
  *      }
+ *    }
+ *
+ *   private static SupervisorStrategy strategy = new OneForOneStrategy(10, Duration.parse("1 minute"),
+ *     new Function<Throwable, Directive>() {
+ *       @Override
+ *       public Directive apply(Throwable t) {
+ *         if (t instanceof ArithmeticException) {
+ *           return resume();
+ *         } else if (t instanceof NullPointerException) {
+ *           return restart();
+ *         } else if (t instanceof IllegalArgumentException) {
+ *           return stop();
+ *         } else {
+ *           return escalate();
+ *         }
+ *       }
+ *     });
+ *
+ *   @Override
+ *   public SupervisorStrategy supervisorStrategy() {
+ *     return strategy;
  *    }
  *
  *    public void onReceive(Object message) throws Exception {
@@ -93,6 +113,12 @@ abstract class UntypedActor extends Actor {
   def getSender(): ActorRef = sender
 
   /**
+   * User overridable definition the strategy to use for supervising
+   * child actors.
+   */
+  override def supervisorStrategy(): SupervisorStrategy = super.supervisorStrategy()
+
+  /**
    * User overridable callback.
    * <p/>
    * Is called when an Actor is started.
@@ -124,16 +150,6 @@ abstract class UntypedActor extends Actor {
    */
   override def postRestart(reason: Throwable): Unit = super.postRestart(reason)
 
-  /**
-   * User overridable callback.
-   * <p/>
-   * Is called when a message isn't handled by the current behavior of the actor
-   * by default it throws an UnhandledMessageException
-   */
-  override def unhandled(msg: Any) {
-    throw new UnhandledMessageException(msg, self)
-  }
-
   final protected def receive = {
     case msg ⇒ onReceive(msg)
   }
@@ -142,4 +158,4 @@ abstract class UntypedActor extends Actor {
 /**
  * Factory closure for an UntypedActor, to be used with 'Actors.actorOf(factory)'.
  */
-trait UntypedActorFactory extends Creator[Actor]
+trait UntypedActorFactory extends Creator[Actor] with Serializable

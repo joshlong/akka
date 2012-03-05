@@ -1,29 +1,38 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
-import java.util.concurrent.TimeUnit.MILLISECONDS
-import akka.actor.LocalActorRef
-import akka.util.Duration
 import akka.AkkaException
-import org.I0Itec.zkclient.serialize._
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.cluster.zookeeper.AkkaZkClient
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.cluster.zookeeper.ZooKeeperQueue
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
+import akka.util.NonFatal
+import akka.config.ConfigurationException
+import akka.dispatch.MessageQueue
+import akka.actor.ActorSystem
 
 class ZooKeeperBasedMailboxException(message: String) extends AkkaException(message)
 
-class ZooKeeperBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class ZooKeeperBasedMailboxType(systemSettings: ActorSystem.Settings, config: Config) extends MailboxType {
+  private val settings = new ZooKeeperBasedMailboxSettings(systemSettings, config)
+  override def create(owner: Option[ActorContext]): MessageQueue = owner match {
+    case Some(o) ⇒ new ZooKeeperBasedMessageQueue(o, settings)
+    case None    ⇒ throw new ConfigurationException("creating a durable mailbox requires an owner (i.e. does not work with BalancingDispatcher)")
+  }
+}
 
-  private val settings = ZooKeeperBasedMailboxExtension(owner.system)
+class ZooKeeperBasedMessageQueue(_owner: ActorContext, val settings: ZooKeeperBasedMailboxSettings) extends DurableMessageQueue(_owner) with DurableMessageSerialization {
+
   val queueNode = "/queues"
   val queuePathTemplate = queueNode + "/%s"
 
-  val log = Logging(system, "ZooKeeperBasedMailbox")
+  val log = Logging(system, "ZooKeeperBasedMessageQueue")
 
   private val zkClient = new AkkaZkClient(
     settings.ZkServerAddresses,
@@ -32,18 +41,15 @@ class ZooKeeperBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) 
   private val queue = new ZooKeeperQueue[Array[Byte]](zkClient, queuePathTemplate.format(name), settings.BlockingQueue)
 
   def enqueue(receiver: ActorRef, envelope: Envelope) {
-    log.debug("ENQUEUING message in zookeeper-based mailbox [%s]".format(envelope))
     queue.enqueue(serialize(envelope))
   }
 
   def dequeue: Envelope = try {
-    val messageInvocation = deserialize(queue.dequeue.asInstanceOf[Array[Byte]])
-    log.debug("DEQUEUING message in zookeeper-based mailbox [%s]".format(messageInvocation))
-    messageInvocation
+    deserialize(queue.dequeue.asInstanceOf[Array[Byte]])
   } catch {
     case e: java.util.NoSuchElementException ⇒ null
     case e: InterruptedException             ⇒ null
-    case e ⇒
+    case NonFatal(e) ⇒
       log.error(e, "Couldn't dequeue from ZooKeeper-based mailbox, due to: " + e.getMessage)
       throw e
   }
@@ -59,7 +65,7 @@ class ZooKeeperBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) 
     case e: Exception ⇒ false
   }
 
-  override def cleanUp() {
+  def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = {
     try {
       zkClient.close()
     } catch {

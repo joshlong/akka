@@ -28,6 +28,10 @@ its syntax from Erlang.
 Creating Actors
 ===============
 
+Since Akka enforces parental supervision every actor is supervised and
+(potentially) the supervisor of its children; it is advisable that you
+familiarize yourself with :ref:`actor-systems` and :ref:`supervision` and it
+may also help to read :ref:`actorOf-vs-actorFor`.
 
 Defining an Actor class
 -----------------------
@@ -47,8 +51,8 @@ Please note that the Akka Actor ``receive`` message loop is exhaustive, which is
 different compared to Erlang and Scala Actors. This means that you need to
 provide a pattern match for all messages that it can accept and if you want to
 be able to handle unknown messages then you need to have a default case as in
-the example above. Otherwise an ``UnhandledMessageException`` will be
-thrown and the actor is restarted when an unknown message is received.
+the example above. Otherwise an ``akka.actor.UnhandledMessage(message, sender, recipient)`` will be
+published to the ``ActorSystem``'s ``EventStream``.
 
 Creating Actors with default constructor
 ----------------------------------------
@@ -141,19 +145,23 @@ Actor API
 The :class:`Actor` trait defines only one abstract method, the above mentioned
 :meth:`receive`, which implements the behavior of the actor.
 
-If the current actor behavior does not match a received message, :meth:`unhandled`
-is called, which by default throws an :class:`UnhandledMessageException`.
+If the current actor behavior does not match a received message,
+:meth:`unhandled` is called, which by default publishes an
+``akka.actor.UnhandledMessage(message, sender, recipient)`` on the actor
+system’s event stream.
 
 In addition, it offers:
 
 * :obj:`self` reference to the :class:`ActorRef` of the actor
 * :obj:`sender` reference sender Actor of the last received message, typically used as described in :ref:`Actor.Reply`
+* :obj:`supervisorStrategy` user overridable definition the strategy to use for supervising child actors
 * :obj:`context` exposes contextual information for the actor and the current message, such as:
 
   * factory methods to create child actors (:meth:`actorOf`)
   * system that the actor belongs to
   * parent supervisor
   * supervised children
+  * lifecycle monitoring
   * hotswap behavior stack as described in :ref:`Actor.HotSwap`
 
 You can import the members in the :obj:`context` to avoid prefixing access with ``context.``
@@ -174,6 +182,35 @@ described in the following::
 The implementations shown above are the defaults provided by the :class:`Actor`
 trait.
 
+.. _deathwatch-scala:
+
+Lifecycle Monitoring aka DeathWatch
+-----------------------------------
+
+In order to be notified when another actor terminates (i.e. stops permanently,
+not temporary failure and restart), an actor may register itself for reception
+of the :class:`Terminated` message dispatched by the other actor upon
+termination (see `Stopping Actors`_). This service is provided by the
+:class:`DeathWatch` component of the actor system.
+
+Registering a monitor is easy:
+
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#watch
+
+It should be noted that the :class:`Terminated` message is generated
+independent of the order in which registration and termination occur.
+Registering multiple times does not necessarily lead to multiple messages being
+generated, but there is no guarantee that only exactly one such message is
+received: if termination of the watched actor has generated and queued the
+message, and another registration is done before this message has been
+processed, then a second message will be queued, because registering for
+monitoring of an already terminated actor leads to the immediate generation of
+the :class:`Terminated` message.
+
+It is also possible to deregister from watching another actor’s liveliness
+using ``context.unwatch(target)``, but obviously this cannot guarantee
+non-reception of the :class:`Terminated` message because that may already have
+been queued.
 
 Start Hook
 ----------
@@ -210,8 +247,8 @@ processing a message. This restart involves the hooks mentioned above:
 
 
 An actor restart replaces only the actual actor object; the contents of the
-mailbox and the hotswap stack are unaffected by the restart, so processing of
-messages will resume after the :meth:`postRestart` hook returns. The message
+mailbox is unaffected by the restart, so processing of messages will resume
+after the :meth:`postRestart` hook returns. The message
 that triggered the exception will not be received again. Any message
 sent to an actor while it is being restarted will be queued to its mailbox as
 usual.
@@ -224,7 +261,6 @@ e.g. for deregistering this actor from other services. This hook is guaranteed
 to run after message queuing has been disabled for this actor, i.e. messages
 sent to a stopped actor will be redirected to the :obj:`deadLetters` of the
 :obj:`ActorSystem`.
-
 
 Identifying Actors
 ==================
@@ -242,15 +278,27 @@ result::
   context.actorFor("/user/serviceA/aggregator") // will look up this absolute path
   context.actorFor("../joe")                    // will look up sibling beneath same supervisor
 
+The supplied path is parsed as a :class:`java.net.URI`, which basically means
+that it is split on ``/`` into path elements. If the path starts with ``/``, it
+is absolute and the look-up starts at the root guardian (which is the parent of
+``"/user"``); otherwise it starts at the current actor. If a path element equals
+``..``, the look-up will take a step “up” towards the supervisor of the
+currently traversed actor, otherwise it will step “down” to the named child.
 It should be noted that the ``..`` in actor paths here always means the logical
-structure, i.e. the supervisor. Remote actor addresses may also be looked up,
-if remoting is enabled::
+structure, i.e. the supervisor.
+
+If the path being looked up does not exist, a special actor reference is
+returned which behaves like the actor system’s dead letter queue but retains
+its identity (i.e. the path which was looked up).
+
+Remote actor addresses may also be looked up, if remoting is enabled::
 
   context.actorFor("akka://app@otherhost:1234/user/serviceB")
 
 These look-ups return a (possibly remote) actor reference immediately, so you
 will have to send to it and await a reply in order to verify that ``serviceB``
-is actually reachable and running.
+is actually reachable and running. An example demonstrating actor look-up is
+given in :ref:`remote-lookup-sample-scala`.
 
 Messages and immutability
 =========================
@@ -282,9 +330,9 @@ Send messages
 Messages are sent to an Actor through one of the following methods.
 
 * ``!`` means “fire-and-forget”, e.g. send a message asynchronously and return
-  immediately. Also know as ``tell``.
+  immediately. Also known as ``tell``.
 * ``?`` sends a message asynchronously and returns a :class:`Future`
-  representing a possible reply. Also know as ``ask``.
+  representing a possible reply. Also known as ``ask``.
 
 Message ordering is guaranteed on a per-sender basis.
 
@@ -309,35 +357,42 @@ If invoked from an instance that is **not** an Actor the sender will be
 Ask: Send-And-Receive-Future
 ----------------------------
 
-Using ``?`` will send a message to the receiving Actor asynchronously and
-will immediately return a :class:`Future`:
+The ``ask`` pattern involves actors as well as futures, hence it is offered as
+a use pattern rather than a method on :class:`ActorRef`:
 
-.. code-block:: scala
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#ask-pipeTo
 
-  val future = actor ? "hello"
+This example demonstrates ``ask`` together with the ``pipeTo`` pattern on
+futures, because this is likely to be a common combination. Please note that
+all of the above is completely non-blocking and asynchronous: ``ask`` produces
+a :class:`Future`, three of which are composed into a new future using the
+for-comprehension and then ``pipeTo`` installs an ``onComplete``-handler on the
+future to effect the submission of the aggregated :class:`Result` to another
+actor.
 
-The receiving actor should reply to this message, which will complete the
-future with the reply message as value; ``sender ! result``.
+Using ``ask`` will send a message to the receiving Actor as with ``tell``, and
+the receiving actor must reply with ``sender ! reply`` in order to complete the
+returned :class:`Future` with a value. The ``ask`` operation involves creating
+an internal actor for handling this reply, which needs to have a timeout after
+which it is destroyed in order not to leak resources; see more below.
 
 To complete the future with an exception you need send a Failure message to the sender.
-This is not done automatically when an actor throws an exception while processing a
+This is *not done automatically* when an actor throws an exception while processing a
 message.
 
 .. includecode:: code/akka/docs/actor/ActorDocSpec.scala#reply-exception
 
-If the actor does not complete the future, it will expire after the timeout period,
-which is taken from one of the following locations in order of precedence:
+If the actor does not complete the future, it will expire after the timeout
+period, completing it with an :class:`AskTimeoutException`.  The timeout is
+taken from one of the following locations in order of precedence:
 
-#. explicitly given timeout as in ``actor.?("hello")(timeout = 12 millis)``
-#. implicit argument of type :class:`akka.actor.Timeout`, e.g.
+1. explicitly given timeout as in:
 
-   ::
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#using-explicit-timeout
 
-     import akka.actor.Timeout
-     import akka.util.duration._
+2. implicit argument of type :class:`akka.util.Timeout`, e.g.
 
-     implicit val timeout = Timeout(12 millis)
-     val future = actor ? "hello"
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#using-implicit-timeout
 
 See :ref:`futures-scala` for more information on how to await or query a
 future.
@@ -356,23 +411,6 @@ Gives you a way to avoid blocking.
   the callback will be scheduled concurrently to the enclosing actor. Unfortunately
   there is not yet a way to detect these illegal accesses at compile time.
   See also: :ref:`jmm-shared-state`
-
-The future returned from the ``?`` method can conveniently be passed around or
-chained with further processing steps, but sometimes you just need the value,
-even if that entails waiting for it (but keep in mind that waiting inside an
-actor is prone to dead-locks, e.g. if obtaining the result depends on
-processing another message on this actor).
-
-For this purpose, there is the method :meth:`Future.as[T]` which waits until
-either the future is completed or its timeout expires, whichever comes first.
-The result is then inspected and returned as :class:`Some[T]` if it was
-normally completed and the answer’s runtime type matches the desired type; if
-the future contains an exception or the value cannot be cast to the desired
-type, it will throw the exception or a :class:`ClassCastException` (if you want
-to get :obj:`None` in the latter case, use :meth:`Future.asSilently[T]`). In
-case of a timeout, :obj:`None` is returned.
-
-.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#using-ask
 
 Forward message
 ---------------
@@ -436,6 +474,7 @@ object.
 
 .. includecode:: code/akka/docs/actor/ActorDocSpec.scala#receive-timeout
 
+.. _stopping-actors-scala:
 
 Stopping actors
 ===============
@@ -451,19 +490,38 @@ but additional messages in the mailbox will not be processed. By default these
 messages are sent to the :obj:`deadLetters` of the :obj:`ActorSystem`, but that
 depends on the mailbox implementation.
 
-When stop is called then a call to the ``def postStop`` callback method will
-take place. The ``Actor`` can use this callback to implement shutdown behavior.
+Termination of an actor proceeds in two steps: first the actor suspends its
+mailbox processing and sends a stop command to all its children, then it keeps
+processing the termination messages from its children until the last one is
+gone, finally terminating itself (invoking :meth:`postStop`, dumping mailbox,
+publishing :class:`Terminated` on the :ref:`DeathWatch <deathwatch-scala>`, telling
+its supervisor). This procedure ensures that actor system sub-trees terminate
+in an orderly fashion, propagating the stop command to the leaves and
+collecting their confirmation back to the stopped supervisor. If one of the
+actors does not respond (i.e. processing a message for extended periods of time
+and therefore not receiving the stop command), this whole process will be
+stuck.
+
+Upon :meth:`ActorSystem.shutdown()`, the system guardian actors will be
+stopped, and the aforementioned process will ensure proper termination of the
+whole system.
+
+The :meth:`postStop()` hook is invoked after an actor is fully stopped. This
+enables cleaning up of resources:
 
 .. code-block:: scala
 
   override def postStop() = {
-    ... // clean up resources
+    // close some file or database connection
   }
 
-All Actors are stopped when the ``ActorSystem`` is stopped.
-Supervised actors are stopped when the supervisor is stopped, i.e. children are stopped
-when parent is stopped.
+.. note::
 
+  Since stopping an actor is asynchronous, you cannot immediately reuse the
+  name of the child you just stopped; this will result in an
+  :class:`InvalidActorNameException`. Instead, :meth:`watch()` the terminating
+  actor and create its replacement in response to the :class:`Terminated`
+  message which will eventually arrive.
 
 PoisonPill
 ----------
@@ -473,8 +531,13 @@ stop the actor when the message is processed. ``PoisonPill`` is enqueued as
 ordinary messages and will be handled after messages that were already queued
 in the mailbox.
 
-If the ``PoisonPill`` was sent with ``?``, the ``Future`` will be completed with an
-``akka.actor.ActorKilledException("PoisonPill")``.
+Graceful Stop
+-------------
+
+:meth:`gracefulStop` is useful if you need to wait for termination or compose ordered
+termination of several actors:
+
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#gracefulStop
 
 
 .. _Actor.HotSwap:
@@ -513,7 +576,7 @@ Here is another little cute example of ``become`` and ``unbecome`` in action:
 Encoding Scala Actors nested receives without accidentally leaking memory
 -------------------------------------------------------------------------
 
-See this `Unnested receive example <http://github.com/jboner/akka/blob/master/akka/akka-docs/scala/code/akka/docs/actor/UnnestedReceives.scala>`_.
+See this `Unnested receive example <https://github.com/jboner/akka/blob/master/akka-docs/scala/code/akka/docs/actor/UnnestedReceives.scala>`_.
 
 
 Downgrade
@@ -590,3 +653,7 @@ extend that, either through inheritance or delegation, is to use
 ``PartialFunction.orElse`` chaining.
 
 .. includecode:: code/akka/docs/actor/ActorDocSpec.scala#receive-orElse
+
+Or:
+
+.. includecode:: code/akka/docs/actor/ActorDocSpec.scala#receive-orElse2

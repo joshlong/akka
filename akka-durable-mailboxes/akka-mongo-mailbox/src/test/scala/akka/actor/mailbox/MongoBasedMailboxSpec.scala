@@ -1,26 +1,47 @@
 package akka.actor.mailbox
 
 import java.util.concurrent.TimeUnit
-
 import org.scalatest.WordSpec
 import org.scalatest.matchers.MustMatchers
 import org.scalatest.{ BeforeAndAfterEach, BeforeAndAfterAll }
-
 import akka.actor._
 import akka.actor.Actor._
 import java.util.concurrent.CountDownLatch
 import akka.dispatch.MessageDispatcher
 
+object MongoBasedMailboxSpec {
+  val config = """
+    mongodb-dispatcher {
+      mailbox-type = akka.actor.mailbox.MongoBasedMailboxType
+      throughput = 1
+      mongodb.uri = "mongodb://localhost:27123/akka.mailbox"
+    }
+    """
+}
+
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class MongoBasedMailboxSpec extends DurableMailboxSpec("mongodb", MongoDurableMailboxType) {
-  import org.apache.log4j.{ Logger, Level }
+class MongoBasedMailboxSpec extends DurableMailboxSpec("mongodb", MongoBasedMailboxSpec.config) {
+
   import com.mongodb.async._
 
-  val mongo = MongoConnection("localhost", 27017)("akka")
+  lazy val mongod = new ProcessBuilder("mongod", "--dbpath", "mongoDB", "--bind_ip", "127.0.0.1", "--port", "27123").start()
+  lazy val mongo = MongoConnection("localhost", 27123)("akka")
 
-  mongo.dropDatabase() { success ⇒ }
+  override def atStartup(): Unit = {
+    // start MongoDB daemon
+    new java.io.File("mongoDB").mkdir()
+    val in = mongod.getInputStream
 
-  Logger.getRootLogger.setLevel(Level.DEBUG)
+    try {
+      streamMustContain(in, "waiting for connections on port")
+      mongo.dropDatabase() { success ⇒ }
+    } catch {
+      case e ⇒ mongod.destroy(); throw e
+    }
+  }
+
+  override def atTermination(): Unit = mongod.destroy()
+
 }
 
 /*object DurableMongoMailboxSpecActorFactory {

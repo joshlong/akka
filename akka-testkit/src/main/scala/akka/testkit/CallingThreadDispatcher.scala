@@ -1,26 +1,20 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.testkit
 
-import akka.event.Logging.{ Warning, Error }
+import java.lang.ref.WeakReference
 import java.util.concurrent.locks.ReentrantLock
 import java.util.LinkedList
-import java.util.concurrent.RejectedExecutionException
-import akka.util.Switch
-import java.lang.ref.WeakReference
 import scala.annotation.tailrec
-import akka.actor.{ ActorCell, ActorRef, ActorSystem }
-import akka.dispatch._
-import akka.actor.Scheduler
-import akka.event.EventStream
-import akka.util.Duration
-import akka.util.duration._
-import java.util.concurrent.TimeUnit
-import akka.actor.ExtensionId
-import akka.actor.ExtensionIdProvider
-import akka.actor.ActorSystemImpl
-import akka.actor.Extension
+import com.typesafe.config.Config
+import akka.actor.{ ActorInitializationException, ExtensionIdProvider, ExtensionId, Extension, ExtendedActorSystem, ActorRef, ActorCell }
+import akka.dispatch.{ MailboxType, TaskInvocation, SystemMessage, Suspend, Resume, MessageDispatcherConfigurator, MessageDispatcher, Mailbox, Envelope, DispatcherPrerequisites, DefaultSystemMessageQueue }
+import akka.util.duration.intToDurationInt
+import akka.util.{ Switch, Duration }
+import akka.util.NonFatal
+import akka.actor.ActorContext
+import akka.dispatch.MessageQueue
 
 /*
  * Locking rules:
@@ -41,7 +35,7 @@ import akka.actor.Extension
 
 private[testkit] object CallingThreadDispatcherQueues extends ExtensionId[CallingThreadDispatcherQueues] with ExtensionIdProvider {
   override def lookup = CallingThreadDispatcherQueues
-  override def createExtension(system: ActorSystemImpl): CallingThreadDispatcherQueues = new CallingThreadDispatcherQueues
+  override def createExtension(system: ExtendedActorSystem): CallingThreadDispatcherQueues = new CallingThreadDispatcherQueues
 }
 
 private[testkit] class CallingThreadDispatcherQueues extends Extension {
@@ -83,13 +77,20 @@ private[testkit] class CallingThreadDispatcherQueues extends Extension {
         val q = ref.get
         if (q ne null) && (q ne own)
       } {
-        while (q.peek ne null) {
+        val owner = mbox.actor.self
+        var msg = q.q.dequeue()
+        while (msg ne null) {
           // this is safe because this method is only ever called while holding the suspendSwitch monitor
-          own.push(q.pop)
+          own.q.enqueue(owner, msg)
+          msg = q.q.dequeue()
         }
       }
     }
   }
+}
+
+object CallingThreadDispatcher {
+  val Id = "akka.test.calling-thread-dispatcher"
 }
 
 /**
@@ -119,17 +120,15 @@ private[testkit] class CallingThreadDispatcherQueues extends Extension {
  */
 class CallingThreadDispatcher(
   _prerequisites: DispatcherPrerequisites,
+  val mailboxType: MailboxType,
   val name: String = "calling-thread") extends MessageDispatcher(_prerequisites) {
   import CallingThreadDispatcher._
 
   val log = akka.event.Logging(prerequisites.eventStream, "CallingThreadDispatcher")
 
-  protected[akka] override def createMailbox(actor: ActorCell) = new CallingThreadMailbox(actor)
+  override def id: String = Id
 
-  private def getMailbox(actor: ActorCell): Option[CallingThreadMailbox] = actor.mailbox match {
-    case m: CallingThreadMailbox ⇒ Some(m)
-    case _                       ⇒ None
-  }
+  protected[akka] override def createMailbox(actor: ActorCell) = new CallingThreadMailbox(actor, mailboxType)
 
   protected[akka] override def shutdown() {}
 
@@ -139,8 +138,22 @@ class CallingThreadDispatcher(
 
   protected[akka] override def shutdownTimeout = 1 second
 
+  protected[akka] override def register(actor: ActorCell): Unit = {
+    super.register(actor)
+    actor.mailbox match {
+      case mbox: CallingThreadMailbox ⇒
+        val queue = mbox.queue
+        queue.enter
+        runQueue(mbox, queue)
+      case x ⇒ throw new ActorInitializationException("expected CallingThreadMailbox, got " + x.getClass)
+    }
+  }
+
   override def suspend(actor: ActorCell) {
-    getMailbox(actor) foreach (_.suspendSwitch.switchOn)
+    actor.mailbox match {
+      case m: CallingThreadMailbox ⇒ m.suspendSwitch.switchOn
+      case m                       ⇒ m.systemEnqueue(actor.self, Suspend())
+    }
   }
 
   override def resume(actor: ActorCell) {
@@ -157,10 +170,6 @@ class CallingThreadDispatcher(
       case m ⇒ m.systemEnqueue(actor.self, Resume())
     }
   }
-
-  override def mailboxSize(actor: ActorCell) = getMailbox(actor) map (_.queue.size) getOrElse 0
-
-  override def mailboxIsEmpty(actor: ActorCell): Boolean = getMailbox(actor) map (_.queue.isEmpty) getOrElse true
 
   protected[akka] override def systemDispatch(receiver: ActorCell, message: SystemMessage) {
     receiver.mailbox match {
@@ -180,16 +189,14 @@ class CallingThreadDispatcher(
       case mbox: CallingThreadMailbox ⇒
         val queue = mbox.queue
         val execute = mbox.suspendSwitch.fold {
-          queue.push(handle)
+          queue.q.enqueue(receiver.self, handle)
           false
         } {
-          queue.push(handle)
-          if (queue.isActive)
-            false
-          else {
+          queue.q.enqueue(receiver.self, handle)
+          if (!queue.isActive) {
             queue.enter
             true
-          }
+          } else false
         }
         if (execute) runQueue(mbox, queue)
       case m ⇒ m.enqueue(receiver.self, handle)
@@ -211,14 +218,14 @@ class CallingThreadDispatcher(
   private def runQueue(mbox: CallingThreadMailbox, queue: NestingQueue, interruptedex: InterruptedException = null) {
     var intex = interruptedex;
     assert(queue.isActive)
-    mbox.lock.lock
+    mbox.ctdLock.lock
     val recurse = try {
       mbox.processAllSystemMessages()
       val handle = mbox.suspendSwitch.fold[Envelope] {
         queue.leave
         null
       } {
-        val ret = queue.pop
+        val ret = if (mbox.isClosed) null else queue.q.dequeue()
         if (ret eq null) queue.leave
         ret
       }
@@ -233,7 +240,7 @@ class CallingThreadDispatcher(
             Thread.currentThread().interrupt()
             intex = ie
             true
-          case e ⇒
+          case NonFatal(e) ⇒
             log.error(e, "Error during message processing")
             queue.leave
             false
@@ -243,9 +250,9 @@ class CallingThreadDispatcher(
         false
       } else false
     } catch {
-      case e ⇒ queue.leave; throw e
+      case NonFatal(e) ⇒ queue.leave; throw e
     } finally {
-      mbox.lock.unlock
+      mbox.ctdLock.unlock
     }
     if (recurse) {
       runQueue(mbox, queue, intex)
@@ -258,14 +265,15 @@ class CallingThreadDispatcher(
   }
 }
 
-class NestingQueue {
-  private var q = new LinkedList[Envelope]()
-  def size = q.size
-  def isEmpty = q.isEmpty
-  def push(handle: Envelope) { q.offer(handle) }
-  def peek = q.peek
-  def pop = q.poll
+class CallingThreadDispatcherConfigurator(config: Config, prerequisites: DispatcherPrerequisites)
+  extends MessageDispatcherConfigurator(config, prerequisites) {
 
+  private val instance = new CallingThreadDispatcher(prerequisites, mailboxType())
+
+  override def dispatcher(): MessageDispatcher = instance
+}
+
+class NestingQueue(val q: MessageQueue) {
   @volatile
   private var active = false
   def enter { if (active) sys.error("already active") else active = true }
@@ -273,11 +281,11 @@ class NestingQueue {
   def isActive = active
 }
 
-class CallingThreadMailbox(_receiver: ActorCell) extends Mailbox(_receiver) with DefaultSystemMessageQueue {
+class CallingThreadMailbox(_receiver: ActorCell, val mailboxType: MailboxType) extends Mailbox(_receiver, null) with DefaultSystemMessageQueue {
 
   private val q = new ThreadLocal[NestingQueue]() {
     override def initialValue = {
-      val queue = new NestingQueue
+      val queue = new NestingQueue(mailboxType.create(Some(actor)))
       CallingThreadDispatcherQueues(actor.system).registerQueue(CallingThreadMailbox.this, queue)
       queue
     }
@@ -285,11 +293,20 @@ class CallingThreadMailbox(_receiver: ActorCell) extends Mailbox(_receiver) with
 
   def queue = q.get
 
-  val lock = new ReentrantLock
+  val ctdLock = new ReentrantLock
   val suspendSwitch = new Switch
 
-  override def enqueue(receiver: ActorRef, msg: Envelope) {}
-  override def dequeue() = null
-  override def hasMessages = true
-  override def numberOfMessages = 0
+  override def cleanUp(): Unit = {
+    /*
+     * This is called from dispatcher.unregister, i.e. under this.lock. If
+     * another thread obtained a reference to this mailbox and enqueues after
+     * the gather operation, tough luck: no guaranteed delivery to deadLetters.
+     */
+    suspendSwitch.locked {
+      val q = queue
+      CallingThreadDispatcherQueues(actor.system).gatherFromAllOtherQueues(this, q)
+      super.cleanUp()
+      q.q.cleanUp(actor, actor.systemImpl.deadLetterQueue)
+    }
+  }
 }

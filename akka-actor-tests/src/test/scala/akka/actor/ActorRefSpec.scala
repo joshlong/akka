@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.actor
@@ -11,10 +11,10 @@ import akka.testkit._
 import akka.util.Timeout
 import akka.util.duration._
 import java.lang.IllegalStateException
-import akka.util.ReflectiveAccess
-import akka.serialization.Serialization
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
 import akka.dispatch.{ Await, DefaultPromise, Promise, Future }
+import akka.pattern.ask
+import akka.serialization.JavaSerializer
 
 object ActorRefSpec {
 
@@ -239,6 +239,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
 
     "be serializable using Java Serialization on local node" in {
       val a = system.actorOf(Props[InnerActor])
+      val esys = system.asInstanceOf[ExtendedActorSystem]
 
       import java.io._
 
@@ -250,14 +251,21 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
       out.flush
       out.close
 
-      Serialization.currentSystem.withValue(system.asInstanceOf[ActorSystemImpl]) {
-        val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
+      val bytes = baos.toByteArray
+
+      JavaSerializer.currentSystem.withValue(esys) {
+        val in = new ObjectInputStream(new ByteArrayInputStream(bytes))
         val readA = in.readObject
 
         a.isInstanceOf[LocalActorRef] must be === true
         readA.isInstanceOf[LocalActorRef] must be === true
         (readA eq a) must be === true
       }
+
+      val ser = new JavaSerializer(esys)
+      val readA = ser.fromBinary(bytes, None)
+      readA.isInstanceOf[LocalActorRef] must be === true
+      (readA eq a) must be === true
     }
 
     "throw an exception on deserialize if no system in scope" in {
@@ -281,23 +289,24 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
         " Use 'akka.serialization.Serialization.currentSystem.withValue(system) { ... }'"
     }
 
-    "must return deadLetters on deserialize if not present in actor hierarchy (and remoting is not enabled)" in {
+    "must return EmptyLocalActorRef on deserialize if not present in actor hierarchy (and remoting is not enabled)" in {
       import java.io._
 
       val baos = new ByteArrayOutputStream(8192 * 32)
       val out = new ObjectOutputStream(baos)
 
-      val addr = system.asInstanceOf[ActorSystemImpl].provider.rootPath.address
-      val serialized = SerializedActorRef(addr + "/non-existing")
+      val sysImpl = system.asInstanceOf[ActorSystemImpl]
+      val addr = sysImpl.provider.rootPath.address
+      val serialized = SerializedActorRef(RootActorPath(addr, "/non-existing"))
 
       out.writeObject(serialized)
 
       out.flush
       out.close
 
-      Serialization.currentSystem.withValue(system.asInstanceOf[ActorSystemImpl]) {
+      JavaSerializer.currentSystem.withValue(sysImpl) {
         val in = new ObjectInputStream(new ByteArrayInputStream(baos.toByteArray))
-        in.readObject must be === system.deadLetters
+        in.readObject must be === new EmptyLocalActorRef(sysImpl.provider, system.actorFor("/").path / "non-existing", system.eventStream)
       }
     }
 
@@ -334,7 +343,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
       clientRef ! "simple"
       clientRef ! "simple"
 
-      latch.await
+      Await.ready(latch, timeout.duration)
 
       latch.reset
 
@@ -343,7 +352,7 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
       clientRef ! "simple"
       clientRef ! "simple"
 
-      latch.await
+      Await.ready(latch, timeout.duration)
 
       system.stop(clientRef)
       system.stop(serverRef)
@@ -358,8 +367,8 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
         }
       }))
 
-      val ffive = (ref ? (5, timeout)).mapTo[String]
-      val fnull = (ref ? (null, timeout)).mapTo[String]
+      val ffive = (ref.ask(5)(timeout)).mapTo[String]
+      val fnull = (ref.ask(null)(timeout)).mapTo[String]
       ref ! PoisonPill
 
       Await.result(ffive, timeout.duration) must be("five")
@@ -370,9 +379,12 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
 
     "restart when Kill:ed" in {
       filterException[ActorKilledException] {
-        val latch = new CountDownLatch(2)
+        val latch = TestLatch(2)
 
         val boss = system.actorOf(Props(new Actor {
+
+          override val supervisorStrategy =
+            OneForOneStrategy(maxNrOfRetries = 2, withinTimeRange = 1 second)(List(classOf[Throwable]))
 
           val ref = context.actorOf(
             Props(new Actor {
@@ -382,10 +394,10 @@ class ActorRefSpec extends AkkaSpec with DefaultTimeout {
             }))
 
           protected def receive = { case "sendKill" ⇒ ref ! Kill }
-        }).withFaultHandler(OneForOneStrategy(List(classOf[Throwable]), 2, 1000)))
+        }))
 
         boss ! "sendKill"
-        latch.await(5, TimeUnit.SECONDS) must be === true
+        Await.ready(latch, 5 seconds)
       }
     }
   }

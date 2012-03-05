@@ -1,3 +1,6 @@
+/**
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.actor;
 
 //#imports
@@ -8,6 +11,8 @@ import akka.actor.Props;
 
 //#import-future
 import akka.dispatch.Future;
+import akka.dispatch.Futures;
+import akka.dispatch.Mapper;
 import akka.dispatch.Await;
 import akka.util.Duration;
 import akka.util.Timeout;
@@ -21,6 +26,29 @@ import static akka.actor.Actors.*;
 import akka.japi.Procedure;
 //#import-procedure
 
+//#import-watch
+import akka.actor.Terminated;
+//#import-watch
+
+//#import-gracefulStop
+import static akka.pattern.Patterns.gracefulStop;
+import akka.dispatch.Future;
+import akka.dispatch.Await;
+import akka.util.Duration;
+import akka.actor.ActorTimeoutException;
+//#import-gracefulStop
+
+//#import-askPipe
+import static akka.pattern.Patterns.ask;
+import static akka.pattern.Patterns.pipe;
+import akka.dispatch.Future;
+import akka.dispatch.Futures;
+import akka.util.Duration;
+import akka.util.Timeout;
+import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+//#import-askPipe
+
 import akka.actor.Props;
 import akka.actor.UntypedActor;
 import akka.actor.UntypedActorFactory;
@@ -29,7 +57,10 @@ import akka.dispatch.MessageDispatcher;
 import org.junit.Test;
 import scala.Option;
 import java.lang.Object;
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.concurrent.TimeUnit;
+import akka.pattern.Patterns;
 
 import static org.junit.Assert.*;
 
@@ -50,7 +81,6 @@ public class UntypedActorDocTestBase {
         return new MyUntypedActor();
       }
     });
-    Props props5 = props4.withTimeout(new Timeout(1000));
     //#creating-props-config
   }
 
@@ -93,16 +123,14 @@ public class UntypedActorDocTestBase {
   public void propsActorOf() {
     ActorSystem system = ActorSystem.create("MySystem");
     //#creating-props
-    MessageDispatcher dispatcher = system.dispatcherFactory().lookup("my-dispatcher");
-    ActorRef myActor = system.actorOf(new Props().withCreator(MyUntypedActor.class).withDispatcher(dispatcher),
-        "myactor");
+    ActorRef myActor = system.actorOf(new Props(MyUntypedActor.class).withDispatcher("my-dispatcher"), "myactor");
     //#creating-props
     myActor.tell("test");
     system.shutdown();
   }
 
   @Test
-  public void usingAsk() {
+  public void usingAsk() throws Exception {
     ActorSystem system = ActorSystem.create("MySystem");
     ActorRef myActor = system.actorOf(new Props(new UntypedActorFactory() {
       public UntypedActor create() {
@@ -111,7 +139,7 @@ public class UntypedActorDocTestBase {
     }), "myactor");
 
     //#using-ask
-    Future<Object> future = myActor.ask("Hello", 1000);
+    Future<Object> future = Patterns.ask(myActor, "Hello", 1000);
     Object result = Await.result(future, Duration.create(1, TimeUnit.SECONDS));
     //#using-ask
     system.shutdown();
@@ -156,6 +184,71 @@ public class UntypedActorDocTestBase {
     myActor.tell("foo");
     myActor.tell("bar");
     myActor.tell("bar");
+    system.shutdown();
+  }
+
+  @Test
+  public void useWatch() throws Exception {
+    ActorSystem system = ActorSystem.create("MySystem");
+    ActorRef myActor = system.actorOf(new Props(WatchActor.class));
+    Future<Object> future = Patterns.ask(myActor, "kill", 1000);
+    assert Await.result(future, Duration.parse("1 second")).equals("finished");
+    system.shutdown();
+  }
+
+  @Test
+  public void usePatternsGracefulStop() throws Exception {
+    ActorSystem system = ActorSystem.create("MySystem");
+    ActorRef actorRef = system.actorOf(new Props(MyUntypedActor.class));
+    //#gracefulStop
+
+    try {
+      Future<Boolean> stopped = gracefulStop(actorRef, Duration.create(5, TimeUnit.SECONDS), system);
+      Await.result(stopped, Duration.create(6, TimeUnit.SECONDS));
+      // the actor has been stopped
+    } catch (ActorTimeoutException e) {
+      // the actor wasn't stopped within 5 seconds
+    }
+    //#gracefulStop
+    system.shutdown();
+  }
+
+  class Result {
+    final int x;
+    final String s;
+
+    public Result(int x, String s) {
+      this.x = x;
+      this.s = s;
+    }
+  }
+
+  @Test
+  public void usePatternsAskPipe() {
+    ActorSystem system = ActorSystem.create("MySystem");
+    ActorRef actorA = system.actorOf(new Props(MyUntypedActor.class));
+    ActorRef actorB = system.actorOf(new Props(MyUntypedActor.class));
+    ActorRef actorC = system.actorOf(new Props(MyUntypedActor.class));
+    //#ask-pipe
+    final Timeout t = new Timeout(Duration.create(5, TimeUnit.SECONDS));
+
+    final ArrayList<Future<Object>> futures = new ArrayList<Future<Object>>();
+    futures.add(ask(actorA, "request", 1000)); // using 1000ms timeout
+    futures.add(ask(actorB, "reqeest", t)); // using timeout from above
+
+    final Future<Iterable<Object>> aggregate = Futures.sequence(futures, system.dispatcher());
+    
+    final Future<Result> transformed = aggregate.map(new Mapper<Iterable<Object>, Result>() {
+      public Result apply(Iterable<Object> coll) {
+        final Iterator<Object> it = coll.iterator();
+        final String s = (String) it.next();
+        final int x = (Integer) it.next();
+        return new Result(x, s);
+      }
+    });
+
+    pipe(transformed).to(actorC);
+    //#ask-pipe
     system.shutdown();
   }
 
@@ -244,9 +337,37 @@ public class UntypedActorDocTestBase {
         getContext().become(angry);
       } else if (message.equals("foo")) {
         getContext().become(happy);
+      } else {
+        unhandled(message);
       }
     }
   }
+
   //#hot-swap-actor
+
+  //#watch
+  public static class WatchActor extends UntypedActor {
+    final ActorRef child = this.getContext().actorOf(Props.empty(), "child");
+    {
+      this.getContext().watch(child); // <-- this is the only call needed for registration
+    }
+    ActorRef lastSender = getContext().system().deadLetters();
+
+    @Override
+    public void onReceive(Object message) {
+      if (message.equals("kill")) {
+        getContext().stop(child);
+        lastSender = getSender();
+      } else if (message instanceof Terminated) {
+        final Terminated t = (Terminated) message;
+        if (t.getActor() == child) {
+          lastSender.tell("finished");
+        }
+      } else {
+        unhandled(message);
+      }
+    }
+  }
+  //#watch
 
 }

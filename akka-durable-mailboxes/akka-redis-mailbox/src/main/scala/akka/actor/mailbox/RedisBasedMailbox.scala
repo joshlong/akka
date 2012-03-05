@@ -1,29 +1,39 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
 import com.redis._
-import akka.actor.LocalActorRef
 import akka.AkkaException
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.dispatch.Envelope
 import akka.event.Logging
 import akka.actor.ActorRef
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
+import akka.util.NonFatal
+import akka.config.ConfigurationException
+import akka.dispatch.MessageQueue
+import akka.actor.ActorSystem
 
 class RedisBasedMailboxException(message: String) extends AkkaException(message)
 
-class RedisBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with DurableMessageSerialization {
+class RedisBasedMailboxType(systemSettings: ActorSystem.Settings, config: Config) extends MailboxType {
+  private val settings = new RedisBasedMailboxSettings(systemSettings, config)
+  override def create(owner: Option[ActorContext]): MessageQueue = owner match {
+    case Some(o) ⇒ new RedisBasedMessageQueue(o, settings)
+    case None    ⇒ throw new ConfigurationException("creating a durable mailbox requires an owner (i.e. does not work with BalancingDispatcher)")
+  }
+}
 
-  private val settings = RedisBasedMailboxExtension(owner.system)
+class RedisBasedMessageQueue(_owner: ActorContext, val settings: RedisBasedMailboxSettings) extends DurableMessageQueue(_owner) with DurableMessageSerialization {
 
   @volatile
   private var clients = connect() // returns a RedisClientPool for multiple asynchronous message handling
 
-  val log = Logging(system, "RedisBasedMailbox")
+  val log = Logging(system, "RedisBasedMessageQueue")
 
   def enqueue(receiver: ActorRef, envelope: Envelope) {
-    log.debug("ENQUEUING message in redis-based mailbox [%s]".format(envelope))
     withErrorHandling {
       clients.withClient { client ⇒
         client.rpush(name, serialize(envelope))
@@ -34,15 +44,11 @@ class RedisBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with
   def dequeue(): Envelope = withErrorHandling {
     try {
       import serialization.Parse.Implicits.parseByteArray
-      val item = clients.withClient { client ⇒
-        client.lpop[Array[Byte]](name).getOrElse(throw new NoSuchElementException(name + " not present"))
-      }
-      val envelope = deserialize(item)
-      log.debug("DEQUEUING message in redis-based mailbox [%s]".format(envelope))
-      envelope
+      val item = clients.withClient { _.lpop[Array[Byte]](name).getOrElse(throw new NoSuchElementException(name + " not present")) }
+      deserialize(item)
     } catch {
       case e: java.util.NoSuchElementException ⇒ null
-      case e ⇒
+      case NonFatal(e) ⇒
         log.error(e, "Couldn't dequeue from Redis-based mailbox")
         throw e
     }
@@ -68,11 +74,13 @@ class RedisBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) with
         clients = connect()
         body
       }
-      case e ⇒
+      case NonFatal(e) ⇒
         val error = new RedisBasedMailboxException("Could not connect to Redis server, due to: " + e.getMessage)
         log.error(error, error.getMessage)
         throw error
     }
   }
+
+  def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = ()
 }
 

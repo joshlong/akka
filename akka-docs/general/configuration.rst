@@ -75,6 +75,24 @@ akka-testkit
 .. literalinclude:: ../../akka-testkit/src/main/resources/reference.conf
    :language: none
 
+akka-transactor
+~~~~~~~~~~~~~~~
+
+.. literalinclude:: ../../akka-transactor/src/main/resources/reference.conf
+   :language: none
+
+akka-agent
+~~~~~~~~~~
+
+.. literalinclude:: ../../akka-agent/src/main/resources/reference.conf
+   :language: none
+
+akka-zeromq
+~~~~~~~~~~~
+
+.. literalinclude:: ../../akka-zeromq/src/main/resources/reference.conf
+   :language: none
+
 akka-beanstalk-mailbox
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -172,11 +190,71 @@ More advanced include and substitution mechanisms are explained in the `HOCON <h
 specification.
 
 
-.. _-Dakka.logConfigOnStart:
+.. _-Dakka.log-config-on-start:
 
 Logging of Configuration
 ------------------------
 
-If the system or config property ``akka.logConfigOnStart`` is set to ``on``, then the
+If the system or config property ``akka.log-config-on-start`` is set to ``on``, then the
 complete configuration at INFO level when the actor system is started. This is useful
 when you are uncertain of what configuration is used.
+
+If in doubt, you can also easily and nicely inspect configuration objects
+before or after using them to construct an actor system:
+
+.. code-block:: scala
+
+  Welcome to Scala version 2.9.1.final (Java HotSpot(TM) 64-Bit Server VM, Java 1.6.0_27).
+  Type in expressions to have them evaluated.
+  Type :help for more information.
+
+  scala> import com.typesafe.config._
+  import com.typesafe.config._
+
+  scala> ConfigFactory.parseString("a.b=12")
+  res0: com.typesafe.config.Config = Config(SimpleConfigObject({"a" : {"b" : 12}}))
+
+  scala> res0.root.render
+  res1: java.lang.String =
+  {
+      # String: 1
+      "a" : {
+          # String: 1
+          "b" : 12
+      }
+  }
+
+The comments preceding every item give detailed information about the origin of
+the setting (file & line number) plus possible comments which were present,
+e.g. in the reference configuration. The settings as merged with the reference
+and parsed by the actor system can be displayed like this:
+
+.. code-block:: java
+
+  final ActorSystem system = ActorSystem.create();
+  println(system.settings());
+  // this is a shortcut for system.settings().config().root().render()
+
+A Word About ClassLoaders
+-------------------------
+
+In several places of the configuration file it is possible to specify the
+fully-qualified class name of something to be instantiated by Akka. This is
+done using Java reflection, which in turn uses a :class:`ClassLoader`. Getting
+the right one in challenging environments like application containers or OSGi
+bundles is not always trivial, the current approach of Akka is that each
+:class:`ActorSystem` implementation stores the current thread’s context class
+loader (if available, otherwise just its own loader as in
+``this.getClass.getClassLoader``) and uses that for all reflective accesses.
+This implies that putting Akka on the boot class path will yield
+:class:`NullPointerException` from strange places: this is simply not
+supported.
+
+Application specific settings
+-----------------------------
+
+The configuration can also be used for application specific settings.
+A good practice is to place those settings in an Extension, as described in:
+
+ * Scala API: :ref:`extending-akka-scala.settings`
+ * Java API: :ref:`extending-akka-java.settings`

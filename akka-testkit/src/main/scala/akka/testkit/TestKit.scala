@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.testkit
 
@@ -11,13 +11,19 @@ import java.util.concurrent.{ BlockingDeque, LinkedBlockingDeque, TimeUnit, atom
 import atomic.AtomicInteger
 import scala.annotation.tailrec
 import akka.actor.ActorSystem
+import akka.util.Timeout
 
 object TestActor {
   type Ignore = Option[PartialFunction[AnyRef, Boolean]]
 
+  trait AutoPilot {
+    def run(sender: ActorRef, msg: Any): Option[AutoPilot]
+  }
+
   case class SetIgnore(i: Ignore)
   case class Watch(ref: ActorRef)
   case class UnWatch(ref: ActorRef)
+  case class SetAutoPilot(ap: AutoPilot)
 
   trait Message {
     def msg: AnyRef
@@ -35,11 +41,15 @@ class TestActor(queue: BlockingDeque[TestActor.Message]) extends Actor {
 
   var ignore: Ignore = None
 
+  var autopilot: Option[AutoPilot] = None
+
   def receive = {
-    case SetIgnore(ign)   ⇒ ignore = ign
-    case x @ Watch(ref)   ⇒ context.watch(ref); queue.offerLast(RealMessage(x, self))
-    case x @ UnWatch(ref) ⇒ context.unwatch(ref); queue.offerLast(RealMessage(x, self))
+    case SetIgnore(ign)      ⇒ ignore = ign
+    case x @ Watch(ref)      ⇒ context.watch(ref); queue.offerLast(RealMessage(x, self))
+    case x @ UnWatch(ref)    ⇒ context.unwatch(ref); queue.offerLast(RealMessage(x, self))
+    case SetAutoPilot(pilot) ⇒ autopilot = Some(pilot)
     case x: AnyRef ⇒
+      autopilot = autopilot.flatMap(_.run(sender, x))
       val observe = ignore map (ignoreFunc ⇒ if (ignoreFunc isDefinedAt x) !ignoreFunc(x) else true) getOrElse true
       if (observe) queue.offerLast(RealMessage(x, sender))
   }
@@ -102,9 +112,9 @@ class TestKit(_system: ActorSystem) {
    * registration as message target.
    */
   lazy val testActor: ActorRef = {
-    val impl = system.asInstanceOf[ActorSystemImpl]
+    val impl = system.asInstanceOf[ActorSystemImpl] //TODO ticket #1559
     impl.systemActorOf(Props(new TestActor(queue))
-      .copy(dispatcher = new CallingThreadDispatcher(system.dispatcherFactory.prerequisites)),
+      .withDispatcher(CallingThreadDispatcher.Id),
       "testActor" + TestKit.testActorId.incrementAndGet)
   }
 
@@ -146,6 +156,13 @@ class TestKit(_system: ActorSystem) {
     testActor ! msg
     expectMsg(msg)
   }
+
+  /**
+   * Install an AutoPilot to drive the testActor: the AutoPilot will be run
+   * for each received message and can be used to send or forward messages,
+   * etc. Each invocation must return the AutoPilot for the next round.
+   */
+  def setAutoPilot(pilot: TestActor.AutoPilot): Unit = testActor ! TestActor.SetAutoPilot(pilot)
 
   /**
    * Obtain current time (`System.nanoTime`) as Duration.
@@ -644,5 +661,5 @@ trait ImplicitSender { this: TestKit ⇒
 }
 
 trait DefaultTimeout { this: TestKit ⇒
-  implicit val timeout = system.settings.ActorTimeout
+  implicit val timeout: Timeout = testKitSettings.DefaultTimeout
 }

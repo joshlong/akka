@@ -1,18 +1,15 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.testkit
 
 import akka.actor._
-import akka.util.{ ReflectiveAccess, Duration }
-import com.eaio.uuid.UUID
-import akka.actor.Props._
-import akka.actor.ActorSystem
+import akka.util.Duration
 import java.util.concurrent.atomic.AtomicLong
-import akka.event.EventStream
 import scala.collection.immutable.Stack
 import akka.dispatch._
+import akka.pattern.ask
 
 /**
  * This special ActorRef is exclusively for use during unit testing in a single-threaded environment. Therefore, it
@@ -30,21 +27,22 @@ class TestActorRef[T <: Actor](
   name: String)
   extends LocalActorRef(
     _system,
-    _props.withDispatcher(new CallingThreadDispatcher(_prerequisites)),
+    _props.withDispatcher(
+      if (_props.dispatcher == Dispatchers.DefaultDispatcherId) CallingThreadDispatcher.Id
+      else _props.dispatcher),
     _supervisor,
     _supervisor.path / name,
     false) {
 
-  private case object InternalGetActor extends AutoReceivedMessage
+  import TestActorRef.InternalGetActor
 
   override def newActorCell(
     system: ActorSystemImpl,
     ref: InternalActorRef,
     props: Props,
     supervisor: InternalActorRef,
-    receiveTimeout: Option[Duration],
-    hotswap: Stack[PartialFunction[Any, Unit]]): ActorCell =
-    new ActorCell(system, ref, props, supervisor, receiveTimeout, hotswap) {
+    receiveTimeout: Option[Duration]): ActorCell =
+    new ActorCell(system, ref, props, supervisor, receiveTimeout) {
       override def autoReceiveMessage(msg: Envelope) {
         msg.message match {
           case InternalGetActor ⇒ sender ! actor
@@ -58,7 +56,7 @@ class TestActorRef[T <: Actor](
    * thrown will be available to you, while still being able to use
    * become/unbecome.
    */
-  def apply(o: Any) { underlyingActor.apply(o) }
+  def receive(o: Any) { underlyingActor.apply(o) }
 
   /**
    * Retrieve reference to the underlying actor, where the static type matches the factory used inside the
@@ -70,8 +68,8 @@ class TestActorRef[T <: Actor](
     if (isTerminated) throw new IllegalActorStateException("underlying actor is terminated")
     underlying.actor.asInstanceOf[T] match {
       case null ⇒
-        val t = underlying.system.settings.ActorTimeout
-        Await.result(?(InternalGetActor)(t), t.duration).asInstanceOf[T]
+        val t = TestKitExtension(_system).DefaultTimeout
+        Await.result(this.?(InternalGetActor)(t), t.duration).asInstanceOf[T]
       case ref ⇒ ref
     }
   }
@@ -100,6 +98,8 @@ class TestActorRef[T <: Actor](
 
 object TestActorRef {
 
+  private case object InternalGetActor extends AutoReceivedMessage
+
   private val number = new AtomicLong
   private[testkit] def randomName: String = {
     val l = number.getAndIncrement()
@@ -116,13 +116,12 @@ object TestActorRef {
     apply[T](props, system.asInstanceOf[ActorSystemImpl].guardian, name)
 
   def apply[T <: Actor](props: Props, supervisor: ActorRef, name: String)(implicit system: ActorSystem): TestActorRef[T] =
-    new TestActorRef(system.asInstanceOf[ActorSystemImpl], system.dispatcherFactory.prerequisites, props, supervisor.asInstanceOf[InternalActorRef], name)
+    new TestActorRef(system.asInstanceOf[ActorSystemImpl], system.dispatchers.prerequisites, props, supervisor.asInstanceOf[InternalActorRef], name)
 
   def apply[T <: Actor](implicit m: Manifest[T], system: ActorSystem): TestActorRef[T] = apply[T](randomName)
 
   def apply[T <: Actor](name: String)(implicit m: Manifest[T], system: ActorSystem): TestActorRef[T] = apply[T](Props({
-    import ReflectiveAccess.{ createInstance, noParams, noArgs }
-    createInstance[T](m.erasure, noParams, noArgs) match {
+    system.asInstanceOf[ExtendedActorSystem].dynamicAccess.createInstanceFor[T](m.erasure, Seq()) match {
       case Right(value) ⇒ value
       case Left(exception) ⇒ throw new ActorInitializationException(null,
         "Could not instantiate Actor" +

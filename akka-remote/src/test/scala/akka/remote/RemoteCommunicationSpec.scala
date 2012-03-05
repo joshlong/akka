@@ -1,5 +1,5 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.remote
 
@@ -7,6 +7,7 @@ import akka.testkit._
 import akka.actor._
 import com.typesafe.config._
 import akka.dispatch.Await
+import akka.pattern.ask
 
 object RemoteCommunicationSpec {
   class Echo extends Actor {
@@ -30,11 +31,11 @@ object RemoteCommunicationSpec {
   }
 }
 
+@org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
 class RemoteCommunicationSpec extends AkkaSpec("""
 akka {
   actor.provider = "akka.remote.RemoteActorRefProvider"
-  cluster.nodename = Nonsense
-  remote.server {
+  remote.netty {
     hostname = localhost
     port = 12345
   }
@@ -44,11 +45,11 @@ akka {
     /looker/child/grandchild.remote = "akka://RemoteCommunicationSpec@localhost:12345"
   }
 }
-""") with ImplicitSender {
+""") with ImplicitSender with DefaultTimeout {
 
   import RemoteCommunicationSpec._
 
-  val conf = ConfigFactory.parseString("akka.remote.server.port=12346").withFallback(system.settings.config)
+  val conf = ConfigFactory.parseString("akka.remote.netty.port=12346").withFallback(system.settings.config)
   val other = ActorSystem("remote_sys", conf)
 
   val remote = other.actorOf(Props(new Actor {
@@ -58,8 +59,6 @@ akka {
   }), "echo")
 
   val here = system.actorFor("akka://remote_sys@localhost:12346/user/echo")
-
-  implicit val timeout = system.settings.ActorTimeout
 
   override def atTermination() {
     other.shutdown()
@@ -82,8 +81,8 @@ akka {
 
     "support ask" in {
       Await.result(here ? "ping", timeout.duration) match {
-        case ("pong", s: AskActorRef) ⇒ // good
-        case m                        ⇒ fail(m + " was not (pong, AskActorRef)")
+        case ("pong", s: akka.pattern.PromiseActorRef) ⇒ // good
+        case m                                         ⇒ fail(m + " was not (pong, AskActorRef)")
       }
     }
 
@@ -125,6 +124,8 @@ akka {
       myref ! 43
       expectMsg(43)
       lastSender must be theSameInstanceAs remref
+      r.asInstanceOf[RemoteActorRef].getParent must be(l)
+      system.actorFor("/user/looker/child") must be theSameInstanceAs r
       Await.result(l ? "child/..", timeout.duration).asInstanceOf[AnyRef] must be theSameInstanceAs l
       Await.result(system.actorFor(system / "looker" / "child") ? "..", timeout.duration).asInstanceOf[AnyRef] must be theSameInstanceAs l
     }

@@ -9,13 +9,17 @@ Java API
    untyped-actors
    typed-actors
    logging
+   event-bus
    scheduler
    futures
-   dataflow
    fault-tolerance
    dispatchers
    routing
    remoting
    serialization
-   extending-akka
+   stm
+   agents
    transactors
+   fsm
+   extending-akka
+   zeromq

@@ -1,23 +1,33 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.dispatch
 
 import java.util.Collection
-import java.util.concurrent.atomic.{ AtomicLong, AtomicInteger }
 import akka.util.Duration
-import java.util.concurrent._
+import akka.jsr166y._
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionHandler
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
 
 object ThreadPoolConfig {
-  type Bounds = Int
-  type FlowHandler = Either[SaneRejectedExecutionHandler, Bounds]
   type QueueFactory = () ⇒ BlockingQueue[Runnable]
 
   val defaultAllowCoreThreadTimeout: Boolean = false
   val defaultCorePoolSize: Int = 16
   val defaultMaxPoolSize: Int = 128
   val defaultTimeout: Duration = Duration(60000L, TimeUnit.MILLISECONDS)
+  val defaultRejectionPolicy: RejectedExecutionHandler = new SaneRejectedExecutionHandler()
 
   def scaledPoolSize(floor: Int, multiplier: Double, ceiling: Int): Int = {
     import scala.math.{ min, max }
@@ -56,7 +66,7 @@ trait ExecutorServiceFactory {
  * Generic way to specify an ExecutorService to a Dispatcher, create it with the given name if desired
  */
 trait ExecutorServiceFactoryProvider {
-  def createExecutorServiceFactory(name: String): ExecutorServiceFactory
+  def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory
 }
 
 /**
@@ -67,110 +77,115 @@ case class ThreadPoolConfig(allowCorePoolTimeout: Boolean = ThreadPoolConfig.def
                             maxPoolSize: Int = ThreadPoolConfig.defaultMaxPoolSize,
                             threadTimeout: Duration = ThreadPoolConfig.defaultTimeout,
                             queueFactory: ThreadPoolConfig.QueueFactory = ThreadPoolConfig.linkedBlockingQueue(),
-                            daemonic: Boolean = false)
+                            rejectionPolicy: RejectedExecutionHandler = ThreadPoolConfig.defaultRejectionPolicy)
   extends ExecutorServiceFactoryProvider {
   class ThreadPoolExecutorServiceFactory(val threadFactory: ThreadFactory) extends ExecutorServiceFactory {
     def createExecutorService: ExecutorService = {
-      val service = new ThreadPoolExecutor(corePoolSize, maxPoolSize, threadTimeout.length, threadTimeout.unit, queueFactory(), threadFactory, new SaneRejectedExecutionHandler)
+      val service: ThreadPoolExecutor = new ThreadPoolExecutor(
+        corePoolSize,
+        maxPoolSize,
+        threadTimeout.length,
+        threadTimeout.unit,
+        queueFactory(),
+        threadFactory,
+        rejectionPolicy) with LoadMetrics {
+        def atFullThrottle(): Boolean = this.getActiveCount >= this.getPoolSize
+      }
       service.allowCoreThreadTimeOut(allowCorePoolTimeout)
       service
     }
   }
-  final def createExecutorServiceFactory(name: String): ExecutorServiceFactory = new ThreadPoolExecutorServiceFactory(new MonitorableThreadFactory(name, daemonic))
+  final def createExecutorServiceFactory(id: String, threadFactory: ThreadFactory): ExecutorServiceFactory =
+    new ThreadPoolExecutorServiceFactory(threadFactory)
 }
 
-trait DispatcherBuilder {
-  def build: MessageDispatcher
-}
-
-object ThreadPoolConfigDispatcherBuilder {
-  def conf_?[T](opt: Option[T])(fun: (T) ⇒ ThreadPoolConfigDispatcherBuilder ⇒ ThreadPoolConfigDispatcherBuilder): Option[(ThreadPoolConfigDispatcherBuilder) ⇒ ThreadPoolConfigDispatcherBuilder] = opt map fun
+object ThreadPoolConfigBuilder {
+  def conf_?[T](opt: Option[T])(fun: (T) ⇒ ThreadPoolConfigBuilder ⇒ ThreadPoolConfigBuilder): Option[(ThreadPoolConfigBuilder) ⇒ ThreadPoolConfigBuilder] = opt map fun
 }
 
 /**
  * A DSL to configure and create a MessageDispatcher with a ThreadPoolExecutor
  */
-case class ThreadPoolConfigDispatcherBuilder(dispatcherFactory: (ThreadPoolConfig) ⇒ MessageDispatcher, config: ThreadPoolConfig) extends DispatcherBuilder {
+case class ThreadPoolConfigBuilder(config: ThreadPoolConfig) {
   import ThreadPoolConfig._
-  def build = dispatcherFactory(config)
 
-  def withNewThreadPoolWithCustomBlockingQueue(newQueueFactory: QueueFactory): ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithCustomBlockingQueue(newQueueFactory: QueueFactory): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = newQueueFactory))
 
-  def withNewThreadPoolWithCustomBlockingQueue(queue: BlockingQueue[Runnable]): ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithCustomBlockingQueue(queue: BlockingQueue[Runnable]): ThreadPoolConfigBuilder =
     withNewThreadPoolWithCustomBlockingQueue(reusableQueue(queue))
 
-  def withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity: ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity: ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = linkedBlockingQueue()))
 
-  def withNewThreadPoolWithLinkedBlockingQueueWithCapacity(capacity: Int): ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithLinkedBlockingQueueWithCapacity(capacity: Int): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = linkedBlockingQueue(capacity)))
 
-  def withNewThreadPoolWithSynchronousQueueWithFairness(fair: Boolean): ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithSynchronousQueueWithFairness(fair: Boolean): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = synchronousQueue(fair)))
 
-  def withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(capacity: Int, fair: Boolean): ThreadPoolConfigDispatcherBuilder =
+  def withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(capacity: Int, fair: Boolean): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = arrayBlockingQueue(capacity, fair)))
 
-  def setCorePoolSize(size: Int): ThreadPoolConfigDispatcherBuilder =
-    this.copy(config = config.copy(corePoolSize = size))
+  def setCorePoolSize(size: Int): ThreadPoolConfigBuilder =
+    if (config.maxPoolSize < size)
+      this.copy(config = config.copy(corePoolSize = size, maxPoolSize = size))
+    else
+      this.copy(config = config.copy(corePoolSize = size))
 
-  def setMaxPoolSize(size: Int): ThreadPoolConfigDispatcherBuilder =
-    this.copy(config = config.copy(maxPoolSize = size))
+  def setMaxPoolSize(size: Int): ThreadPoolConfigBuilder =
+    if (config.corePoolSize > size)
+      this.copy(config = config.copy(corePoolSize = size, maxPoolSize = size))
+    else
+      this.copy(config = config.copy(maxPoolSize = size))
 
-  def setCorePoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigDispatcherBuilder =
+  def setCorePoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigBuilder =
     setCorePoolSize(scaledPoolSize(min, multiplier, max))
 
-  def setMaxPoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigDispatcherBuilder =
+  def setMaxPoolSizeFromFactor(min: Int, multiplier: Double, max: Int): ThreadPoolConfigBuilder =
     setMaxPoolSize(scaledPoolSize(min, multiplier, max))
 
-  def setKeepAliveTimeInMillis(time: Long): ThreadPoolConfigDispatcherBuilder =
+  def setKeepAliveTimeInMillis(time: Long): ThreadPoolConfigBuilder =
     setKeepAliveTime(Duration(time, TimeUnit.MILLISECONDS))
 
-  def setKeepAliveTime(time: Duration): ThreadPoolConfigDispatcherBuilder =
+  def setKeepAliveTime(time: Duration): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(threadTimeout = time))
 
-  def setAllowCoreThreadTimeout(allow: Boolean): ThreadPoolConfigDispatcherBuilder =
+  def setAllowCoreThreadTimeout(allow: Boolean): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(allowCorePoolTimeout = allow))
 
-  def setQueueFactory(newQueueFactory: QueueFactory): ThreadPoolConfigDispatcherBuilder =
+  def setQueueFactory(newQueueFactory: QueueFactory): ThreadPoolConfigBuilder =
     this.copy(config = config.copy(queueFactory = newQueueFactory))
 
-  def configure(fs: Option[Function[ThreadPoolConfigDispatcherBuilder, ThreadPoolConfigDispatcherBuilder]]*): ThreadPoolConfigDispatcherBuilder = fs.foldLeft(this)((c, f) ⇒ f.map(_(c)).getOrElse(c))
+  def configure(fs: Option[Function[ThreadPoolConfigBuilder, ThreadPoolConfigBuilder]]*): ThreadPoolConfigBuilder = fs.foldLeft(this)((c, f) ⇒ f.map(_(c)).getOrElse(c))
 }
 
-class MonitorableThreadFactory(val name: String, val daemonic: Boolean = false) extends ThreadFactory {
+object MonitorableThreadFactory {
+  val doNothing: Thread.UncaughtExceptionHandler =
+    new Thread.UncaughtExceptionHandler() { def uncaughtException(thread: Thread, cause: Throwable) = () }
+}
+
+case class MonitorableThreadFactory(name: String,
+                                    daemonic: Boolean,
+                                    contextClassLoader: Option[ClassLoader],
+                                    exceptionHandler: Thread.UncaughtExceptionHandler = MonitorableThreadFactory.doNothing)
+  extends ThreadFactory with ForkJoinPool.ForkJoinWorkerThreadFactory {
   protected val counter = new AtomicLong
 
-  def newThread(runnable: Runnable) = {
-    val t = new MonitorableThread(runnable, name)
-    t.setDaemon(daemonic)
+  def newThread(pool: ForkJoinPool): ForkJoinWorkerThread = {
+    val t = wire(ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool))
+    // Name of the threads for the ForkJoinPool are not customizable. Change it here.
+    t.setName(name + "-" + counter.incrementAndGet())
     t
   }
-}
 
-object MonitorableThread {
-  val DEFAULT_NAME = "MonitorableThread".intern
+  def newThread(runnable: Runnable): Thread = wire(new Thread(runnable, name + "-" + counter.incrementAndGet()))
 
-  // FIXME use MonitorableThread.created and MonitorableThread.alive in monitoring
-  val created = new AtomicInteger
-  val alive = new AtomicInteger
-}
-
-class MonitorableThread(runnable: Runnable, name: String)
-  extends Thread(runnable, name + "-" + MonitorableThread.created.incrementAndGet) {
-
-  setUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
-    def uncaughtException(thread: Thread, cause: Throwable) = {}
-  })
-
-  override def run = {
-    try {
-      MonitorableThread.alive.incrementAndGet
-      super.run
-    } finally {
-      MonitorableThread.alive.decrementAndGet
-    }
+  protected def wire[T <: Thread](t: T): T = {
+    t.setUncaughtExceptionHandler(exceptionHandler)
+    t.setDaemon(daemonic)
+    contextClassLoader foreach t.setContextClassLoader
+    t
   }
 }
 
@@ -208,60 +223,14 @@ trait ExecutorServiceDelegate extends ExecutorService {
   def invokeAny[T](callables: Collection[_ <: Callable[T]], l: Long, timeUnit: TimeUnit) = executor.invokeAny(callables, l, timeUnit)
 }
 
+/**
+ * The RejectedExecutionHandler used by Akka, it improves on CallerRunsPolicy
+ * by throwing a RejectedExecutionException if the executor isShutdown.
+ * (CallerRunsPolicy silently discards the runnable in this case, which is arguably broken)
+ */
 class SaneRejectedExecutionHandler extends RejectedExecutionHandler {
   def rejectedExecution(runnable: Runnable, threadPoolExecutor: ThreadPoolExecutor): Unit = {
     if (threadPoolExecutor.isShutdown) throw new RejectedExecutionException("Shutdown")
     else runnable.run()
   }
 }
-
-/**
- * Commented out pending discussion with Doug Lea
- *
- * case class ForkJoinPoolConfig(targetParallelism: Int = Runtime.getRuntime.availableProcessors()) extends ExecutorServiceFactoryProvider {
- * final def createExecutorServiceFactory(name: String): ExecutorServiceFactory = new ExecutorServiceFactory {
- * def createExecutorService: ExecutorService = {
- * new ForkJoinPool(targetParallelism) with ExecutorService {
- * setAsyncMode(true)
- * setMaintainsParallelism(true)
- *
- * override final def execute(r: Runnable) {
- * r match {
- * case fjmbox: FJMailbox ⇒
- * //fjmbox.fjTask.reinitialize()
- * Thread.currentThread match {
- * case fjwt: ForkJoinWorkerThread if fjwt.getPool eq this ⇒
- * fjmbox.fjTask.fork() //We should do fjwt.pushTask(fjmbox.fjTask) but it's package protected
- * case _ ⇒ super.execute[Unit](fjmbox.fjTask)
- * }
- * case _ ⇒
- * super.execute(r)
- * }
- * }
- *
- * import java.util.{ Collection ⇒ JCollection }
- *
- * def invokeAny[T](callables: JCollection[_ <: Callable[T]]) =
- * throw new UnsupportedOperationException("invokeAny. NOT!")
- *
- * def invokeAny[T](callables: JCollection[_ <: Callable[T]], l: Long, timeUnit: TimeUnit) =
- * throw new UnsupportedOperationException("invokeAny. NOT!")
- *
- * def invokeAll[T](callables: JCollection[_ <: Callable[T]], l: Long, timeUnit: TimeUnit) =
- * throw new UnsupportedOperationException("invokeAny. NOT!")
- * }
- * }
- * }
- * }
- *
- * trait FJMailbox { self: Mailbox ⇒
- * final val fjTask = new ForkJoinTask[Unit] with Runnable {
- * private[this] var result: Unit = ()
- * final def getRawResult() = result
- * final def setRawResult(v: Unit) { result = v }
- * final def exec() = { self.run(); true }
- * final def run() { invoke() }
- * }
- * }
- *
- */

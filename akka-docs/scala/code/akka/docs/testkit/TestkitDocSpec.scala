@@ -1,21 +1,19 @@
+/**
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
+ */
 package akka.docs.testkit
 
 //#imports-test-probe
 import akka.testkit.TestProbe
-import akka.actor.Actor
-import akka.actor.ActorRef
-import akka.actor.Props
 import akka.util.duration._
+import akka.actor._
+import akka.dispatch.Futures
 
 //#imports-test-probe
 
 import akka.testkit.AkkaSpec
-import akka.actor.Actor
 import akka.testkit.DefaultTimeout
 import akka.testkit.ImplicitSender
-import akka.actor.ActorRef
-import akka.actor.Props
-
 object TestkitDocSpec {
   case object Say42
   case object Unknown
@@ -63,8 +61,7 @@ object TestkitDocSpec {
   class LoggingActor extends Actor {
     //#logging-receive
     import akka.event.LoggingReceive
-    implicit def system = context.system
-    def receive = LoggingReceive(this) {
+    def receive = LoggingReceive {
       case msg ⇒ // Do something...
     }
     //#logging-receive
@@ -92,10 +89,10 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
     val fsm = TestFSMRef(new Actor with FSM[Int, String] {
       startWith(1, "")
       when(1) {
-        case Ev("go") ⇒ goto(2) using "go"
+        case Event("go", _) ⇒ goto(2) using "go"
       }
       when(2) {
-        case Ev("back") ⇒ goto(1) using "back"
+        case Event("back", _) ⇒ goto(1) using "back"
       }
     })
 
@@ -122,6 +119,7 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
     import akka.testkit.TestActorRef
     import akka.util.duration._
     import akka.dispatch.Await
+    import akka.pattern.ask
 
     val actorRef = TestActorRef(new MyActor)
     // hypothetical message stimulating a '42' answer
@@ -133,10 +131,10 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
   "demonstrate unhandled message" in {
     //#test-unhandled
     import akka.testkit.TestActorRef
-    import akka.actor.UnhandledMessageException
-
+    system.eventStream.subscribe(testActor, classOf[UnhandledMessage])
     val ref = TestActorRef[MyActor]
-    intercept[UnhandledMessageException] { ref(Unknown) }
+    ref.receive(Unknown)
+    expectMsg(1 second, UnhandledMessage(Unknown, system.deadLetters, ref))
     //#test-unhandled
   }
 
@@ -149,7 +147,7 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
         case boom ⇒ throw new IllegalArgumentException("boom")
       }
     })
-    intercept[IllegalArgumentException] { actorRef("hello") }
+    intercept[IllegalArgumentException] { actorRef.receive("hello") }
     //#test-expecting-exceptions
   }
 
@@ -184,8 +182,8 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
     val actor = system.actorOf(Props[MyDoubleEcho])
     actor ! (probe1.ref, probe2.ref)
     actor ! "hello"
-    probe1.expectMsg(50 millis, "hello")
-    probe2.expectMsg(50 millis, "hello")
+    probe1.expectMsg(500 millis, "hello")
+    probe2.expectMsg(500 millis, "hello")
     //#test-probe
 
     //#test-special-probe
@@ -205,6 +203,7 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
   "demonstrate probe reply" in {
     import akka.testkit.TestProbe
     import akka.util.duration._
+    import akka.pattern.ask
     //#test-probe-reply
     val probe = TestProbe()
     val future = probe.ref ? "hello"
@@ -230,9 +229,27 @@ class TestkitDocSpec extends AkkaSpec with DefaultTimeout with ImplicitSender {
   "demonstrate " in {
     //#calling-thread-dispatcher
     import akka.testkit.CallingThreadDispatcher
-    val dispatcher = new CallingThreadDispatcher(system.dispatcherFactory.prerequisites)
-    val ref = system.actorOf(Props[MyActor].withDispatcher(dispatcher))
+    val ref = system.actorOf(Props[MyActor].withDispatcher(CallingThreadDispatcher.Id))
     //#calling-thread-dispatcher
+  }
+
+  "demonstrate EventFilter" in {
+    //#event-filter
+    import akka.testkit.EventFilter
+    import com.typesafe.config.ConfigFactory
+
+    implicit val system = ActorSystem("testsystem", ConfigFactory.parseString("""
+      akka.event-handlers = ["akka.testkit.TestEventListener"]
+      """))
+    try {
+      val actor = system.actorOf(Props.empty)
+      EventFilter[ActorKilledException](occurrences = 1) intercept {
+        actor ! Kill
+      }
+    } finally {
+      system.shutdown()
+    }
+    //#event-filter
   }
 
 }

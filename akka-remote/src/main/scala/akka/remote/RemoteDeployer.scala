@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.remote
 
@@ -8,31 +8,24 @@ import akka.routing._
 import com.typesafe.config._
 import akka.config.ConfigurationException
 
-case class RemoteScope(node: UnparsedSystemAddress[UnparsedTransportAddress]) extends Scope
+case class RemoteScope(node: Address) extends Scope {
+  def withFallback(other: Scope): Scope = this
+}
 
-class RemoteDeployer(_settings: ActorSystem.Settings) extends Deployer(_settings) {
+class RemoteDeployer(_settings: ActorSystem.Settings, _pm: DynamicAccess) extends Deployer(_settings, _pm) {
 
   override protected def parseConfig(path: String, config: Config): Option[Deploy] = {
     import scala.collection.JavaConverters._
-    import akka.util.ReflectiveAccess._
 
     super.parseConfig(path, config) match {
       case d @ Some(deploy) ⇒
         deploy.config.getString("remote") match {
-          case RemoteAddressExtractor(r) ⇒ Some(deploy.copy(scope = RemoteScope(r)))
+          case AddressFromURIString(r) ⇒ Some(deploy.copy(scope = RemoteScope(r)))
           case str ⇒
             if (!str.isEmpty) throw new ConfigurationException("unparseable remote node name " + str)
-            val nodes = deploy.config.getStringList("target.nodes").asScala
-            if (nodes.isEmpty || deploy.routing == NoRouter) d
-            else {
-              val r = deploy.routing match {
-                case RoundRobinRouter(x, _)                  ⇒ RemoteRoundRobinRouter(x, nodes)
-                case RandomRouter(x, _)                      ⇒ RemoteRandomRouter(x, nodes)
-                case BroadcastRouter(x, _)                   ⇒ RemoteBroadcastRouter(x, nodes)
-                case ScatterGatherFirstCompletedRouter(x, _) ⇒ RemoteScatterGatherFirstCompletedRouter(x, nodes)
-              }
-              Some(deploy.copy(routing = r))
-            }
+            val nodes = deploy.config.getStringList("target.nodes").asScala map (AddressFromURIString(_))
+            if (nodes.isEmpty || deploy.routerConfig == NoRouter) d
+            else Some(deploy.copy(routerConfig = RemoteRouterConfig(deploy.routerConfig, nodes)))
         }
       case None ⇒ None
     }

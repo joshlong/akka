@@ -8,8 +8,31 @@ import akka.util.Duration
 import akka.util.duration._
 import akka.testkit.DefaultTimeout
 import akka.dispatch.{ Await, PinnedDispatcher, Dispatchers, Dispatcher }
+import akka.pattern.ask
 
 object DispatcherActorSpec {
+  val config = """
+    test-dispatcher {
+    }
+    test-throughput-dispatcher {
+      throughput = 101
+      executor = "thread-pool-executor"
+      thread-pool-executor {
+        core-pool-size-min = 1
+        core-pool-size-max = 1
+      }
+    }
+    test-throughput-deadline-dispatcher {
+      throughput = 2
+      throughput-deadline-time = 100 milliseconds
+      executor = "thread-pool-executor"
+      thread-pool-executor {
+        core-pool-size-min = 1
+        core-pool-size-max = 1
+      }
+    }
+
+    """
   class TestActor extends Actor {
     def receive = {
       case "Hello"   ⇒ sender ! "World"
@@ -28,7 +51,7 @@ object DispatcherActorSpec {
 }
 
 @org.junit.runner.RunWith(classOf[org.scalatest.junit.JUnitRunner])
-class DispatcherActorSpec extends AkkaSpec with DefaultTimeout {
+class DispatcherActorSpec extends AkkaSpec(DispatcherActorSpec.config) with DefaultTimeout {
   import DispatcherActorSpec._
 
   private val unit = TimeUnit.MILLISECONDS
@@ -36,23 +59,20 @@ class DispatcherActorSpec extends AkkaSpec with DefaultTimeout {
   "A Dispatcher and an Actor" must {
 
     "support tell" in {
-      val actor = system.actorOf(Props[OneWayTestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
+      val actor = system.actorOf(Props[OneWayTestActor].withDispatcher("test-dispatcher"))
       val result = actor ! "OneWay"
       assert(OneWayTestActor.oneWay.await(1, TimeUnit.SECONDS))
       system.stop(actor)
     }
 
     "support ask/reply" in {
-      val actor = system.actorOf(Props[TestActor].withDispatcher(system.dispatcherFactory.newDispatcher("test").build))
+      val actor = system.actorOf(Props[TestActor].withDispatcher("test-dispatcher"))
       assert("World" === Await.result(actor ? "Hello", timeout.duration))
       system.stop(actor)
     }
 
     "respect the throughput setting" in {
-      val throughputDispatcher = system.dispatcherFactory.
-        newDispatcher("THROUGHPUT", 101, Duration.Zero, system.dispatcherFactory.MailboxType).
-        setCorePoolSize(1).
-        build
+      val throughputDispatcher = "test-throughput-dispatcher"
 
       val works = new AtomicBoolean(true)
       val latch = new CountDownLatch(100)
@@ -78,10 +98,8 @@ class DispatcherActorSpec extends AkkaSpec with DefaultTimeout {
 
     "respect throughput deadline" in {
       val deadline = 100 millis
-      val throughputDispatcher = system.dispatcherFactory.
-        newDispatcher("THROUGHPUT", 2, deadline, system.dispatcherFactory.MailboxType).
-        setCorePoolSize(1).
-        build
+      val throughputDispatcher = "test-throughput-deadline-dispatcher"
+
       val works = new AtomicBoolean(true)
       val latch = new CountDownLatch(1)
       val start = new CountDownLatch(1)

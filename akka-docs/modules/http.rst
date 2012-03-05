@@ -7,49 +7,16 @@ HTTP
 
    .. contents:: :local:
 
-When deploying in a servlet container:
---------------------------------------------
+Play2-mini
+----------
 
-If you deploy Akka in a JEE container, don't forget to create an Akka initialization and cleanup hook:
+The Akka team recommends the `Play2-mini <https://github.com/typesafehub/play2-mini>`_ framework when building RESTful
+service applications that integrates with Akka. It provides a REST API on top of `Play2 <https://github.com/playframework/Play20/>`_.
 
-.. code-block:: scala
+Getting started
+---------------
 
-  package com.my //<--- your own package
-  import akka.util.AkkaLoader
-  import akka.cluster.BootableRemoteActorService
-  import akka.actor.BootableActorLoaderService
-  import javax.servlet.{ServletContextListener, ServletContextEvent}
+First you must make your application aware of play-mini.
+In SBT you just have to add the following to your _libraryDependencies_::
 
-   /**
-    * This class can be added to web.xml mappings as a listener to start and postStop Akka.
-    *<web-app>
-    * ...
-    *  <listener>
-    *    <listener-class>com.my.Initializer</listener-class>
-    *  </listener>
-    * ...
-    *</web-app>
-    */
-  class Initializer extends ServletContextListener {
-     lazy val loader = new AkkaLoader
-     def contextDestroyed(e: ServletContextEvent): Unit = loader.shutdown
-     def contextInitialized(e: ServletContextEvent): Unit =
-       loader.boot(true, new BootableActorLoaderService with BootableRemoteActorService) //<--- Important
-  //     loader.boot(true, new BootableActorLoaderService {}) // If you don't need akka-remote
-   }
-
-For Java users, it's currently only possible to use BootableActorLoaderService, but you'll need to use: akka.actor.DefaultBootableActorLoaderService
-
-
-Then you just declare it in your web.xml:
-
-.. code-block:: xml
-
-  <web-app>
-  ...
-    <listener>
-      <listener-class>your.package.Initializer</listener-class>
-    </listener>
-  ...
-  </web-app>
-
+  libraryDependencies += "com.typesafe" %% "play-mini" % "<version-number>"

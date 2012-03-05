@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package akka.dispatch
@@ -11,49 +11,11 @@ import akka.util.Duration
 import java.util.concurrent._
 
 /**
- * Default settings are:
- * <pre/>
- *   - withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
- *   - NR_START_THREADS = 16
- *   - NR_MAX_THREADS = 128
- *   - KEEP_ALIVE_TIME = 60000L // one minute
- * </pre>
- * <p/>
+ * The event-based ``Dispatcher`` binds a set of Actors to a thread pool backed up by a
+ * `BlockingQueue`.
  *
- * The dispatcher has a fluent builder interface to build up a thread pool to suite your use-case.
- * There is a default thread pool defined but make use of the builder if you need it. Here are some examples.
- * <p/>
- *
- * Scala API.
- * <p/>
- * Example usage:
- * <pre/>
- *   val dispatcher = new Dispatcher("name")
- *   dispatcher
- *     .withNewThreadPoolWithBoundedBlockingQueue(100)
- *     .setCorePoolSize(16)
- *     .setMaxPoolSize(128)
- *     .setKeepAliveTime(60 seconds)
- *     .buildThreadPool
- * </pre>
- * <p/>
- *
- * Java API.
- * <p/>
- * Example usage:
- * <pre/>
- *   Dispatcher dispatcher = new Dispatcher("name");
- *   dispatcher
- *     .withNewThreadPoolWithBoundedBlockingQueue(100)
- *     .setCorePoolSize(16)
- *     .setMaxPoolSize(128)
- *     .setKeepAliveTime(60 seconds)
- *     .buildThreadPool();
- * </pre>
- * <p/>
- *
- * But the preferred way of creating dispatchers is to use
- * the {@link akka.dispatch.Dispatchers} factory object.
+ * The preferred way of creating dispatchers is to define configuration of it and use the
+ * the `lookup` method in [[akka.dispatch.Dispatchers]].
  *
  * @param throughput positive integer indicates the dispatcher will only process so much messages at a time from the
  *                   mailbox, without checking the mailboxes of other actors. Zero or negative means the dispatcher
@@ -62,7 +24,7 @@ import java.util.concurrent._
  */
 class Dispatcher(
   _prerequisites: DispatcherPrerequisites,
-  val name: String,
+  val id: String,
   val throughput: Int,
   val throughputDeadlineTime: Duration,
   val mailboxType: MailboxType,
@@ -70,10 +32,11 @@ class Dispatcher(
   val shutdownTimeout: Duration)
   extends MessageDispatcher(_prerequisites) {
 
-  protected[akka] val executorServiceFactory = executorServiceFactoryProvider.createExecutorServiceFactory(name)
-  protected[akka] val executorService = new AtomicReference[ExecutorService](new ExecutorServiceDelegate {
-    lazy val executor = executorServiceFactory.createExecutorService
-  })
+  protected val executorServiceFactory: ExecutorServiceFactory =
+    executorServiceFactoryProvider.createExecutorServiceFactory(id, prerequisites.threadFactory)
+
+  protected val executorService = new AtomicReference[ExecutorServiceDelegate](
+    new ExecutorServiceDelegate { lazy val executor = executorServiceFactory.createExecutorService })
 
   protected[akka] def dispatch(receiver: ActorCell, invocation: Envelope) = {
     val mbox = receiver.mailbox
@@ -96,13 +59,13 @@ class Dispatcher(
           executorService.get() execute invocation
         } catch {
           case e2: RejectedExecutionException ⇒
-            prerequisites.eventStream.publish(Warning("Dispatcher", e2.toString))
+            prerequisites.eventStream.publish(Warning("Dispatcher", this.getClass, e2.toString))
             throw e2
         }
     }
   }
 
-  protected[akka] def createMailbox(actor: ActorCell): Mailbox = mailboxType.create(actor)
+  protected[akka] def createMailbox(actor: ActorCell): Mailbox = new Mailbox(actor, mailboxType.create(Some(actor))) with DefaultSystemMessageQueue
 
   protected[akka] def shutdown: Unit =
     Option(executorService.getAndSet(new ExecutorServiceDelegate {
@@ -131,7 +94,7 @@ class Dispatcher(
     } else false
   }
 
-  override val toString = getClass.getSimpleName + "[" + name + "]"
+  override val toString = getClass.getSimpleName + "[" + id + "]"
 }
 
 object PriorityGenerator {

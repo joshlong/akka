@@ -1,5 +1,5 @@
 /**
- *  Copyright (C) 2009-2011 Typesafe Inc. <http://www.typesafe.com>
+ *  Copyright (C) 2009-2012 Typesafe Inc. <http://www.typesafe.com>
  */
 package akka.actor.mailbox
 
@@ -7,13 +7,26 @@ import akka.AkkaException
 import com.mongodb.async._
 import com.mongodb.async.futures.RequestFutures
 import org.bson.collection._
-import akka.actor.ActorCell
+import akka.actor.ActorContext
 import akka.event.Logging
 import akka.actor.ActorRef
-import akka.dispatch.{ Await, Promise, Envelope, DefaultPromise }
+import akka.dispatch.{ Await, Promise, Envelope }
 import java.util.concurrent.TimeoutException
+import akka.dispatch.MailboxType
+import com.typesafe.config.Config
+import akka.config.ConfigurationException
+import akka.dispatch.MessageQueue
+import akka.actor.ActorSystem
 
 class MongoBasedMailboxException(message: String) extends AkkaException(message)
+
+class MongoBasedMailboxType(systemSettings: ActorSystem.Settings, config: Config) extends MailboxType {
+  private val settings = new MongoBasedMailboxSettings(systemSettings, config)
+  override def create(owner: Option[ActorContext]): MessageQueue = owner match {
+    case Some(o) ⇒ new MongoBasedMessageQueue(o, settings)
+    case None    ⇒ throw new ConfigurationException("creating a durable mailbox requires an owner (i.e. does not work with BalancingDispatcher)")
+  }
+}
 
 /**
  * A "naive" durable mailbox which uses findAndRemove; it's possible if the actor crashes
@@ -26,20 +39,19 @@ class MongoBasedMailboxException(message: String) extends AkkaException(message)
  *
  * @author <a href="http://evilmonkeylabs.com">Brendan W. McAdams</a>
  */
-class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
+class MongoBasedMessageQueue(_owner: ActorContext, val settings: MongoBasedMailboxSettings) extends DurableMessageQueue(_owner) {
   // this implicit object provides the context for reading/writing things as MongoDurableMessage
-  implicit val mailboxBSONSer = new BSONSerializableMailbox(system)
+  implicit val mailboxBSONSer = new BSONSerializableMessageQueue(system)
   implicit val safeWrite = WriteConcern.Safe // TODO - Replica Safe when appropriate!
 
-  private val settings = MongoBasedMailboxExtension(owner.system)
+  private val dispatcher = owner.dispatcher
 
-  val log = Logging(system, "MongoBasedMailbox")
+  val log = Logging(system, "MongoBasedMessageQueue")
 
   @volatile
   private var mongo = connect()
 
   def enqueue(receiver: ActorRef, envelope: Envelope) {
-    log.debug("ENQUEUING message in mongodb-based mailbox [{}]", envelope)
     /* TODO - Test if a BSON serializer is registered for the message and only if not, use toByteString? */
     val durableMessage = MongoDurableMessage(ownerPathString, envelope.message, envelope.sender)
     // todo - do we need to filter the actor name at all for safe collection naming?
@@ -64,11 +76,9 @@ class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
     val envelopePromise = Promise[Envelope]()(dispatcher)
     mongo.findAndRemove(Document.empty) { doc: Option[MongoDurableMessage] ⇒
       doc match {
-        case Some(msg) ⇒ {
-          log.debug("DEQUEUING message in mongo-based mailbox [{}]", msg)
-          envelopePromise.success(msg.envelope())
-          log.debug("DEQUEUING messageInvocation in mongo-based mailbox [{}]", envelopePromise)
-        }
+        case Some(msg) ⇒
+          envelopePromise.success(msg.envelope(system))
+          ()
         case None ⇒
           log.info("No matching document found. Not an error, just an empty queue.")
           envelopePromise.success(null)
@@ -88,9 +98,8 @@ class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
   def hasMessages: Boolean = numberOfMessages > 0
 
   private[akka] def connect() = {
-    require(settings.MongoURI.isDefined, "Mongo URI (%s) must be explicitly defined in akka.conf; will not assume defaults for safety sake.".format(settings.UriConfigKey))
     log.info("CONNECTING mongodb uri : [{}]", settings.MongoURI)
-    val _dbh = MongoConnection.fromURI(settings.MongoURI.get) match {
+    val _dbh = MongoConnection.fromURI(settings.MongoURI) match {
       case (conn, None, None) ⇒ {
         throw new UnsupportedOperationException("You must specify a database name to use with MongoDB; please see the MongoDB Connection URI Spec: 'http://www.mongodb.org/display/DOCS/Connections'")
       }
@@ -126,4 +135,6 @@ class MongoBasedMailbox(val owner: ActorCell) extends DurableMailbox(owner) {
       }
     }
   }
+
+  def cleanUp(owner: ActorContext, deadLetters: MessageQueue): Unit = ()
 }
